@@ -1,0 +1,1242 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {exampleProject, git, here, lines, projectJson, run, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
+
+const repo = 'Example-Owner/example-project';
+// The issues' author, in the shape `gh issue list --json author` returns for the App.
+const author = {is_bot: true, login: 'app/example-agents'};
+const issue = (number, {state = 'OPEN', labels = []} = {}) =>
+  ({number, state, author, body: '', labels: labels.map(name => ({name}))});
+
+// A machine whose origin/main can run a ticket: the ticket-run skill, this branch's hook and publish-demos, a fake
+// demo-publish that records each publish in $DEMO_CALLS and each reindex in reindex-calls (and fails a publish when
+// $DEMO_FAIL is set), and a fake
+// security-review that records its arguments in security-calls, copies the runner's `current` file, says whether the session had run, and fails when
+// $SECURITY_FAIL is set. The fake `gh`
+// offers the issues given (issue #7 by default) and the open pull requests in pulls.json (none until a session opens
+// one), answers `issue create` with issue #90, and reports no stop-agents issue and no progress. The fake `claude`
+// session copies the runner's `current` file and the lock file and start time of the process it names, opens the pull requests in opened.json, if any, leaves a demo for PR
+// #77 and a folder without demo.json,
+// copies session-db.json, if any, to the containers the fake `docker` lists (as `local-db.sh up` would),
+// removes the worktree's scripts/git-hooks (as on a branch cut before the hook existed), commits once, records its
+// arguments, the hooks path its worktree sees and the gh calls made before it, runs the program $DURING_SESSION names
+// when that is set, and exits with $CLAUDE_EXIT (after printing $CLAUDE_SAYS) when that is set. `served` is the repository the gh routes answer for, and `options` go to
+// runnerSetup (the Triphammer config and the project file). The Triphammer config turns the demo and codex modules on unless `config`
+// says otherwise.
+function ticketSetup(t, issues = [issue(7)], {served = repo, files = {}, config = {}, ...options} = {}) {
+  const r = runnerSetup(t, {
+    ...options,
+    config: {MODULES: 'demo,codex', ...config},
+    files: {
+      'plugins/triphammer/skills/ticket-run/SKILL.md': 'run the ticket\n',
+      'scripts/local-db.sh': readFileSync(join(exampleProject, 'scripts/local-db.sh'), 'utf8'),
+      'scripts/git-hooks/commit-msg': readFileSync(join(here, '../scripts/git-hooks/commit-msg'), 'utf8'),
+      'bin/publish-demos': readFileSync(join(here, 'publish-demos'), 'utf8'),
+      'bin/demo-publish': `#!/bin/sh
+[ "$1" = --reindex ] && { echo reindex >> "$PROBE/reindex-calls"; exit 0; }
+printf '%s|' "$@" >> "$DEMO_CALLS"; echo >> "$DEMO_CALLS"
+[ -z "$DEMO_FAIL" ] || { echo "ffmpeg: conversion failed" >&2; exit 1; }
+[ -f "$4/demo.json" ] && echo "published PR #$1"
+`,
+      ...files,
+      'bin/security-review': `#!/bin/sh
+echo "$*" >> "$PROBE/security-calls"
+cp "$XDG_STATE_HOME/ticket-runner/current" "$PROBE/review-current" 2>/dev/null || true
+[ -f "$PROBE/claude-args" ] && echo "the session had run"
+[ -z "$SECURITY_FAIL" ] || { echo "gh: network down" >&2; exit 1; }
+`,
+    },
+    gh: {
+      [`issue list -R ${served} --state all --limit 1000`]: {file: 'issues.json'},
+      [`pr list -R ${served} --state open`]: {file: 'pulls.json'},
+      'issue create': {stdout: `https://github.com/${served}/issues/90\n`},
+    },
+    bin: {...(options.bin ?? {}),
+      claude: `#!/bin/sh
+printf '%s\\n' "$@" > "$PROBE/claude-args"
+printf '%s' "$TRIPHAMMER_SESSION" > "$PROBE/triphammer-session"
+printf '%s' "$GITHUB_APP_OWNER" > "$PROBE/app-owner"
+printf '%s' "$TRIPHAMMER_OWNER" > "$PROBE/triphammer-owner"
+cp "$XDG_STATE_HOME/ticket-runner/current" "$PROBE/current" 2>/dev/null || true
+pid="$(sed -n 's/^pid //p' "$PROBE/current" 2>/dev/null)"
+[ -z "$pid" ] || { readlink "/proc/$pid/fd/9" > "$PROBE/holder-lock"; cut -d')' -f2- "/proc/$pid/stat" | cut -d' ' -f21 > "$PROBE/holder-started"; }
+[ ! -f "$PROBE/opened.json" ] || cp "$PROBE/opened.json" "$PROBE/gh/pulls.json"
+[ ! -f "$PROBE/session-db.json" ] || cp "$PROBE/session-db.json" "$PROBE/docker/ps.json"
+mkdir -p artifacts/web-demo/results/risk-journey artifacts/web-demo/results/stray
+echo '{"pr": 77, "summary": "The risk panel shows the new greeks"}' > artifacts/web-demo/results/risk-journey/demo.json
+git config core.hooksPath > "$PROBE/hooks-path"
+rm -r scripts/git-hooks
+echo work > work.txt && git add work.txt && git commit -q -m "Do the work"
+git log -1 --format=%B > "$PROBE/message"
+cp "$PROBE/gh/calls" "$PROBE/calls-at-session"
+[ -z "$DURING_SESSION" ] || "$DURING_SESSION"
+[ -z "$CLAUDE_SAYS" ] || echo "$CLAUDE_SAYS"
+[ -z "$CLAUDE_EXIT" ] || exit "$CLAUDE_EXIT"
+`,
+    },
+  });
+  r.gh.json('issues.json', issues);
+  r.gh.json('pulls.json', []);
+  const ghCalls = r.gh.calls;
+  return {
+    ...r,
+    tick: (env = {}, args = []) =>
+      r.runTicketRunner(args, {DEMO_CALLS: join(r.root, 'demo-calls'), PROBE: r.root, ...env}),
+    worktree: join(r.checkout, '.worktrees/issue-7'),
+    demoCalls: () => lines(join(r.root, 'demo-calls')),
+    reindexCalls: () => lines(join(r.root, 'reindex-calls')),
+    securityCalls: () => lines(join(r.root, 'security-calls')),
+    probe: name => readFileSync(join(r.root, name), 'utf8'),
+    ghCalls,
+    creates: () => ghCalls().filter(call => call[0] === 'issue' && call[1] === 'create'),
+    ran: () => existsSync(join(r.root, 'claude-args')),
+    attemptsFile: join(r.root, 'state/ticket-runner/attempts/ticket-90'),
+    current: join(r.root, 'state/ticket-runner/current'),
+  };
+}
+
+test('after a session the runner publishes the demo it left, with its pull request number and summary', t => {
+  const r = ticketSetup(t);
+  r.tick();
+  const folder = join(r.worktree, 'artifacts/web-demo/results/risk-journey');
+  assert.deepEqual(r.demoCalls(), [`77|--summary|The risk panel shows the new greeks|${folder}|`]);
+  const log = r.log();
+  assert.match(log, /ticket #7: demo risk-journey: published PR #77/);
+  assert.match(log, /ticket #7: demo stray: no demo.json; not published/);
+  assert.match(log, /ticket #7: run 1 ended without progress/);
+});
+
+test('the demo is published before a run that progressed removes its worktree', t => {
+  const r = ticketSetup(t);
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  assert.match(r.log(), /ticket #7: demo risk-journey: published PR #77/);
+  assert.match(r.log(), /ticket #7: run 1 finished/);
+  assert.equal(existsSync(r.worktree), false);
+});
+
+test('a run that progressed stops its database before it removes its worktree', t => {
+  const r = ticketSetup(t);
+  const project = localDb(r.worktree);
+  writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[project, join(r.worktree, 'database')]]));  // local-db.sh up
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  assert.ok(r.docker.calls().some(call => call.startsWith(`${project}|compose --file `) && call.endsWith(' down --volumes --remove-orphans')));
+  assert.match(r.log(), new RegExp(`tore down ${r.worktree}:  Container ${project}-db-1  Removed\n`));
+  assert.equal(existsSync(r.worktree), false);
+});
+
+test('a failed publish is logged and the run carries on', t => {
+  const r = ticketSetup(t);
+  r.tick({DEMO_FAIL: '1'});
+  const log = r.log();
+  assert.match(log, /ticket #7: demo risk-journey: ffmpeg: conversion failed/);
+  assert.match(log, /ticket #7: demo risk-journey: demo-publish for PR #77 failed \(exit 1\)/);
+  assert.match(log, /ticket #7: run 1 ended without progress/);
+});
+
+test("the runner's worktrees run the main checkout's hooks even without their own copy", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  assert.equal(r.probe('hooks-path'), `${join(r.checkout, 'scripts/git-hooks')}\n`);
+  assert.equal(r.probe('message'), 'Do the work\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\n');
+  assert.throws(() => git(r.checkout, 'config', 'core.hooksPath'), 'the main checkout has no hooks path');
+});
+
+test("the session runs as the plugin's orchestrator agent on Opus", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  const args = r.probe('claude-args').split('\n');
+  assert.equal(args[args.indexOf('--agent') + 1], 'triphammer:orchestrator');
+  assert.equal(args[args.indexOf('--model') + 1], 'opus');
+  assert.match(r.probe('claude-args'), /Follow the triphammer:ticket-run skill\./);
+});
+
+test("the session gets the token of the App's installation on the served repository's account", t => {
+  const r = ticketSetup(t);
+  r.tick({GITHUB_APP_OWNER: 'someone-else'});
+  assert.equal(r.probe('app-owner'), 'Example-Owner');
+});
+
+test("the session is marked as Triphammer's, with its worktree as the place the agent guard lets it write", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  assert.equal(r.probe('triphammer-session'), r.worktree);
+});
+
+test("the session loads the Triphammer plugin from the main checkout, never from the run's worktree", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  const args = r.probe('claude-args').split('\n');
+  assert.equal(args.filter(arg => arg === '--plugin-dir').length, 1);
+  const plugin = args[args.indexOf('--plugin-dir') + 1];
+  assert.equal(plugin, join(r.checkout, 'plugins/triphammer'));
+  assert.ok(!plugin.startsWith(r.worktree), plugin);
+  assert.equal(readFileSync(join(plugin, 'skills/ticket-run/SKILL.md'), 'utf8'), 'run the ticket\n');
+});
+
+test("a project that is another repository runs under Triphammer's plugin, and its worktree's commits run Triphammer's hooks", t => {
+  const r = ticketSetup(t);
+  const project = r.separateProject();
+  for (const path of ['plugins', 'scripts/git-hooks', 'scripts/land-pr.sh']) assert.equal(existsSync(join(project.checkout, path)), false, path);
+  r.tick();
+  const worktree = join(project.checkout, '.worktrees/issue-7');
+  assert.equal(r.probe('triphammer-session'), worktree, "the session runs in the project's worktree");
+  const args = r.probe('claude-args').split('\n');
+  assert.equal(args[args.indexOf('--plugin-dir') + 1], join(r.checkout, 'plugins/triphammer'));
+  assert.equal(r.probe('hooks-path'), `${join(r.checkout, 'scripts/git-hooks')}\n`);
+  assert.equal(r.probe('message'), 'Do the work\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n\n');
+  assert.equal(existsSync(join(r.checkout, '.worktrees')), false, "Triphammer's checkout gets no worktree");
+});
+
+test("a project that is another repository starts no session until Triphammer's main has the ticket-run skill", t => {
+  const r = ticketSetup(t, [issue(7)], {files: {'plugins/triphammer/skills/ticket-run/SKILL.md': null}});
+  r.separateProject({'.triphammer/project.json': projectJson,
+    'plugins/triphammer/skills/ticket-run/SKILL.md': "the project's own copy\n"});
+  r.tick();
+  assert.equal(r.ran(), false);
+});
+
+test('a main without the plugin\'s ticket-run skill starts no session', t => {
+  const r = ticketSetup(t, [issue(7)], {files: {'plugins/triphammer/skills/ticket-run/SKILL.md': null}});
+  r.tick();
+  assert.equal(r.ran(), false);
+});
+
+// Weekly upkeep.
+const isoDaysAgo = days => new Date(Date.now() - days * 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+const upkeepIssue = (number, days, state) =>
+  ({...issue(number, {state, labels: ['upkeep']}), createdAt: isoDaysAgo(days)});
+const flagValue = (call, flag) => call[call.indexOf(flag) + 1];
+
+test('with no upkeep issue in the last 7 days and nothing else to do, a tick opens one and runs it', t => {
+  const r = ticketSetup(t, [upkeepIssue(5, 8, 'CLOSED')]);
+  const before = new Date().toISOString().slice(0, 10);
+  r.tick();
+  const after = new Date().toISOString().slice(0, 10);
+  const creates = r.creates();
+  assert.equal(creates.length, 1);
+  assert.ok([`Upkeep: week of ${before}`, `Upkeep: week of ${after}`].includes(flagValue(creates[0], '--title')));
+  assert.equal(flagValue(creates[0], '--label'), 'upkeep');
+  assert.match(flagValue(creates[0], '--body'), /`triphammer:upkeep` skill/);
+  assert.ok(r.ghCalls().some(call => call.slice(0, 3).join(' ') === 'label create upkeep'), 'the label exists');
+  const args = r.probe('claude-args');
+  assert.match(args, /Run issue #90 of Example-Owner\/example-project unattended/);
+  assert.match(r.log(), /#90: opened Upkeep: week of/);
+});
+
+test('the stop file and a stop-agents issue stop the upkeep action', t => {
+  const stopped = ticketSetup(t, []);
+  mkdirSync(join(stopped.root, 'state/ticket-runner'), {recursive: true});
+  writeFileSync(join(stopped.root, 'state/ticket-runner/stop'), '');
+  stopped.tick();
+  const paused = ticketSetup(t, []);
+  paused.gh.respond({[`issue list -R ${repo} --state open --label stop-agents`]: {stdout: '99\n'}});
+  paused.tick();
+  for (const r of [stopped, paused]) {
+    assert.deepEqual(r.creates(), []);
+    assert.equal(r.ran(), false);
+  }
+});
+
+test('--plan prints the upkeep action and creates nothing', t => {
+  const r = ticketSetup(t, []);
+  assert.equal(r.tick({}, ['--plan']).trim(), 'upkeep');
+  assert.deepEqual(r.creates(), []);
+  assert.ok(!r.ghCalls().some(call => call[0] === 'label'));
+  assert.equal(r.ran(), false);
+});
+
+test('an upkeep run that closes its issue is not a run without progress; one that leaves it open is', t => {
+  const closes = ticketSetup(t, []);
+  mkdirSync(join(closes.root, 'state/ticket-runner/attempts'), {recursive: true});
+  writeFileSync(closes.attemptsFile, '2\n');  // as if two runs had already ended without progress
+  closes.gh.respond({'issue view 90': {stdout: 'yes\n'}});
+  closes.tick();
+  assert.match(closes.log(), /ticket #90: run 3 finished/);
+  assert.equal(existsSync(closes.attemptsFile), false);
+  assert.ok(!closes.ghCalls().some(call => call.includes('--add-label') && call.includes('needs-owner')), 'no needs-owner');
+
+  const open = ticketSetup(t, []);
+  mkdirSync(join(open.root, 'state/ticket-runner/attempts'), {recursive: true});
+  writeFileSync(open.attemptsFile, '2\n');
+  open.tick();
+  assert.match(open.log(), /ticket #90: run 3 ended without progress/);
+  assert.ok(open.ghCalls().some(call => call.join(' ') === `issue edit 90 -R ${repo} --add-label needs-owner`));
+});
+
+// The progress check after a run: an open pull request GitHub links as closing the issue (closingIssuesReferences).
+
+const linked = (owner, name, number) =>
+  ({number: 70, body: '', closingIssuesReferences: [{id: 'I_1', number, url: `https://github.com/${owner}/${name}/issues/${number}`,
+    repository: {id: 'R_1', name, owner: {id: 'U_1', login: owner}}}]});
+function tickOpening(t, opened) {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'opened.json'), JSON.stringify(opened));
+  r.tick();
+  return r;
+}
+
+test('a run that opened a pull request GitHub links to the issue made progress, in this repository whatever the case', t => {
+  for (const [owner, name] of [['Example-Owner', 'example-project'], ['example-owner', 'example-project']]) {
+    const r = tickOpening(t, [linked(owner, name, 7)]);
+    assert.match(r.log(), /ticket #7: run 1 finished/, `${owner}/${name}`);
+    assert.equal(existsSync(r.worktree), false);
+    assert.ok(!r.ghCalls().some(call => call.slice(0, 2).join(' ') === 'issue comment'), 'no "no progress" comment');
+  }
+});
+
+test("a run whose only pull request closes another repository's #N, or a different issue, made no progress", t => {
+  for (const opened of [[linked('other', 'repo', 7)], [linked('Example-Owner', 'example-project', 77)],
+    [{number: 70, body: 'Closes #7', closingIssuesReferences: []}]]) {
+    const r = tickOpening(t, opened);
+    assert.match(r.log(), /ticket #7: run 1 ended without progress/, JSON.stringify(opened));
+  }
+});
+
+// The advisory security review after the session (bin/security-review).
+
+test('after the session and its demos the runner security-reviews the pull request the session opened', t => {
+  const r = tickOpening(t, [linked('Example-Owner', 'example-project', 7)]);
+  assert.deepEqual(r.securityCalls(), [`--pr 70 --repo ${r.checkout}`]);
+  const log = r.log();
+  assert.match(log, /ticket #7: security review of #70: the session had run\n/);
+  assert.ok(log.indexOf('demo risk-journey') < log.indexOf('security review of #70'), 'after the demos are published');
+});
+
+test('a ticket run with no pull request closing its issue runs no security review', t => {
+  const r = tickOpening(t, [linked('Example-Owner', 'example-project', 77)]);
+  assert.deepEqual(r.securityCalls(), []);
+});
+
+test('a failed security review is logged and the run carries on', t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'opened.json'), JSON.stringify([linked('Example-Owner', 'example-project', 7)]));
+  r.tick({SECURITY_FAIL: '1'});
+  const log = r.log();
+  assert.match(log, /ticket #7: security review of #70: gh: network down\n/);
+  assert.match(log, /ticket #7: security review of #70 failed\n/);
+  assert.match(log, /ticket #7: run 1 finished/);
+});
+
+// The Triphammer config's optional modules (bin/README.md, "Configuration").
+
+// A ticket run whose session opens pull request #70, closing #7, with `modules` as the config's MODULES (null for none).
+function tickWithModules(t, modules) {
+  const r = ticketSetup(t, [issue(7)], {config: {MODULES: modules}});
+  writeFileSync(join(r.root, 'opened.json'), JSON.stringify([linked('Example-Owner', 'example-project', 7)]));
+  r.tick();
+  return r;
+}
+
+test('with every module off a ticket run publishes no demo, reviews nothing, and logs nothing about either', t => {
+  for (const modules of [null, '']) {
+    const r = tickWithModules(t, modules);
+    assert.deepEqual(r.reindexCalls(), [], 'no gallery reindex');
+    assert.deepEqual(r.demoCalls(), [], 'no publish');
+    assert.deepEqual(r.securityCalls(), [], 'no security review');
+    const log = r.log();
+    assert.match(log, /ticket #7: run 1 finished/, 'the pull request still counts as progress');
+    assert.doesNotMatch(log, /demo|gallery|publish|security|review/i);
+    assert.match(r.probe('claude-args'), /This is run 1 of 3\. No module is on\. Follow/);
+  }
+});
+
+test('with one module on, only its steps run, and the session prompt names it', t => {
+  const demo = tickWithModules(t, 'demo');
+  assert.deepEqual(demo.reindexCalls(), ['reindex']);
+  assert.equal(demo.demoCalls().length, 1);
+  assert.deepEqual(demo.securityCalls(), []);
+  assert.doesNotMatch(demo.log(), /security/i);
+  assert.match(demo.probe('claude-args'), /Modules on: demo\. Follow/);
+
+  const codex = tickWithModules(t, 'codex');
+  assert.deepEqual(codex.reindexCalls(), []);
+  assert.deepEqual(codex.demoCalls(), []);
+  assert.deepEqual(codex.securityCalls(), [`--pr 70 --repo ${codex.checkout}`]);
+  assert.doesNotMatch(codex.log(), /demo|gallery|publish/i);
+  assert.match(codex.probe('claude-args'), /Modules on: codex\. Follow/);
+
+  const qwen = tickWithModules(t, 'qwen-audit');
+  assert.deepEqual(qwen.reindexCalls(), []);
+  assert.deepEqual(qwen.demoCalls(), []);
+  assert.deepEqual(qwen.securityCalls(), []);
+  assert.doesNotMatch(qwen.log(), /demo|gallery|publish|security|review/i);
+  assert.match(qwen.probe('claude-args'), /Modules on: qwen-audit\. Follow/);
+
+  const all = tickWithModules(t, 'codex,demo,qwen-audit');
+  assert.match(all.probe('claude-args'), /Modules on: codex, demo, qwen-audit\. Follow/);
+});
+
+test('a repair prompt names the modules too', t => {
+  const r = repairSetup(t);
+  r.tick();
+  assert.match(r.probe('claude-args'), /This is run 1 of 3\. Modules on: demo, codex\. Follow the 'Repair a pull request' section/);
+});
+
+test('a repair prompt names the owner, the owner part of REPO by default and OWNER when the config sets it', t => {
+  const r = repairSetup(t);
+  r.tick();
+  assert.match(r.probe('claude-args'), /reason conflicts\. The owner is Example-Owner\. You are/);
+  const set = repairSetup(t, {config: {OWNER: 'example-person'}});
+  set.tick();
+  assert.match(set.probe('claude-args'), /reason conflicts\. The owner is example-person\. You are/);
+});
+
+// The owner the runner acts for (the config's OWNER), in a repository an organization owns.
+const org = 'Example-Org/example-project';
+const byPerson = number => ({...issue(number), author: {is_bot: false, login: 'example-person'}});
+
+test('with OWNER unset in a repository an organization owns, the runner refuses to plan and names the setting', t => {
+  const r = ticketSetup(t, [byPerson(7)], {served: org, config: {REPO: org}});
+  r.gh.respond({'api users/Example-Org': {stdout: 'Organization\n'}});
+  for (const args of [['--plan'], []]) {
+    assert.throws(() => r.tick({}, args), error => error.status === 2
+      && error.stderr.includes(`Example-Org, the owner part of REPO, is an organization; set OWNER in ${r.configFile}`));
+  }
+  assert.ok(!r.ghCalls().some(call => call.includes('number,state,author,body,labels,createdAt')), 'it reads no issue list');
+  assert.equal(r.ran(), false);
+});
+
+test('OWNER set to a person is the owner the runner plans for, in a repository an organization owns', t => {
+  const r = ticketSetup(t, [byPerson(7)], {served: org, config: {REPO: org, OWNER: 'example-person'}});
+  r.gh.respond({'api users/Example-Org': {stdout: 'Organization\n'}});
+  assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7');
+  assert.ok(r.ghCalls().some(call => call.join(' ') === 'api users/example-person --jq .type'));
+});
+
+test('OWNER set to an organization, or an owner GitHub cannot look up, refuses to plan', t => {
+  const org1 = ticketSetup(t, [byPerson(7)], {served: org, config: {REPO: org, OWNER: 'Example-Org'}});
+  org1.gh.respond({'api users/Example-Org': {stdout: 'Organization\n'}});
+  assert.throws(() => org1.tick({}, ['--plan']), error => error.status === 2
+    && error.stderr.includes(`OWNER in ${org1.configFile} is Example-Org, an organization`));
+  const lost = ticketSetup(t, [byPerson(7)], {config: {OWNER: 'example-person'}});
+  lost.gh.respond({'api users/': {stderr: 'gh: network down\n', exit: 1}});
+  assert.throws(() => lost.tick({}, ['--plan']), error => error.status === 1
+    && error.stderr.includes('could not look up the owner, example-person, on GitHub; not planning'));
+});
+
+test("the session's environment carries the owner as TRIPHAMMER_OWNER, the login land-pr requests a review from", t => {
+  const r = ticketSetup(t);
+  r.tick({TRIPHAMMER_OWNER: 'stale-login'});
+  assert.equal(r.probe('triphammer-owner'), 'Example-Owner', 'OWNER unset: the owner part of REPO');
+  const set = ticketSetup(t, [byPerson(7)], {served: org, config: {REPO: org, OWNER: 'example-person'}});
+  set.gh.respond({'api users/Example-Org': {stdout: 'Organization\n'}});
+  set.tick({TRIPHAMMER_OWNER: 'stale-login'});
+  assert.equal(set.probe('triphammer-owner'), 'example-person', 'OWNER set: that login, not the organization');
+});
+
+test("on a personal repository with OWNER unset, the runner looks up REPO's owner and takes that owner's issues", t => {
+  const r = ticketSetup(t, [{...issue(7), author: {is_bot: false, login: 'Example-Owner'}}]);
+  assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7');
+  assert.ok(r.ghCalls().some(call => call.join(' ') === 'api users/Example-Owner --jq .type'));
+});
+
+// The `current` file merge-when-ready reads while the runner holds its lock.
+
+// The `key value` lines of a current file.
+const currentFields = text => Object.fromEntries(text.split('\n').filter(Boolean).map(line => {
+  const at = line.indexOf(' ');
+  return [line.slice(0, at), line.slice(at + 1)];
+}));
+
+test('a ticket run writes current before the session starts and removes it after the session ends', t => {
+  const r = ticketSetup(t);
+  r.tick();
+  const {pid, started, ...run} = currentFields(r.probe('current'));
+  assert.match(pid, /^\d+$/);
+  assert.equal(r.probe('holder-lock'), `${join(r.root, 'state/ticket-runner/lock')}\n`, 'it names the process holding the lock');
+  assert.equal(r.probe('holder-started'), `${started}\n`, 'with that process\'s start time');
+  assert.deepEqual(run, {kind: 'ticket', number: '7', branch: 'ticket/7', prs: ''});
+  assert.equal(existsSync(r.current), false);
+});
+
+test('a run that fails after the session still removes current', t => {
+  const r = ticketSetup(t);
+  r.gh.respond({'issue view 7': {stderr: 'gh: network down\n', exit: 1}});
+  assert.throws(() => r.tick());
+  assert.equal(currentFields(r.probe('current')).kind, 'ticket', 'it was written for the session');
+  assert.equal(existsSync(r.current), false);
+});
+
+// A machine whose next tick repairs pull request #40 (branch ticket/30, which closes #30) for its conflicts; `options` go to
+// ticketSetup.
+function repairSetup(t, options = {}) {
+  const r = ticketSetup(t, [issue(30)], options);
+  const publisher = join(r.root, 'publisher');
+  git(publisher, 'checkout', '-q', '-b', 'ticket/30');
+  git(publisher, 'push', '-q', 'origin', 'ticket/30');
+  r.gh.json('pulls.json', [{
+    number: 40, author: {login: 'app/example-agents'}, isDraft: false, labels: [], mergeStateStatus: 'DIRTY',
+    statusCheckRollup: [], reviews: [], commits: [], closingIssuesReferences: [{number: 30,
+      repository: {name: 'example-project', owner: {login: 'Example-Owner'}}}],
+  }]);
+  r.gh.respond({[`pr view 40 -R ${repo} --json headRefName`]: {stdout: 'ticket/30\n'}});
+  return r;
+}
+
+test('a repair run names the pull request it repairs in current', t => {
+  const r = repairSetup(t);
+  r.tick();
+  const {kind, number, branch, prs} = currentFields(r.probe('current'));
+  assert.deepEqual({kind, number, branch, prs}, {kind: 'repair', number: '40', branch: 'ticket/30', prs: '40'});
+  assert.equal(existsSync(r.current), false);
+  assert.deepEqual(r.securityCalls(), [`--pr 40 --repo ${r.checkout}`], 'the repaired pull request is security-reviewed');
+});
+
+test('during the security review current still names the live runner but none of its pull requests or its branch', t => {
+  const r = ticketSetup(t, [{number: 30, state: 'OPEN', body: '', labels: []}]);
+  const publisher = join(r.root, 'publisher');
+  git(publisher, 'checkout', '-q', '-b', 'ticket/30');
+  git(publisher, 'push', '-q', 'origin', 'ticket/30');
+  r.gh.json('pulls.json', [{
+    number: 40, author: {login: 'app/example-agents'}, isDraft: false, labels: [], mergeStateStatus: 'DIRTY',
+    statusCheckRollup: [], reviews: [], commits: [], closingIssuesReferences: [{number: 30,
+      repository: {name: 'example-project', owner: {login: 'Example-Owner'}}}],
+  }]);
+  r.gh.respond({[`pr view 40 -R ${repo} --json headRefName`]: {stdout: 'ticket/30\n'}});
+  r.tick();
+  const session = currentFields(r.probe('current'));
+  const review = currentFields(r.probe('review-current'));
+  assert.deepEqual(r.securityCalls(), [`--pr 40 --repo ${r.checkout}`]);
+  assert.deepEqual({pid: review.pid, started: review.started, kind: review.kind, number: review.number},
+    {pid: session.pid, started: session.started, kind: 'repair', number: '40'}, 'merge-when-ready still sees the live runner');
+  assert.equal(review.prs, '', 'merge-when-ready may update the reviewed pull request');
+  assert.notEqual(review.branch, 'ticket/30', 'nor matches it by its branch');
+  assert.match(review.branch, /^[A-Za-z0-9._/-]+$/, 'merge-when-ready can still read the file');
+  assert.equal(existsSync(r.current), false);
+});
+
+// The `agent-working` label on the run's own issue or pull request.
+
+const labelCalls = calls => calls.map(call => call.join(' ')).filter(call => call.includes('agent-working') && call.includes(' edit '));
+const labelCallsAtSession = r => labelCalls(lines(join(r.root, 'calls-at-session')).map(line => JSON.parse(line)));
+
+test('a ticket run labels its issue agent-working while the session runs, and never the pull request it opens', t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'opened.json'), JSON.stringify([linked('Example-Owner', 'example-project', 7)]));
+  r.tick();
+  assert.deepEqual(labelCallsAtSession(r), [`issue edit 7 -R ${repo} --add-label agent-working`]);
+  assert.deepEqual(labelCalls(r.ghCalls()),
+    [`issue edit 7 -R ${repo} --add-label agent-working`, `issue edit 7 -R ${repo} --remove-label agent-working`]);
+  assert.match(r.log(), /issue #7: added agent-working[^]*ticket #7: run 1 finished[^]*issue #7: removed agent-working/);
+});
+
+test('a repair run labels its pull request agent-working while the session runs', t => {
+  const r = repairSetup(t);
+  r.tick();
+  assert.deepEqual(labelCallsAtSession(r), [`pr edit 40 -R ${repo} --add-label agent-working`]);
+  assert.deepEqual(labelCalls(r.ghCalls()),
+    [`pr edit 40 -R ${repo} --add-label agent-working`, `pr edit 40 -R ${repo} --remove-label agent-working`]);
+  assert.match(r.log(), /pr #40: added agent-working[^]*pr #40: removed agent-working/);
+});
+
+test('the label comes off after a failing session, a usage limit, a timeout and a failure after the session', t => {
+  const cases = [
+    [{CLAUDE_EXIT: '1'}, /run 1 ended without progress \(exit 1\)/],
+    [{CLAUDE_EXIT: '1', CLAUDE_SAYS: 'Claude usage limit reached'}, /stopped by a usage or rate limit/],
+    [{CLAUDE_EXIT: '124'}, /run 1 ended without progress \(exit 124\)/],
+  ];
+  for (const [env, ending] of cases) {
+    const r = ticketSetup(t);
+    r.tick(env);
+    assert.match(r.log(), ending, JSON.stringify(env));
+    assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
+  }
+  const r = ticketSetup(t);
+  r.gh.respond({'issue view 7': {stderr: 'gh: network down\n', exit: 1}});
+  assert.throws(() => r.tick());
+  assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
+});
+
+test('a runner stopped while it adds agent-working still removes current and the label', t => {
+  // The service is stopped (SIGTERM to the runner named in `current`) while the gh call that adds the label runs.
+  const r = ticketSetup(t, [issue(7)], {bin: {gh: `#!/bin/sh
+case "$*" in *"--add-label agent-working"*) kill -TERM "$(sed -n 's/^pid //p' "$XDG_STATE_HOME/ticket-runner/current")";; esac
+exec '${process.execPath}' '${join(here, 'fake-gh.mjs')}' "$XDG_STATE_HOME/../gh" "$@"
+`}});
+  assert.throws(() => r.tick(), error => error.status === 143);
+  assert.equal(r.ran(), false);
+  assert.equal(existsSync(r.current), false);
+  assert.deepEqual(labelCalls(r.ghCalls()),
+    [`issue edit 7 -R ${repo} --add-label agent-working`, `issue edit 7 -R ${repo} --remove-label agent-working`]);
+});
+
+test("a tick removes stale agent-working labels from issues and pull requests before it starts its own run", t => {
+  const r = ticketSetup(t);
+  r.gh.respond({
+    [`issue list -R ${repo} --state all --label agent-working`]: {stdout: '12\n13\n'},
+    [`pr list -R ${repo} --state all --label agent-working`]: {stdout: '40\n'},
+  });
+  r.tick();
+  assert.deepEqual(labelCallsAtSession(r), [
+    `issue edit 12 -R ${repo} --remove-label agent-working`,
+    `issue edit 13 -R ${repo} --remove-label agent-working`,
+    `pr edit 40 -R ${repo} --remove-label agent-working`,
+    `issue edit 7 -R ${repo} --add-label agent-working`,
+  ]);
+  const log = r.log();
+  for (const removed of ['issue #12', 'issue #13', 'pr #40']) assert.match(log, new RegExp(`${removed}: removed agent-working`));
+});
+
+test('the stale sweep is not run by --plan', t => {
+  const r = ticketSetup(t);
+  r.gh.respond({[`issue list -R ${repo} --state all --label agent-working`]: {stdout: '12\n'}});
+  r.tick({}, ['--plan']);
+  assert.deepEqual(labelCalls(r.ghCalls()), []);
+});
+
+test('failed agent-working calls are logged and stop neither the tick nor the run', t => {
+  const r = ticketSetup(t);
+  r.gh.respond({
+    [`issue list -R ${repo} --state all --label agent-working`]: {stderr: 'gh: HTTP 502\n', exit: 1},
+    [`pr list -R ${repo} --state all --label agent-working`]: {stdout: '40\n'},
+    [`pr edit 40 -R ${repo} --remove-label`]: {stderr: 'gh: HTTP 502\n', exit: 1},
+    [`issue edit 7 -R ${repo} --add-label agent-working`]: {stderr: 'gh: label not found\n', exit: 1},
+    [`issue edit 7 -R ${repo} --remove-label agent-working`]: {stderr: 'gh: label not found\n', exit: 1},
+    'issue view 7': {stdout: 'yes\n'},
+  });
+  r.tick();
+  assert.ok(r.ran(), 'the session ran');
+  const log = r.log();
+  assert.match(log, /could not list issues labelled agent-working/);
+  assert.match(log, /pr #40: could not remove agent-working: gh: HTTP 502/);
+  assert.match(log, /issue #7: could not add agent-working: gh: label not found/);
+  assert.match(log, /ticket #7: run 1 finished/);
+  assert.match(log, /issue #7: could not remove agent-working: gh: label not found/);
+});
+
+// The sweep each tick: runner worktrees no run will use again, and databases whose worktree is gone.
+
+// The example project's scripts/local-db.sh's project name for a worktree.
+const localDb = worktree =>
+  `example-project-local-${run('sh', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', 'sh', worktree]).trim()}`;
+const recentUpkeep = upkeepIssue(1, 1, 'CLOSED');  // with it and no ready issue, a tick does nothing else
+const held = number => issue(number, {labels: ['hold']});
+const closed = number => issue(number, {state: 'CLOSED'});
+
+// A machine with worktrees issue-11 (closed), issue-12 (open, one run used), issue-13 (open, three runs used), issue-14
+// (open, with an open pull request), issue-15 (closed, but the `current` file names it), issue-16 (open, never run),
+// pr-20 (merged), pr-21 (open) and the manual demo-specs.
+function sweepSetup(t) {
+  const r = ticketSetup(t, [recentUpkeep, closed(11), held(12), held(13), held(14), closed(15), held(16)]);
+  r.gh.json('pulls.json', [{...linked('Example-Owner', 'example-project', 14), author: {login: 'someone'}, isDraft: false,
+    labels: [], mergeStateStatus: 'CLEAN', statusCheckRollup: [], reviews: [], commits: []}]);
+  r.gh.respond({
+    [`pr view 20 -R ${repo} --json state`]: {stdout: 'MERGED\n'},
+    [`pr view 21 -R ${repo} --json state`]: {stdout: 'OPEN\n'},
+  });
+  const worktree = name => join(r.checkout, '.worktrees', name);
+  for (const name of ['issue-11', 'issue-12', 'issue-13', 'issue-14', 'issue-15', 'issue-16', 'pr-20', 'pr-21', 'demo-specs'])
+    git(r.checkout, 'worktree', 'add', '-q', '-b', `b/${name}`, worktree(name), 'origin/main');
+  const state = join(r.root, 'state/ticket-runner');
+  mkdirSync(join(state, 'attempts'), {recursive: true});
+  writeFileSync(join(state, 'attempts/ticket-12'), '1\n');
+  writeFileSync(join(state, 'attempts/ticket-13'), '3\n');
+  writeFileSync(join(state, 'current'), 'pid 1\nstarted 1\nkind ticket\nnumber 15\nbranch ticket/15\nprs \n');
+  return {...r, worktree, worktrees: () => git(r.checkout, 'worktree', 'list', '--porcelain')
+    .split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length))};
+}
+
+test('a tick removes the runner worktrees no run will use again, stopping their databases first', t => {
+  const r = sweepSetup(t);
+  r.docker.containers([[localDb(r.worktree('issue-11')), join(r.worktree('issue-11'), 'database')]]);
+  r.tick();
+  const log = r.log();
+  for (const [name, reason] of [['issue-11', 'issue #11 is closed'], ['issue-13', 'issue #13 used all 3 runs'],
+    ['issue-14', 'issue #14 has an open pull request'], ['pr-20', 'pull request #20 is merged']]) {
+    assert.equal(existsSync(r.worktree(name)), false, name);
+    assert.ok(log.includes(`removed worktree ${r.worktree(name)} (${reason})\n`), name);
+  }
+  assert.match(log, new RegExp(`tore down ${r.worktree('issue-11')}: .*Removed\n`));
+  assert.ok(!log.includes(`tore down ${r.worktree('issue-13')}`), 'a teardown that prints nothing is not logged');
+  assert.deepEqual(r.worktrees().sort(), [r.checkout, ...['demo-specs', 'issue-12', 'issue-15', 'issue-16', 'pr-21']
+    .map(r.worktree)].sort(), 'the current run, open issues under their runs, an open PR and a manual worktree stay');
+  assert.equal(r.ran(), false);
+});
+
+test('a failed worktree removal is logged and the tick carries on', t => {
+  const r = sweepSetup(t);
+  git(r.checkout, 'worktree', 'lock', r.worktree('issue-11'));  // `worktree remove --force` refuses a locked one
+  r.docker.containers([['example-project-local-1', join(r.root, 'gone/database')]]);
+  r.tick();
+  const log = r.log();
+  assert.match(log, new RegExp(`could not remove worktree ${r.worktree('issue-11')} \\(issue #11 is closed\\): .*unlock`));
+  assert.equal(existsSync(r.worktree('issue-11')), true);
+  assert.equal(existsSync(r.worktree('issue-13')), false);
+  assert.match(log, /pruned database example-project-local-1 /);
+});
+
+test('a tick prunes the databases whose worktree is gone and never one whose worktree exists', t => {
+  const r = ticketSetup(t, [recentUpkeep]);
+  const kept = join(r.checkout, '.worktrees/demo-specs');
+  mkdirSync(join(kept, 'database'), {recursive: true});
+  mkdirSync(join(r.checkout, '.worktrees/no-database-dir'));
+  r.docker.containers([
+    ['example-project-local-1', join(r.root, 'issue-561/database')],
+    ['example-project-it-2', join(r.root, 'issue-525/database')],
+    ['example-project-local-3', join(kept, 'database')],
+    ['example-project-local-4', ''],
+    ['example-project-local-6', join(r.checkout, '.worktrees/no-database-dir/database')],
+    ['example-project-local-5', join(r.root, 'gone/database')],
+    ['example-project-local-5', join(kept, 'database')],
+    ['example-model', join(r.root, 'gone/example-model')],
+  ]);
+  r.docker.failDown('example-project-it-2');
+  r.tick();
+  const log = r.log();
+  assert.ok(log.includes(`pruned database example-project-local-1 (worktree ${join(r.root, 'issue-561')} is gone)\n`));
+  assert.ok(log.includes(`could not prune database example-project-it-2 (worktree ${join(r.root, 'issue-525')} is gone): Error response`));
+  const downs = r.docker.calls().filter(call => call.includes(' down '));
+  assert.deepEqual(downs, ['example-project-it-2', 'example-project-local-1']
+    .map(project => `|compose -p ${project} down --volumes --remove-orphans`));
+  assert.doesNotMatch(log, /local-3|local-4|local-5|local-6|example-model/);
+});
+
+test('with Docker unavailable the database sweep is skipped with one log line and the tick carries on', t => {
+  const r = ticketSetup(t);
+  r.docker.unavailable();
+  r.tick();
+  const log = r.log();
+  assert.equal(log.match(/database sweep skipped: docker is unavailable/g).length, 1);
+  assert.equal(r.ran(), true);
+});
+
+test('--prune-dry-run prints what the sweep would remove, changes nothing and runs nothing', t => {
+  const r = sweepSetup(t);
+  r.docker.containers([['example-project-local-1', join(r.root, 'issue-561/database')],
+    ['example-project-local-3', join(r.worktree('demo-specs'), 'database')]]);
+  mkdirSync(join(r.worktree('demo-specs'), 'database'));
+  const before = r.worktrees();
+  const out = r.tick({}, ['--prune-dry-run']);
+  assert.deepEqual(out.split('\n').filter(Boolean), [
+    `would remove worktree ${r.worktree('issue-11')} (issue #11 is closed)`,
+    `would remove worktree ${r.worktree('issue-13')} (issue #13 used all 3 runs)`,
+    `would remove worktree ${r.worktree('issue-14')} (issue #14 has an open pull request)`,
+    `would remove worktree ${r.worktree('pr-20')} (pull request #20 is merged)`,
+    `would prune database example-project-local-1 (worktree ${join(r.root, 'issue-561')} is gone)`,
+  ]);
+  assert.deepEqual(r.worktrees(), before);
+  assert.deepEqual(r.docker.calls().filter(call => !call.includes('|ps ')), []);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/log')), false);
+  assert.ok(!r.ghCalls().some(call => !['list', 'view'].includes(call[1])), 'gh only reads');
+  assert.equal(r.ran(), false);
+});
+
+const mode = path => statSync(path).mode & 0o777;
+
+test('the state directory, its runs and the transcripts are private to the service user, even when they existed as 755', t => {
+  withUmask(t, 0o022);  // as a shell outside systemd would start the script
+  const r = ticketSetup(t);
+  const state = join(r.root, 'state/ticket-runner');
+  mkdirSync(join(state, 'runs'), {recursive: true, mode: 0o755});
+  chmodSync(state, 0o755);
+  chmodSync(join(state, 'runs'), 0o755);
+  r.tick();
+  for (const dir of [state, join(state, 'runs'), join(state, 'attempts')]) assert.equal(mode(dir), 0o700, dir);
+  const transcripts = readdirSync(join(state, 'runs'));
+  assert.equal(transcripts.length, 1);
+  for (const file of [join(state, 'log'), join(state, 'runs', transcripts[0])]) assert.equal(mode(file) & 0o077, 0, file);
+});
+
+// The Triphammer config and the project file (bin/README.md, "Configuration").
+
+const realGit = run('sh', ['-c', 'command -v git']).trim();
+// Puts a `git` first on the machine's PATH that records each call's working directory and arguments before running the real
+// one; `calls` lists them as {dir, args}, where dir is the -C directory when the call names one.
+function recordGit(r) {
+  const file = join(r.root, 'git-calls');
+  writeFileSync(join(r.gh.bin, 'git'), `#!/bin/sh
+{ printf '%s' "$PWD"; for arg in "$@"; do printf '\\037%s' "$arg"; done; echo; } >> '${file}'
+exec '${realGit}' "$@"
+`, {mode: 0o755});
+  return () => lines(file).map(line => {
+    const [cwd, ...args] = line.split('\x1f');
+    return {dir: args[0] === '-C' ? args[1] : cwd, args};
+  });
+}
+const project = fields => `${JSON.stringify({name: 'example-project', ...fields}, null, 2)}\n`;
+const example = JSON.parse(projectJson);
+const without = (...keys) => project(Object.fromEntries(Object.entries(example).filter(([key]) => !keys.includes(key))));
+const inside = (dir, root) => dir === root || dir.startsWith(`${root}/`);
+
+test('a ticket runs on the repository, checkout, App author and state directory the config names, and no other', t => {
+  const served = 'acme/widgets';
+  const r = ticketSetup(t, [issue(7), {...issue(8), author: {is_bot: true, login: 'app/widget-bot'}}], {served});
+  // The runner runs from r.checkout, and the config names another clone of the same origin as the main checkout.
+  const checkout = join(r.root, 'other');
+  git(r.root, 'clone', '-q', join(r.root, 'origin.git'), checkout);
+  const state = join(r.root, 'elsewhere');
+  writeConfig(r.configFile, {REPO: served, CHECKOUT: checkout, APP_AUTHOR: 'app/widget-bot', STATE_DIR: state});
+  writeFileSync(join(r.root, 'opened.json'), JSON.stringify([linked('acme', 'widgets', 8)]));
+  const gitCalls = recordGit(r);
+  r.tick();
+
+  assert.match(r.probe('claude-args'), /^Run issue #8 of acme\/widgets unattended/m, 'the App author picks #8, not #7');
+  const ghCalls = r.ghCalls();
+  assert.ok(ghCalls.some(call => call.join(' ') === `issue edit 8 -R ${served} --add-label agent-working`));
+  // The owner lookup is the one call about an account rather than the repository: the owner part of REPO.
+  assert.ok(ghCalls.some(call => call.join(' ') === 'api users/acme --jq .type'));
+  for (const call of ghCalls.filter(call => !(call[0] === 'api' && call[1].startsWith('users/')))) {
+    assert.equal(call[call.findIndex(arg => arg === '-R' || arg === '--repo') + 1], served, call.join(' '));
+  }
+  const calls = gitCalls();
+  assert.ok(calls.some(({args}) => args.includes('worktree') && args.includes('add')), 'the worktree was added through git');
+  // The script's own checkout is Triphammer's, which the tick keeps current and reads the plugin from, and the
+  // configured one is another repository; every other git call is in the configured checkout.
+  for (const {dir, args} of calls) assert.ok(inside(dir, checkout) || inside(dir, r.checkout), `git ${args.join(' ')} in ${dir}`);
+  for (const {dir, args} of calls.filter(({args}) => args.includes('worktree'))) assert.ok(inside(dir, checkout), `git ${args.join(' ')} in ${dir}`);
+  assert.equal(existsSync(join(checkout, '.worktrees/issue-8')), false, 'the run made progress and its worktree is gone');
+  assert.equal(existsSync(join(r.checkout, '.worktrees')), false, "the script's own checkout is untouched");
+  assert.match(readFileSync(join(state, 'log'), 'utf8'), /ticket #8: run 1 finished/);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/log')), false);
+});
+
+test('a missing config file stops the runner before any gh or git call, naming the file', t => {
+  const r = ticketSetup(t);
+  const gitCalls = recordGit(r);
+  const missing = join(r.root, 'nowhere.conf');
+  assert.throws(() => r.tick({TRIPHAMMER_CONFIG: missing}),
+    error => error.status === 2 && error.stderr.includes(`ticket-runner: the Triphammer config ${missing} is missing or unreadable`));
+  assert.deepEqual(r.ghCalls(), []);
+  assert.deepEqual(gitCalls(), []);
+  assert.equal(r.ran(), false);
+});
+
+test('a config without a required setting, or with a malformed line, stops the runner before any gh or git call', t => {
+  for (const [settings, message] of [
+    [{APP_AUTHOR: null}, 'does not set APP_AUTHOR'],
+    [{REPO: ''}, 'does not set REPO'],
+    [{CHECKOUT: 'relative/path'}, 'CHECKOUT must be an absolute path, not relative/path'],
+    [{OWNER: 'two people'}, 'OWNER must be one GitHub login (letters, digits and single dashes between them, at most 39 characters), not two people'],
+    [{OWNER: '-dash-first'}, 'OWNER must be one GitHub login'],
+    [{OWNER: 'double--dash'}, 'OWNER must be one GitHub login'],
+    [{OWNER: 'Example-Org/example-project'}, 'OWNER must be one GitHub login'],
+    [{OWNER: 'a'.repeat(40)}, 'OWNER must be one GitHub login'],
+  ]) {
+    const r = ticketSetup(t);
+    writeConfig(r.configFile, {REPO: repo, CHECKOUT: r.checkout, APP_AUTHOR: 'app/x', STATE_DIR: join(r.root, 'state'), ...settings});
+    const gitCalls = recordGit(r);
+    assert.throws(() => r.tick(), error => error.status === 2 && error.stderr.includes(`${r.configFile}`) && error.stderr.includes(message),
+      message);
+    assert.deepEqual(r.ghCalls(), [], message);
+    assert.deepEqual(gitCalls(), [], message);
+  }
+  const r = ticketSetup(t);
+  writeFileSync(r.configFile, `REPO=${repo}\nCHECKOUT ${r.checkout}\n`);
+  assert.throws(() => r.tick(), error => error.status === 2 && error.stderr.includes(`${r.configFile} line 2 is not KEY=value`));
+  assert.deepEqual(r.ghCalls(), []);
+});
+
+test('a config with OWNER, a GitHub login, is accepted, and one without it still is', t => {
+  for (const value of ['example-person', 'Example-Person-2', 'a'.repeat(39), null]) {
+    const r = ticketSetup(t, [{...issue(7), author: {is_bot: false, login: value ?? 'Example-Owner'}}], {config: {OWNER: value}});
+    assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7', String(value));
+  }
+});
+
+test('without TRIPHAMMER_CONFIG the config is <name>.conf under XDG_CONFIG_HOME, <name> from the project file', t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({name: 'widgets'})});
+  const dir = join(r.root, 'xdg/triphammer');
+  mkdirSync(dir, {recursive: true});
+  writeConfig(join(dir, 'widgets.conf'), {REPO: repo, CHECKOUT: r.checkout, APP_AUTHOR: author.login, STATE_DIR: join(r.root, 'state/ticket-runner')});
+  assert.equal(r.tick({TRIPHAMMER_CONFIG: '', XDG_CONFIG_HOME: join(r.root, 'xdg')}, ['--plan']).trim(), 'ticket 7');
+  assert.throws(() => r.tick({TRIPHAMMER_CONFIG: '', XDG_CONFIG_HOME: join(r.root, 'other')}, ['--plan']),
+    error => error.stderr.includes(`the Triphammer config ${join(r.root, 'other/triphammer/widgets.conf')} is missing`));
+});
+
+test('a malformed project file stops the tick, naming the file and the field', t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({composeProjectPattern: '^(unclosed'})});
+  assert.throws(() => r.tick(), error => error.status === 2
+    && error.stderr.includes(`${join(r.checkout, '.triphammer/project.json')} is malformed: composeProjectPattern is not a valid`));
+  assert.equal(r.ran(), false);
+});
+
+test('a project file whose demos is not true or false stops the tick', t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({demos: 'yes'})});
+  assert.throws(() => r.tick(), error => error.status === 2
+    && error.stderr.includes(`${join(r.checkout, '.triphammer/project.json')} is malformed: demos must be true or false`));
+  assert.equal(r.ran(), false);
+});
+
+test('a project file whose check command is not plain words, or names an unknown check, stops the tick', t => {
+  for (const [checks, message] of [
+    [{suite: 'make check && curl x'}, 'checks.suite must be a command'],
+    [{lint: 'make lint'}, 'checks may name only build, focused, suite and gate, not lint'],
+    [{focused: '<x>'}, 'checks.focused must start with a command word, not a <placeholder>'],
+  ]) {
+    const r = ticketSetup(t, [issue(7)], {project: project({checks})});
+    assert.throws(() => r.tick(), error => error.status === 2
+      && error.stderr.includes(`${join(r.checkout, '.triphammer/project.json')} is malformed: ${message}`), message);
+    assert.equal(r.ran(), false);
+  }
+});
+
+test('a project file whose shellEditRoots is not a list of relative paths inside the repository stops the tick', t => {
+  for (const shellEditRoots of ['src', ['src', 3], ['/src'], ['../src'], ['src/../..'], ['.'], ['src//App'], ['']]) {
+    const r = ticketSetup(t, [issue(7)], {project: project({shellEditRoots})});
+    assert.throws(() => r.tick(), error => error.status === 2
+      && error.stderr.includes(`${join(r.checkout, '.triphammer/project.json')} is malformed: shellEditRoots must be a list `
+        + 'of paths relative to the repository root, inside it'), JSON.stringify(shellEditRoots));
+    assert.equal(r.ran(), false);
+  }
+  for (const shellEditRoots of [[], ['src', 'tests'], ['src/App/', 'lib']]) {
+    const r = ticketSetup(t, [issue(7)], {project: project({shellEditRoots})});
+    r.tick();
+    assert.equal(r.ran(), true, JSON.stringify(shellEditRoots));
+  }
+});
+
+test("a project's teardown command runs in the worktree, with its arguments, before the worktree is removed", t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({worktreeTeardown: ['tools/stop.sh', 'now']}), files: {
+    'tools/stop.sh': `#!/bin/sh\necho "$PWD $*" > "$PROBE/teardown"\necho first\necho stopped everything\n`,
+  }});
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  assert.equal(r.probe('teardown'), `${r.worktree} now\n`);
+  assert.match(r.log(), new RegExp(`tore down ${r.worktree}: stopped everything\n`));
+  assert.equal(existsSync(r.worktree), false);
+});
+
+test('a project with no teardown command gets its worktree removed with no teardown run and nothing logged about it', t => {
+  const r = ticketSetup(t, [issue(7)], {project: without('worktreeTeardown')});
+  const db = localDb(r.worktree);
+  writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[db, join(r.worktree, 'database')]]));  // local-db.sh up
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  assert.equal(existsSync(r.worktree), false);
+  assert.deepEqual(r.docker.calls().filter(call => call.includes('compose --file')), [], 'scripts/local-db.sh down never ran');
+  assert.doesNotMatch(r.log(), /tore down|teardown/);
+});
+
+test('a project with no compose pattern gets no database sweep: no docker call and no log line', t => {
+  const r = ticketSetup(t, [recentUpkeep], {project: without('composeProjectPattern')});
+  r.docker.containers([['example-project-local-1', join(r.root, 'gone/database')]]);
+  r.tick();
+  assert.deepEqual(r.docker.calls(), []);
+  assert.doesNotMatch(existsSync(join(r.root, 'state/ticket-runner/log')) ? r.log() : '', /database/);
+});
+
+test("a compose pattern that does not match the example project's names prunes only the projects it matches", t => {
+  const r = ticketSetup(t, [recentUpkeep], {project: project({composeProjectPattern: '^widgets-db-[0-9]+$'})});
+  r.docker.containers([
+    ['example-project-local-1', join(r.root, 'gone/database')],
+    ['example-project-it-2', join(r.root, 'gone/database')],
+    ['widgets-db-3', join(r.root, 'issue-9/database')],
+  ]);
+  r.tick();
+  assert.deepEqual(r.docker.calls().filter(call => call.includes(' down ')), ['|compose -p widgets-db-3 down --volumes --remove-orphans']);
+  assert.ok(r.log().includes(`pruned database widgets-db-3 (worktree ${join(r.root, 'issue-9')} is gone)\n`));
+  assert.doesNotMatch(r.log(), /example-project-/);
+});
+
+// Two projects on one machine, as ticket-runner@a and ticket-runner@b run them: each a ticketSetup (its own repository fakes,
+// checkout and state directory) whose config is a.conf or b.conf under one XDG_CONFIG_HOME, both with one
+// XDG_STATE_HOME, so they share the shared directory `sharedDir`. Each project's `tick` runs it, `runs` counts the runs its
+// log started, and `tickCommand` writes a program that runs one tick of it, for another project's session to run.
+function twoProjects(t, {a: aIssues = [issue(7)], b: bIssues = [issue(7)]} = {}) {
+  const shared = mkdtempSync(join(tmpdir(), 'triphammer-projects-'));
+  t.after(() => rmSync(shared, {recursive: true, force: true}));
+  mkdirSync(join(shared, 'xdg/triphammer'), {recursive: true});
+  const project = (name, issues) => {
+    const r = ticketSetup(t, issues);
+    writeFileSync(join(shared, `xdg/triphammer/${name}.conf`), readFileSync(r.configFile, 'utf8'));
+    const env = {TRIPHAMMER_CONFIG: '', TRIPHAMMER_PROJECT: name, XDG_CONFIG_HOME: join(shared, 'xdg'),
+      XDG_STATE_HOME: join(shared, 'state')};
+    const logFile = join(r.root, 'state/ticket-runner/log');
+    const log = () => existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
+    const quote = value => `'${String(value).replaceAll("'", `'\\''`)}'`;
+    return {
+      ...r,
+      tick: (more = {}) => r.tick({...env, ...more}),
+      log,
+      runs: () => (log().match(/: run \d of 3 starting/g) ?? []).length,
+      tickCommand() {
+        const all = {...r.env, DEMO_CALLS: join(r.root, 'demo-calls'), PROBE: r.root, ...env};
+        const file = join(shared, `tick-${name}`);
+        writeFileSync(file, `#!/bin/sh\nexec env -i ${Object.entries(all).map(([k, v]) => `${k}=${quote(v)}`).join(' ')} ${
+          quote(join(r.checkout, 'bin/ticket-runner'))}\n`, {mode: 0o755});
+        return file;
+      },
+    };
+  };
+  const sharedDir = join(shared, 'state/triphammer');
+  return {a: project('a', aIssues), b: project('b', bIssues), sharedDir};
+}
+
+test("a session in one project holds the other project's tick, which starts nothing and waits for its turn", t => {
+  const {a, b, sharedDir} = twoProjects(t);
+  a.tick({DURING_SESSION: b.tickCommand()});
+  assert.equal(a.runs(), 1);
+  assert.equal(b.ran(), false, 'no session started in b while a ran');
+  assert.equal(b.runs(), 0);
+  assert.ok(existsSync(join(sharedDir, 'waiting/b')), 'b marked itself waiting');
+  assert.equal(readFileSync(join(sharedDir, 'last'), 'utf8'), 'a\n');
+});
+
+test('after a run in one project with work waiting in both, the next run is in the other', t => {
+  const {a, b, sharedDir} = twoProjects(t);
+  a.tick({DURING_SESSION: b.tickCommand()});  // b's tick during a's run marks b waiting
+  a.tick();
+  assert.equal(a.runs(), 1, 'a ran last and b is waiting, so a yields');
+  assert.match(a.log(), /ticket #7: a ran last and b is waiting; yielding this turn to it/);
+  b.tick();
+  assert.equal(b.runs(), 1);
+  assert.equal(existsSync(join(sharedDir, 'waiting/b')), false, 'b starting a run clears its mark');
+  a.tick();
+  assert.equal(a.runs(), 2, 'b ran last, so a takes the next turn');
+});
+
+test('a waiting mark older than three ticks does not make the project that ran last yield', t => {
+  const {a, sharedDir} = twoProjects(t);
+  a.tick();
+  writeFileSync(join(sharedDir, 'waiting/b'), `${Math.floor(Date.now() / 1000) - 3600}\n`);
+  a.tick();
+  assert.equal(a.runs(), 2);
+});
+
+test('a project with nothing to do clears its waiting mark', t => {
+  const {b, sharedDir} = twoProjects(t, {b: [recentUpkeep, held(7)]});
+  mkdirSync(join(sharedDir, 'waiting'), {recursive: true});
+  writeFileSync(join(sharedDir, 'waiting/b'), `${Math.floor(Date.now() / 1000)}\n`);
+  b.tick();
+  assert.equal(b.ran(), false);
+  assert.equal(existsSync(join(sharedDir, 'waiting/b')), false);
+});
+
+test('a usage limit in one project pauses every project', t => {
+  const {a, b, sharedDir} = twoProjects(t);
+  a.tick({CLAUDE_EXIT: '1', CLAUDE_SAYS: 'Claude usage limit reached'});
+  assert.match(a.log(), /stopped by a usage or rate limit/);
+  assert.ok(Number(readFileSync(join(sharedDir, 'backoff'), 'utf8')) > Date.now() / 1000);
+  b.tick();
+  assert.equal(b.ran(), false);
+  a.tick();
+  assert.equal(a.runs(), 1);
+});
+
+test("one project's stop file pauses only that project, and the shared stop file pauses every project", t => {
+  const one = twoProjects(t);
+  mkdirSync(join(one.a.root, 'state/ticket-runner'), {recursive: true});
+  writeFileSync(join(one.a.root, 'state/ticket-runner/stop'), '');
+  one.a.tick();
+  one.b.tick();
+  assert.equal(one.a.ran(), false);
+  assert.equal(one.b.ran(), true);
+  const all = twoProjects(t);
+  mkdirSync(all.sharedDir, {recursive: true});
+  writeFileSync(join(all.sharedDir, 'stop'), '');
+  all.a.tick();
+  all.b.tick();
+  assert.equal(all.a.ran(), false);
+  assert.equal(all.b.ran(), false);
+});
+
+test('a TRIPHAMMER_PROJECT that is not a project name stops the runner before any gh call', t => {
+  const r = ticketSetup(t);
+  assert.throws(() => r.tick({TRIPHAMMER_CONFIG: '', TRIPHAMMER_PROJECT: '../a'}),
+    error => error.status === 2 && /TRIPHAMMER_PROJECT must be a project name/.test(error.stderr));
+  assert.deepEqual(r.ghCalls(), []);
+});
+
+// The owner's brakes during a session. The session (the fake `claude` through $DURING_SESSION) starts a child that
+// ignores SIGTERM, records its pid, applies the brake $BRAKE names (touches the file $BRAKE_FILE, or adds the gh
+// routes in $BRAKE_ROUTES) and then waits $SESSION_SECONDS (default 30) for that child; the runner checks the brakes
+// every tenth of a second and allows one second between SIGTERM and SIGKILL.
+const brakeEnv = {TICKET_RUNNER_BRAKE_SECONDS: '0.1', TICKET_RUNNER_BRAKE_GRACE_SECONDS: '1'};
+function brakeSession(r) {
+  const script = join(r.root, 'during-session');
+  writeFileSync(script, `#!/bin/sh
+sh -c 'trap "" TERM; sleep "\${SESSION_SECONDS:-30}"' & echo $! > "$PROBE/session-child"
+[ -z "$BRAKE_FILE" ] || { mkdir -p "\${BRAKE_FILE%/*}"; touch "$BRAKE_FILE"; }
+if [ -n "$BRAKE_ROUTES" ]; then
+  jq --argjson more "$BRAKE_ROUTES" '. + $more' "$PROBE/gh/routes.json" > "$PROBE/gh/routes.tmp"
+  mv "$PROBE/gh/routes.tmp" "$PROBE/gh/routes.json"
+fi
+wait
+`, {mode: 0o755});
+  return (env = {}) => {
+    const started = Date.now();
+    r.tick({...brakeEnv, DURING_SESSION: script, ...env});
+    return Date.now() - started;
+  };
+}
+const alive = pid => existsSync(`/proc/${pid}`) && !/^State:\s+Z/m.test(readFileSync(`/proc/${pid}/status`, 'utf8'));
+const issueView = number => `issue view ${number} -R ${repo} --json labels,state`;
+// The issue events API (who added a label) and the GraphQL query for the issue's last ClosedEvent (what closed it), in
+// the shapes GitHub returns; the App acts as example-agents[bot].
+const eventsCall = number => `api repos/${repo}/issues/${number}/events`;
+const labelledBy = login => [{event: 'labeled', label: {name: 'agent-working'}, actor: {login: 'example-agents[bot]', type: 'Bot'}},
+  {event: 'labeled', label: {name: 'needs-owner'}, actor: {login, type: login.endsWith('[bot]') ? 'Bot' : 'User'}}];
+const closerCall = number => `api graphql -F number=${number} -f owner=Example-Owner -f name=example-project -f query=`;
+const closedBy = closer => ({data: {repository: {issue: {timelineItems: {nodes: closer === undefined ? [] : [{closer}]}}}}});
+
+function assertBrakeEnded(r, brake, {kind = 'ticket', number = 7, labelled = `issue edit ${number}`} = {}) {
+  const log = r.log();
+  assert.match(log, new RegExp(`${kind} #${number}: ended by the owner's brake: ${brake}; not counted`));
+  assert.doesNotMatch(log, /run 1 finished|ended without progress/);
+  assert.equal(readFileSync(join(r.root, `state/ticket-runner/attempts/${kind}-${number}`), 'utf8').trim(), '0',
+    'the run is not counted');
+  assert.equal(alive(Number(r.probe('session-child'))), false, 'the session child that ignored SIGTERM was killed');
+  assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`${labelled} -R ${repo} --remove-label agent-working`]);
+  assert.equal(existsSync(r.current), false);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/brake')), false);
+  assert.deepEqual(r.securityCalls(), [], 'a stopped run reviews nothing');
+  assert.deepEqual(r.demoCalls(), [], 'and publishes nothing');
+}
+
+test("each of the owner's brakes ends a ticket session in progress, uncounted, and kills its processes", t => {
+  const cases = [
+    [{BRAKE_FILE: 'state/ticket-runner/stop'}, 'the stop file \\S+/state/ticket-runner/stop'],
+    [{BRAKE_FILE: 'state/triphammer/stop'}, "the shared stop file \\S+/state/triphammer/stop"],
+    [{BRAKE_ROUTES: {[`issue list -R ${repo} --state open --label stop-agents`]: {stdout: '99\n'}}},
+      'an open issue is labelled stop-agents'],
+    [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-hold.json'}}}, 'issue #7 is labelled hold'],
+    [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-needs-owner.json'}, [eventsCall(7)]: {file: 'by-owner.json'}}},
+      'issue #7 is labelled needs-owner'],
+    [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-closed.json'}, [closerCall(7)]: {file: 'closed-by-hand.json'}}},
+      'issue #7 is closed'],
+  ];
+  for (const [brake, reason] of cases) {
+    const r = ticketSetup(t);
+    r.gh.json('brake-hold.json', issue(7, {labels: ['agent-working', 'hold']}));
+    r.gh.json('brake-needs-owner.json', issue(7, {labels: ['needs-owner']}));
+    r.gh.json('by-owner.json', labelledBy('Example-Owner'));
+    r.gh.json('brake-closed.json', issue(7, {state: 'CLOSED'}));
+    r.gh.json('closed-by-hand.json', closedBy(null));
+    const env = {BRAKE_FILE: brake.BRAKE_FILE && join(r.root, brake.BRAKE_FILE),
+      BRAKE_ROUTES: brake.BRAKE_ROUTES && JSON.stringify(brake.BRAKE_ROUTES)};
+    const took = brakeSession(r)(env);
+    assert.ok(took < 20000, `${reason}: the run ended in ${took} ms, not after the session's 30 s`);
+    assertBrakeEnded(r, reason);
+  }
+});
+
+test('hold on the pull request a repair works on ends the repair session in progress', t => {
+  const r = repairSetup(t);
+  r.gh.json('brake-pr.json', {labels: [{name: 'hold'}]});
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  assertBrakeEnded(r, 'pull request #40 is labelled hold', {kind: 'repair', number: 40, labelled: 'pr edit 40'});
+});
+
+test('an upkeep session that closes its own issue is not stopped by the closed issue', t => {
+  const r = ticketSetup(t, []);
+  r.gh.json('upkeep-closed.json', issue(90, {state: 'CLOSED', labels: ['upkeep']}));
+  r.gh.respond({[issueView(90)]: {file: 'upkeep-closed.json'}, 'issue view 90 -R': {stdout: 'yes\n'}});  // and progressed
+  brakeSession(r)({SESSION_SECONDS: '1'});
+  assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(issueView(90))), 'the brakes were checked');
+  assert.doesNotMatch(r.log(), /owner's brake/);
+  assert.match(r.log(), /ticket #90: run 1 finished \(exit 0\)/);
+});
+
+test("the run's own pull request merging and closing the issue does not end the session, which publishes its demo", t => {
+  const r = ticketSetup(t);
+  r.gh.json('merged-closed.json', issue(7, {state: 'CLOSED'}));
+  r.gh.json('closed-by-merge.json', closedBy({merged: true}));
+  // merge-when-ready merges the session's pull request while its demo agent still runs, and GitHub closes #7.
+  const routes = {[issueView(7)]: {file: 'merged-closed.json'}, [closerCall(7)]: {file: 'closed-by-merge.json'},
+    [`issue view 7 -R ${repo} --json state,labels`]: {file: 'merged-closed.json'}};
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});
+  const log = r.log();
+  assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(closerCall(7))), 'the closer was looked up');
+  assert.doesNotMatch(log, /owner's brake|could not look up/);
+  assert.match(log, /ticket #7: demo risk-journey: published PR #77/);
+  assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
+  assert.equal(r.demoCalls().length, 1);
+});
+
+test('a session that labels its own issue needs-owner goes on to comment and ends as a run that progressed', t => {
+  const r = ticketSetup(t);
+  r.gh.json('self-needs-owner.json', issue(7, {labels: ['agent-working', 'needs-owner']}));
+  r.gh.json('by-app.json', labelledBy('example-agents[bot]'));
+  const routes = {[issueView(7)]: {file: 'self-needs-owner.json'}, [eventsCall(7)]: {file: 'by-app.json'},
+    [`issue view 7 -R ${repo} --json state,labels`]: {file: 'self-needs-owner.json'}};
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});  // then writes its comment
+  const log = r.log();
+  assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'who added needs-owner was looked up');
+  assert.doesNotMatch(log, /owner's brake|could not look up/);
+  assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'needs-owner is progress');
+  assert.equal(existsSync(r.worktree), false);
+});
+
+test('a brake ends the Bash tool commands that run in sessions of their own, and what they started', t => {
+  const r = ticketSetup(t);
+  const script = join(r.root, 'tool-command');
+  // As Claude Code runs a Bash tool command: in a session of its own, whose child ignores SIGTERM.
+  writeFileSync(script, `#!/bin/sh
+setsid sh -c 'echo $$ > "$PROBE/tool-pid"; sh -c "trap \\"\\" TERM; sleep 30" & echo $! > "$PROBE/session-child"; wait' &
+while [ ! -s "$PROBE/session-child" ]; do sleep 0.05; done
+touch "$XDG_STATE_HOME/ticket-runner/stop"
+sleep 30
+`, {mode: 0o755});
+  r.tick({...brakeEnv, DURING_SESSION: script});
+  assert.equal(alive(Number(r.probe('tool-pid'))), false, 'the tool command was ended');
+  assertBrakeEnded(r, 'the stop file \\S+/state/ticket-runner/stop');
+});
+
+test('a needs-owner actor or a closer that cannot be looked up is logged and does not end the session', t => {
+  const r = ticketSetup(t);
+  r.gh.json('both.json', issue(7, {state: 'CLOSED', labels: ['needs-owner']}));
+  r.gh.json('no-events.json', []);
+  r.gh.respond({[issueView(7)]: {file: 'both.json'}, [eventsCall(7)]: {file: 'no-events.json'},
+    [closerCall(7)]: {stderr: 'gh: HTTP 502\n', exit: 1}});
+  brakeSession(r)({SESSION_SECONDS: '1'});
+  const log = r.log();
+  assert.match(log, /ticket #7: could not look up who labelled issue #7 needs-owner/);
+  assert.match(log, /ticket #7: could not look up what closed issue #7/);
+  assert.doesNotMatch(log, /owner's brake/);
+});
+
+test('a failed brake lookup is logged and does not end the session', t => {
+  const r = ticketSetup(t);
+  r.gh.respond({[issueView(7)]: {stderr: 'gh: HTTP 502\n', exit: 1}});
+  brakeSession(r)({SESSION_SECONDS: '1'});
+  const log = r.log();
+  assert.match(log, /ticket #7: could not look up the brakes on issue #7/);
+  assert.doesNotMatch(log, /owner's brake/);
+  assert.match(log, /ticket #7: run 1 ended without progress \(exit 0\)/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '1');
+});
+
+test('with no brake a session checked while it runs ends as before, and its watcher ends with it', t => {
+  const r = ticketSetup(t);
+  r.gh.json('open-7.json', issue(7, {labels: ['agent-working']}));
+  r.gh.respond({[issueView(7)]: {file: 'open-7.json'}});
+  brakeSession(r)({SESSION_SECONDS: '1'});
+  const log = r.log();
+  assert.ok(r.ghCalls().filter(call => call.join(' ').startsWith(issueView(7))).length >= 2, 'the brakes were checked');
+  assert.doesNotMatch(log, /owner's brake|could not look up/);
+  assert.match(log, /ticket #7: run 1 ended without progress \(exit 0\)/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '1');
+  assert.deepEqual(r.securityCalls(), [], 'no pull request to review');
+  const calls = r.ghCalls().length;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  assert.equal(r.ghCalls().length, calls, 'nothing checks the brakes after the run');
+});
+
+test('a brake interval that is not a positive number of seconds, or a grace period that is not whole, stops the runner before any gh call', t => {
+  const r = ticketSetup(t);
+  for (const env of [{TICKET_RUNNER_BRAKE_SECONDS: '1m'}, {TICKET_RUNNER_BRAKE_SECONDS: '0'},
+    {TICKET_RUNNER_BRAKE_SECONDS: '0.0'}, {TICKET_RUNNER_BRAKE_GRACE_SECONDS: '0.5'}]) {
+    assert.throws(() => r.tick(env), error => error.status === 2 && /TICKET_RUNNER_BRAKE_SECONDS must be/.test(error.stderr));
+  }
+  assert.deepEqual(r.ghCalls(), []);
+});
+
+test('a runner stopped while its session runs stops the session and its processes too, and removes its label', t => {
+  const r = ticketSetup(t);
+  const script = join(r.root, 'stop-runner');
+  writeFileSync(script, `#!/bin/sh
+sh -c 'trap "" TERM; sleep 30' & echo $! > "$PROBE/session-child"
+kill -TERM "$(sed -n 's/^pid //p' "$PROBE/current")"
+wait
+`, {mode: 0o755});
+  assert.throws(() => r.tick({...brakeEnv, DURING_SESSION: script}), error => error.status === 143);
+  assert.equal(alive(Number(r.probe('session-child'))), false);
+  assert.equal(existsSync(r.current), false);
+  assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
+});

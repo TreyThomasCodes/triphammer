@@ -1,0 +1,14 @@
+{
+  "name": "triphammer",
+  "description": "The Triphammer plugin, loaded from this repository's main checkout.",
+  "owner": {
+    "name": "TreyThomasDotCodes"
+  },
+  "plugins": [
+    {
+      "name": "triphammer",
+      "source": "./plugins/triphammer",
+      "description": "Triphammer's workflow skills, agents and guard hooks."
+    }
+  ]
+}

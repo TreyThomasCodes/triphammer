@@ -1,0 +1,14 @@
+# Runs merge-when-ready once for the project named by the instance (<project>.conf in ~/.config/triphammer/). Started by
+# merge-when-ready@<project>.timer; install both (see README.md):
+#   systemctl --user link <main checkout>/systemd/merge-when-ready@.service
+# It runs ~/.local/bin/merge-when-ready, the symlink to the main checkout's copy the install creates, so the unit names
+# no checkout; the script reads the project's Triphammer config (README.md, "Configuration").
+[Unit]
+Description=Merge armed, ready pull requests of %i for the agents' GitHub App
+
+[Service]
+Type=oneshot
+UMask=0077
+Environment=TRIPHAMMER_PROJECT=%i
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/merge-when-ready

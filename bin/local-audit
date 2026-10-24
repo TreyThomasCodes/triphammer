@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# Audits one area of the repository with a second model of the weekly upkeep audit (the upkeep skill §3):
+# Triphammer's local Qwen model (the default; the Triphammer config's qwen-audit module) or Codex (its codex module). See
+# bin/README.md.
+#
+#   local-audit --commit <rev> --area <text> --output <file> [--repo <path>] [--model qwen|codex] [codex options]
+#
+# Codex options, only with --model codex: --codex-model <name> (default the config's CODEX_AUDIT_MODEL); --brief <file>, a prompt to use
+# instead of the reviewer brief and the audit prompt, followed by the commit and the area; --sandbox read-only (default
+# workspace-write); --weight <n> (default 1), the number of runs this one counts as against the cap and the floor.
+#
+# It clones only <rev> and its ancestors from <repo> (default: the Triphammer config's CHECKOUT, bin/config.sh) into
+# a fresh `mktemp -d` directory with no remote, runs the reviewer there, writes the commit, area, model, exit status,
+# elapsed seconds and the reviewer's result to <file>, and removes the clone.
+#
+# The Triphammer plugin is the audited commit's own, in the clone, when <repo> is Triphammer's checkout (the one this
+# script lives in) or a worktree of it, and Triphammer's checkout's plugins/triphammer when <repo> is another
+# repository, a project with no plugin of its own; the project file is the audited commit's either way.
+#
+# Qwen: `claude -p --plugin-dir <plugin> --agent triphammer:reviewer --model <QWEN_MODEL>`, the reviewer of that
+# Triphammer plugin, with read-only tools, against the config's QWEN_BASE_URL. The
+# API key is read from the file the config's QWEN_KEY_FILE names and reaches only the session's environment, as
+# ANTHROPIC_AUTH_TOKEN; it is never passed on a command line or printed.
+#
+# Codex: `codex exec ... --sandbox workspace-write --ephemeral -m <model> --json`, prompted with the reviewer brief
+# from that plugin's agents/reviewer.md, or with the --brief file. Only the exit status of `codex login status` is used; Codex's auth files
+# are never read. Runs are counted in ${XDG_STATE_HOME:-~/.local/state}/local-audit/codex-runs against a weekly cap and
+# a floor on the 5-hour window, set by environment variables, in local-audit/codex-settings there, or in the config.
+#
+# Both sessions stop after $LOCAL_AUDIT_TIMEOUT (default 1h).
+#
+# Exit status: 0 the audit ran; 1 the session failed or the key file is missing, unreadable or empty; 2 bad arguments
+# or settings, or the model's module is off or lacks a setting; 3 the model is unavailable, "local model unavailable" or "Codex unavailable: <reason>" (no audit);
+# 4 Codex was skipped: "Codex: weekly cap reached", "Codex: 5-hour floor reached" or "Codex: usage limit" (no audit).
+set -euo pipefail
+
+usage() {
+  sed -n '5p' "$0" | sed 's/^# *//'
+}
+
+commit='' area='' output='' model=qwen brief='' sandbox='' weight='' repo='' codex_model=''
+codex_options=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
+    --commit|--area|--output|--repo|--model|--codex-model|--brief|--sandbox|--weight)
+      if [ $# -lt 2 ]; then echo "local-audit: $1 needs a value" >&2; usage >&2; exit 2; fi
+      name="${1#--}"
+      printf -v "${name//-/_}" '%s' "$2"
+      case "$1" in --codex-model|--brief|--sandbox|--weight) codex_options+=" $1" ;; esac
+      shift 2 ;;
+    *) echo "local-audit: unexpected argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+for name in commit area output; do
+  if [ -z "${!name}" ]; then echo "local-audit: --$name is required" >&2; usage >&2; exit 2; fi
+done
+case "$model" in
+  qwen|codex) ;;
+  *) echo "local-audit: --model must be qwen or codex, not $model" >&2; usage >&2; exit 2 ;;
+esac
+if [ "$model" != codex ] && [ -n "$codex_options" ]; then
+  echo "local-audit:$codex_options only with --model codex" >&2; usage >&2; exit 2
+fi
+sandbox="${sandbox:-workspace-write}" weight="${weight:-1}"
+case "$sandbox" in
+  read-only|workspace-write) ;;
+  *) echo "local-audit: --sandbox must be read-only or workspace-write, not $sandbox" >&2; usage >&2; exit 2 ;;
+esac
+if ! [[ "$weight" =~ ^[1-9][0-9]?$ ]]; then echo "local-audit: --weight must be 1 to 99, not $weight" >&2; exit 2; fi
+if [ -n "$codex_model" ] && ! [[ "$codex_model" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+  echo "local-audit: --codex-model must be a model name, not $codex_model" >&2; exit 2
+fi
+if [ -n "$brief" ] && [ ! -s "$brief" ]; then echo "local-audit: the brief $brief is missing or empty" >&2; exit 2; fi
+# The model runs only when its module is on and the config gives what it needs (bin/README.md, "Configuration").
+bin="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$bin/config.sh"
+load_config local-audit "$bin/.."
+repo="${repo:-$cfg_checkout}"
+if [ "$model" = qwen ]; then
+  module_needs local-audit qwen-audit QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL
+  qwen_model="${cfg[QWEN_MODEL]}" key_file="${cfg[QWEN_KEY_FILE]}" base_url="${cfg[QWEN_BASE_URL]}"
+elif [ -n "$codex_model" ]; then
+  module_needs local-audit codex
+else
+  module_needs local-audit codex CODEX_AUDIT_MODEL
+  codex_model="${cfg[CODEX_AUDIT_MODEL]}"
+fi
+if ! sha="$(git -C "$repo" rev-parse -q --verify "$commit^{commit}" 2>/dev/null)"; then
+  echo "local-audit: $commit is not a commit in $repo" >&2
+  exit 2
+fi
+output_dir="$(dirname -- "$output")"
+if [ ! -d "$output_dir" ]; then echo "local-audit: $output_dir is not a directory" >&2; exit 2; fi
+output="$(cd -- "$output_dir" && pwd)/$(basename -- "$output")"
+time_limit="${LOCAL_AUDIT_TIMEOUT:-1h}"
+
+# Codex's limits, checked before anything runs. Each setting comes from its environment variable, else the settings
+# file, else the Triphammer config, else the default. A run is counted when its session starts, whatever its outcome.
+if [ "$model" = codex ]; then
+  state="${XDG_STATE_HOME:-$HOME/.local/state}/local-audit"
+  settings="$state/codex-settings"
+  runs_file="$state/codex-runs"
+  weekly_cap="${cfg[CODEX_WEEKLY_CAP]:-25}" floor_percent="${cfg[CODEX_FLOOR_PERCENT]:-10}"
+  run_percent="${cfg[CODEX_RUN_PERCENT]:-5}"
+  if [ -f "$settings" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"
+      line="${line//[[:space:]]/}"
+      [ -z "$line" ] && continue
+      setting="${line%%=*}" value="${line#*=}"
+      case "$setting" in
+        weekly_cap|floor_percent|run_percent) printf -v "$setting" '%s' "$value" ;;
+        *) echo "local-audit: unknown Codex setting $setting in $settings" >&2; exit 2 ;;
+      esac
+    done < "$settings"
+  fi
+  weekly_cap="${CODEX_AUDIT_WEEKLY_CAP:-$weekly_cap}"
+  floor_percent="${CODEX_AUDIT_FLOOR_PERCENT:-$floor_percent}"
+  run_percent="${CODEX_AUDIT_RUN_PERCENT:-$run_percent}"
+  for setting in weekly_cap floor_percent run_percent; do
+    if ! [[ "${!setting}" =~ ^[0-9]{1,6}$ ]] || { [ "$setting" != weekly_cap ] && [ "${!setting}" -gt 100 ]; }; then
+      echo "local-audit: invalid Codex setting $setting=${!setting}" >&2
+      exit 2
+    fi
+  done
+
+  now="${LOCAL_AUDIT_NOW:-$(date +%s)}"
+  # The recorded starts later than <seconds> ago, one per line; lines that are not a timestamp are ignored.
+  runs_since() {
+    if [ -f "$runs_file" ]; then awk -v since="$((now - $1))" '/^[0-9]+$/ && $1 + 0 > since' "$runs_file"; fi
+  }
+  # A run of weight n counts as n runs, so it needs room for all n.
+  counts=''
+  [ "$weight" -eq 1 ] || counts="; this run counts as $weight"
+  week_runs="$(runs_since 604800 | wc -l)"
+  if [ $((week_runs + weight)) -gt "$weekly_cap" ]; then
+    echo "local-audit: Codex: weekly cap reached ($week_runs of $weekly_cap runs in the last 7 days$counts)"
+    exit 4
+  fi
+  # `codex exec --json` reports no usage, so each run in the rolling 5 hours is taken to use $run_percent of the
+  # window; another run is skipped when the estimate left after it would be under the floor.
+  window_runs="$(runs_since 18000 | wc -l)"
+  left_after=$((100 - run_percent * (window_runs + weight)))
+  if [ "$left_after" -lt "$floor_percent" ]; then
+    echo "local-audit: Codex: 5-hour floor reached ($window_runs runs in the last 5 hours, about $left_after% left" \
+      "after another; floor $floor_percent%$counts)"
+    exit 4
+  fi
+
+  if ! command -v codex > /dev/null; then
+    echo "local-audit: Codex unavailable: codex is not installed"
+    exit 3
+  fi
+  # Only the exit status: the output can name the account.
+  if ! codex login status < /dev/null > /dev/null 2>&1; then
+    echo "local-audit: Codex unavailable: not logged in (codex login status failed)"
+    exit 3
+  fi
+else
+  if [ ! -f "$key_file" ] || [ ! -r "$key_file" ]; then
+    echo "local-audit: cannot read the Qwen API key file $key_file" >&2
+    exit 1
+  fi
+  key="$(<"$key_file")"
+  if [ -z "$key" ]; then
+    echo "local-audit: the Qwen API key file $key_file is empty" >&2
+    exit 1
+  fi
+
+  # Any HTTP answer means the server is up; the probe sends no key.
+  if ! curl -s -o /dev/null --max-time 10 "$base_url"; then
+    echo "local-audit: local model unavailable at $base_url"
+    exit 3
+  fi
+fi
+
+# The clone's name says nothing about the area; it holds only the commit and its ancestors, and a fetch by path adds
+# no remote to reach back.
+clone="$(mktemp -d)"
+result="$(mktemp)"
+events="$(mktemp)"
+errors="$(mktemp)"
+trap 'rm -rf "$clone" "$result" "$events" "$errors"' EXIT
+trap 'exit 1' INT TERM HUP
+git -C "$clone" init -q
+git -C "$clone" fetch -q --no-tags "$repo" "$sha"
+git -C "$clone" -c advice.detachedHead=false checkout -q --detach "$sha"
+rm -f "$clone/.git/FETCH_HEAD"
+if [ -n "$(git -C "$clone" rev-list --all --reflog --not "$sha")" ]; then
+  echo "local-audit: the clone holds history past $sha" >&2
+  exit 1
+fi
+
+# The plugin the reviewer runs under, and the path the prompt names for it.
+triphammer="$(git -C "$bin" rev-parse --show-toplevel)"
+if same_repo "$triphammer" "$repo"; then
+  plugin="$clone/plugins/triphammer" plugin_named=plugins/triphammer where="$sha"
+else
+  plugin="$triphammer/plugins/triphammer" plugin_named="$plugin" where="Triphammer's checkout $triphammer"
+fi
+
+# The project's contract, the audited commit's .triphammer/project.json (bin/README.md, "The project file"), which
+# the reviewer reads from the same commit: its own review checklist and review skills, read after review-checklist, and
+# its build, focused and suite check commands, the only commands besides git the Qwen session may run (never the gate,
+# which starts services). A commit with no project file has none of them; a malformed one stops the audit.
+# Prints its arguments as "a, b and c".
+listed() {
+  local text="${1:-}"
+  while [ $# -gt 2 ]; do shift; text+=", $1"; done
+  [ $# -lt 2 ] || text+=" and $2"
+  printf '%s' "$text"
+}
+checklist='' skills=() commands=() allowed=()
+if [ -f "$clone/.triphammer/project.json" ]; then
+  check_project local-audit "$clone" || exit 2
+  checklist="$(project_get "$clone" reviewChecklist)"
+  mapfile -t skills < <(project_get "$clone" reviewSkills)
+  mapfile -t commands < <(jq -r '.checks // {} | .build, .focused, .suite | strings' "$clone/.triphammer/project.json")
+fi
+# A command allows itself, with or without more arguments; one with a <placeholder> allows whatever fills it and
+# follows it.
+for command in "${commands[@]}"; do
+  if [[ "$command" == *"<"* ]]; then
+    allowed+=("Bash(${command%%<*}*)")
+  else
+    allowed+=("Bash($command)" "Bash($command *)")
+  fi
+done
+prompt="Audit this area of the repository at commit $sha: $area
+
+Read the area together with whatever it calls and whatever calls it; a change can be correct on its own and wrong
+against an existing caller. Read first for the classes in $plugin_named/skills/review-checklist/SKILL.md${checklist:+ and
+$checklist}${skills[0]:+, then as $(listed "${skills[@]}") does}. There is no issue or diff for this review: audit the code as it is at this
+commit. You have no GitHub and no network, and you cannot edit files; you may run $(listed git "${commands[@]}").
+
+Report only defects with a reproduction: exact inputs and the wrong result, or a test that would fail, with the file and
+line and the checklist class. If you find nothing, say so in one line."
+
+# Writes <file>: the header, then the reviewer's result in $text.
+write_output() {
+  {
+    echo "commit: $sha"
+    echo "area: $area"
+    echo "model: $1"
+    echo "exit: $status"
+    echo "elapsed: ${elapsed}s"
+    echo
+    printf '%s\n' "$text"
+  } > "$output"
+}
+
+status=0
+if [ "$model" = qwen ]; then
+  # Variadic tool lists come after the prompt so they cannot swallow it. dontAsk denies whatever is not allowed here.
+  start=$SECONDS
+  (
+    cd "$clone"
+    unset GH_TOKEN GITHUB_TOKEN
+    export ANTHROPIC_BASE_URL="$base_url" ANTHROPIC_AUTH_TOKEN="$key" ANTHROPIC_API_KEY='' \
+      ANTHROPIC_DEFAULT_OPUS_MODEL="$qwen_model" ANTHROPIC_DEFAULT_SONNET_MODEL="$qwen_model" \
+      ANTHROPIC_DEFAULT_HAIKU_MODEL="$qwen_model" ANTHROPIC_SMALL_FAST_MODEL="$qwen_model" \
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 TRIPHAMMER_SESSION="$clone"  # agent-guard's worktree-only rule
+    exec timeout "$time_limit" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:reviewer \
+      --model "$qwen_model" \
+      --setting-sources project --strict-mcp-config --permission-mode dontAsk --permission-prompts none \
+      --tools Read Grep Glob Bash \
+      --allowedTools Read Grep Glob 'Bash(git *)' "${allowed[@]}" \
+      --disallowedTools Edit Write NotebookEdit WebFetch WebSearch Agent Task 'Bash(gh *)' \
+        'Bash(git fetch *)' 'Bash(git pull *)' 'Bash(git push *)' 'Bash(git clone *)' 'Bash(git remote *)'
+  ) > "$result" 2>&1 || status=$?
+  elapsed=$((SECONDS - start))
+
+  # The session never sees the key on purpose, but a result that echoes it must not carry it into the output file.
+  text="$(<"$result")"
+  text="${text//"$key"/[redacted]}"
+  write_output "$qwen_model"
+
+  if [ "$status" -ne 0 ]; then
+    echo "local-audit: the reviewer session failed (exit $status) after ${elapsed}s; see $output" >&2
+    exit 1
+  fi
+  echo "local-audit: audited $sha in ${elapsed}s; result in $output"
+  exit 0
+fi
+
+# Codex has no --agent, so the prompt starts with the reviewer brief without its frontmatter. A --brief file replaces
+# both; it comes from the caller, never from the clone, so the audited commit cannot change its own prompt.
+if [ -n "$brief" ]; then
+  prompt="$(<"$brief")
+
+The area, at commit $sha: $area"
+else
+  brief_file="$plugin/agents/reviewer.md"
+  if [ ! -s "$brief_file" ]; then
+    echo "local-audit: $where has no reviewer brief at plugins/triphammer/agents/reviewer.md" >&2
+    exit 1
+  fi
+  prompt="$(awk 'NR == 1 && /^---$/ { front = 1; next } front && /^---$/ { front = 0; next }
+    !front && (started || NF) { started = 1; print }' "$brief_file")
+
+$prompt"
+fi
+
+mkdir -p "$state"
+{
+  runs_since 604800
+  for ((i = 0; i < weight; i++)); do echo "$now"; done
+} > "$runs_file.new"
+mv "$runs_file.new" "$runs_file"
+
+# The workspace-write sandbox lets commands write only in the clone and /tmp, read-only lets them write nowhere; both
+# block the network. The prompt is an argument, so stdin is closed: codex would append piped stdin to it.
+start=$SECONDS
+(
+  cd "$clone"
+  unset GH_TOKEN GITHUB_TOKEN
+  exec timeout "$time_limit" codex exec -c 'model_reasoning_effort="medium"' --sandbox "$sandbox" --ephemeral \
+    -m "$codex_model" --json -o "$result" "$prompt"
+) < /dev/null > "$events" 2> "$errors" || status=$?
+elapsed=$((SECONDS - start))
+
+# The JSONL event stream: errors and failed turns, and each command the agent ran with its exit code and output.
+failures="$(jq -r 'select(.type == "error" or .type == "turn.failed") | .message // .error.message // empty' \
+  "$events" 2>/dev/null || true)"
+commands_ok="$(jq -s '[.[] | select(.type == "item.completed" and .item.type == "command_execution"
+  and .item.exit_code == 0)] | length' "$events" 2>/dev/null || echo 0)"
+bwrap_errors="$(jq -r 'select(.type == "item.completed" and .item.type == "command_execution"
+  and (.item.exit_code // 1) != 0) | .item.aggregated_output // empty' "$events" 2>/dev/null | grep -m1 '^bwrap: ' || true)"
+# Codex's stderr also carries its configuration (which names the sandbox), so only its error lines count.
+diagnostics="$failures"$'\n'"$(grep -i -E 'error|fail|denied' "$errors" || true)"
+first_line() { grep -m1 -i -E "$1" <<< "$diagnostics" | cut -c1-200 || true; }
+
+if [ "$status" -eq 124 ]; then
+  echo "local-audit: Codex unavailable: timeout after $time_limit"
+  exit 3
+fi
+usage_line="$(first_line 'usage[ _]limit')"
+if [ -n "$usage_line" ]; then
+  echo "local-audit: Codex: usage limit ($usage_line)"
+  exit 4
+fi
+sandbox_line="$(first_line 'sandbox|bwrap|landlock|seccomp|apparmor')"
+sandbox_line="${sandbox_line:-$bwrap_errors}"
+if [ -n "$sandbox_line" ]; then
+  echo "local-audit: Codex unavailable: sandbox failure ($sandbox_line)"
+  exit 3
+fi
+if [ "$status" -ne 0 ]; then
+  text="$diagnostics"
+  write_output "$codex_model"
+  echo "local-audit: the reviewer session failed (exit $status) after ${elapsed}s; see $output" >&2
+  exit 1
+fi
+# An audit reads the clone through commands; one where no command succeeded, or with no result, read nothing.
+if [ "$commands_ok" = 0 ]; then
+  echo "local-audit: Codex unavailable: sandbox failure (no command succeeded in the sandbox)"
+  exit 3
+fi
+text="$(<"$result")"
+if [ -z "${text//[[:space:]]/}" ]; then
+  echo "local-audit: Codex unavailable: no result (the session wrote an empty result file)"
+  exit 3
+fi
+write_output "$codex_model"
+echo "local-audit: audited $sha in ${elapsed}s; result in $output"

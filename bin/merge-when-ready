@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# A serial merge queue for the pull requests into a default branch that have auto-merge enabled ("armed"), in each
+# repository of the agents' GitHub App's installation on the account that owns the served repository (the Triphammer config's
+# REPO); the merge-when-ready systemd user timer runs this every two minutes. With $TRIPHAMMER_PROJECT set
+# (merge-when-ready@<project>.timer sets it), it serves that project alone: the queue is that project's repository,
+# the runner it reads and starts is that project's, and its log and skip files carry the project's name. GitHub's own
+# auto-merge has not always fired on approved, green pull requests, and the required checks are strict, so each merge
+# leaves every other armed pull request behind. Per repository, armed pull requests not labelled `hold` are taken in
+# the order auto-merge was enabled, oldest first, and a tick:
+#   - merges the oldest one whose merge state is clean, and no other;
+#   - updates at most one branch, with a merge from the base so its checks rerun: the oldest one that is behind and
+#     could merge once current (every required check on its head has passed and its owner-approval status, if any, is
+#     success). One with a failed required check is left for the ticket runner, one waiting for owner-approval waits
+#     without rerunning CI, and one with conflicts is left for an agent;
+#   - updates none while another armed pull request is in flight: a required check other than owner-approval on its
+#     head commit is queued or running, whoever pushed it. One in flight for more than stall_minutes since those checks
+#     were created has stalled, is logged, and no longer holds the line.
+# Each pull request is judged by its head and checks as GitHub reports them during the tick; nothing is cached.
+# Disabling auto-merge on a pull request opts it out; the ruleset still refuses any merge that is not ready.
+# The owner's brakes stop it, as they stop the ticket runner:
+#   - the file `stop` in ticket-runner's state directory (the Triphammer config's STATE_DIR) or in the shared directory every
+#     project shares (config.sh), or an open issue labelled `stop-agents` in any installation repository, means a
+#     tick does nothing; a tick whose stop-agents query fails does nothing either;
+#   - a pull request labelled `hold` is never merged or updated, and does not hold the line;
+#   - while ticket-runner holds its lock (`lock` in its state directory), the pull requests its run may push to
+#     are not updated (an update would move the head a repair is judged by); clean pull requests still merge. Those are
+#     the ones the `current` file there names for the served repository below, by number or by the head branch the run
+#     works on, read only while the lock is held. When that file is missing, unreadable, or not written by the process
+#     holding the lock now (an earlier run's file, or one from before this run wrote its own), no branch is updated.
+# After a tick in which it merged a pull request into the repository ticket-runner serves (the Triphammer config's REPO), it
+# starts the ticket runner once with $TICKET_RUNNER_START, which sees $TRIPHAMMER_PROJECT (default
+# `systemctl --user start --no-block ticket-runner.service`, or ticket-runner@<project>.service with a project), so an
+# issue that merge unblocked starts without waiting for the runner's timer. A merge GitHub's auto-merge made first does
+# not count. The brakes are read again just before the start, and a brake or a failed start is logged and skips it;
+# neither fails the tick.
+# The Triphammer config (bin/config.sh) is read before anything else; a missing or malformed one stops the tick.
+# Every action is appended to ~/.local/state/merge-when-ready.log (merge-when-ready-<project>.log with a project), so a
+# merge can be told apart from GitHub's own.
+# A skip, including a held line or a stall, is logged once when it starts and once when it clears, not on every tick.
+set -euo pipefail
+# Its log and skip files are private to the service user, under systemd (UMask=0077 in merge-when-ready.service) or not.
+umask 077
+
+# An armed pull request whose head checks were created longer ago than this and are still queued or running has
+# stalled: it stops holding the line, so the next one may be updated.
+stall_minutes=45
+
+bin="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$bin/config.sh"
+load_config merge-when-ready "$bin/.."
+# The repository ticket-runner serves, and its state directory.
+served="$cfg_repo" runner_state="$cfg_state_dir"
+# Every gh call gets its token from the App's installation on the account that owns the served repository
+# (bin/github-app-token), so the installation repositories below are that account's.
+export GITHUB_APP_OWNER="${served%%/*}"
+state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+# The suffix of the log and skip files, and the runner unit to start: per project when a template unit runs this.
+suffix="" runner_unit=ticket-runner.service
+if [ -n "${TRIPHAMMER_PROJECT:-}" ]; then
+  suffix="-$cfg_project" runner_unit="ticket-runner@$cfg_project.service"
+fi
+log_file="$state_home/merge-when-ready$suffix.log"
+mkdir -p "$state_home"
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$log_file"; }
+
+# Logs each line of $2 that the file $1 did not list after the previous tick, and each listed one that is gone as
+# cleared, then stores $2 in $1.
+log_changed_skips() {
+  local file="$1" now="$2" before=""
+  [ ! -e "$file" ] || before="$(cat "$file")"
+  while IFS= read -r line; do [ -z "$line" ] || log "$line"; done \
+    < <(LC_ALL=C comm -13 <(LC_ALL=C sort <<< "$before") <(LC_ALL=C sort <<< "$now"))
+  while IFS= read -r line; do [ -z "$line" ] || log "cleared: $line"; done \
+    < <(LC_ALL=C comm -23 <(LC_ALL=C sort <<< "$before") <(LC_ALL=C sort <<< "$now"))
+  printf '%s\n' "$now" > "$file"
+}
+
+installed="$(gh api /installation/repositories --paginate --jq '.repositories[].full_name')"
+# The repositories whose queues this tick runs: every installation repository, or with a project only its own, so the
+# merge-when-ready of one project never merges or updates another project's pull requests.
+repositories="$installed"
+[ -z "${TRIPHAMMER_PROJECT:-}" ] || repositories="$(grep -Fx -- "$served" <<< "$installed" || true)"
+
+# Sets brakes to why the owner's brakes stop the tick, or to nothing when none does.
+read_brakes() {
+  local repository stop_issues
+  brakes=""
+  [ ! -e "$runner_state/stop" ] || { brakes="paused: $runner_state/stop exists"; return; }
+  [ ! -e "$cfg_shared_dir/stop" ] || { brakes="paused: $cfg_shared_dir/stop exists"; return; }
+  for repository in $installed; do
+    if ! stop_issues="$(gh issue list -R "$repository" --state open --label stop-agents --json number --jq '.[].number')"; then
+      brakes="paused: the stop-agents query for $repository failed"
+      return
+    fi
+    if [ -n "$stop_issues" ]; then
+      brakes="paused: an open issue in $repository is labelled stop-agents"
+      return
+    fi
+  done
+}
+
+read_brakes
+log_changed_skips "$state_home/merge-when-ready$suffix.brakes" "$brakes"
+case "$brakes" in
+  '') ;;
+  *failed) exit 1 ;;
+  *) exit 0 ;;
+esac
+
+start_runner="${TICKET_RUNNER_START:-systemctl --user start --no-block $runner_unit}"
+# The pull request this tick merged in the served repository, as <repo>#<number>.
+served_merge=""
+
+# Tested without creating the file: flock(1) would create a missing one, and a missing lock is not held.
+runner_busy=""
+if [ -e "$runner_state/lock" ] && ! flock -n "$runner_state/lock" true; then runner_busy=1; fi
+
+# While the lock is held, sets runner_prs to the pull requests of the served repository that ticket-runner's run may
+# push to, runner_branch to the branch its session works on (which a pull request it opens during the run has) and
+# runner_doing to what it does with them, from the `current` file the runner writes (`key value` lines: pid, started,
+# kind, number, branch, prs). The file counts only when the process it names is alive, has the same start time
+# (field 22 of /proc/<pid>/stat) and has the lock file open, so it holds the lock now. Otherwise runner_blocked says
+# why no branch is updated.
+skips=""
+runner_blocked="" runner_prs="" runner_branch="" runner_doing=""
+read_current() {
+  local file="$runner_state/current" key value pid="" started="" kind="" number="" branch="" prs="" stat fields fd lock
+  [ -e "$file" ] || { runner_blocked="$file is missing"; return; }
+  if ! { while read -r key value; do
+    case "$key" in
+      pid) pid="$value" ;; started) started="$value" ;; kind) kind="$value" ;; number) number="$value" ;;
+      branch) branch="$value" ;; prs) prs="$value" ;;
+    esac
+  done < "$file"; } 2>/dev/null \
+    || ! [[ "$pid" =~ ^[0-9]+$ && "$started" =~ ^[0-9]+$ && "$kind" =~ ^(ticket|repair)$ && "$number" =~ ^[0-9]+$ \
+      && "$branch" =~ ^[A-Za-z0-9._/-]+$ && "$prs" =~ ^([0-9]+( [0-9]+)*)?$ ]]; then
+    runner_blocked="$file is unreadable"
+    return
+  fi
+  if ! read -r stat 2>/dev/null < "/proc/$pid/stat"; then
+    runner_blocked="$file names process $pid, which has ended; it is from an earlier run"
+    return
+  fi
+  read -ra fields <<< "${stat##*) }"
+  if [ "${fields[19]:-}" != "$started" ]; then
+    runner_blocked="$file names an earlier process $pid; it is from an earlier run"
+    return
+  fi
+  lock="$(readlink -f "$runner_state/lock")"
+  for fd in /proc/"$pid"/fd/*; do
+    if [ "$(readlink "$fd" 2>/dev/null)" = "$lock" ]; then
+      runner_prs="$prs" runner_branch="$branch"
+      if [ "$kind" = repair ]; then runner_doing="is repairing it"; else runner_doing="is working on its issue"; fi
+      return
+    fi
+  done
+  runner_blocked="$file names process $pid, which does not hold the lock; it is from an earlier run"
+}
+if [ -n "$runner_busy" ]; then
+  read_current
+  [ -z "$runner_blocked" ] || \
+    skips+="ticket-runner holds its lock and $runner_blocked; not updating any branch"$'\n'
+fi
+# Whether ticket-runner's run may push to pull request $2, with head branch $3, of repository $1.
+runner_owns() { [ "$1" = "$served" ] && { [[ " $runner_prs " == *" $2 "* ]] || [ "$3" = "$runner_branch" ]; }; }
+
+# The list of open pull requests; each candidate's head and checks are then read on their own (checks_query below).
+query='query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    pullRequests(states: OPEN, first: 100) {
+      nodes { number baseRefName headRefName headRefOid mergeStateStatus autoMergeRequest { enabledAt } labels(first: 100) { nodes { name } } }
+    }
+  }
+}'
+
+# One pull request's current head, merge state and the checks on that head; isRequired asks GitHub whether the
+# repository's rules (rulesets or branch protection) require that check for this pull request.
+checks_query='query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      headRefOid mergeStateStatus
+      commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+        __typename
+        ... on CheckRun { name status conclusion startedAt checkSuite { createdAt } isRequired(pullRequestNumber: $number) }
+        ... on StatusContext { context state createdAt isRequired(pullRequestNumber: $number) }
+      } } } } } }
+    }
+  }
+}'
+
+# Prints "<head> <merge state> <verdict> <since>" from checks_query's answer. Only the latest run of each check counts
+# (a rerun or a cancelled duplicate is superseded). Among required checks other than owner-approval: any queued or
+# running one makes the verdict `in-flight`, and <since> is when the earliest of them was created; otherwise any failed
+# one makes it `failed`. Otherwise an owner-approval status that is present and not success makes it `approval`, and
+# anything else `ready`. <since> is `-` unless in flight.
+checks_verdict='.data.repository.pullRequest as $p
+  | [($p.commits.nodes[-1].commit.statusCheckRollup.contexts.nodes // [])[]
+      | {name: (.name // .context), required: (.isRequired == true),
+         at: (.startedAt // .checkSuite.createdAt // .createdAt // ""),
+         phase: (if .__typename == "StatusContext" then
+                   (if .state == "SUCCESS" then "passed" elif .state == "PENDING" or .state == "EXPECTED" then "pending"
+                    else "failed" end)
+                 elif .status != "COMPLETED" then "pending"
+                 elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "passed"
+                 else "failed" end)}]
+  | group_by(.name) | map(sort_by(if .phase == "pending" and .at == "" then "~" else .at end) | last) as $latest
+  | ($latest | map(select(.required and .name != "owner-approval"))) as $required
+  | ($latest | map(select(.name == "owner-approval")) | first) as $approval
+  | ($required | map(select(.phase == "pending"))) as $pending
+  | "\($p.headRefOid) \($p.mergeStateStatus) " + (
+      if ($pending | length) > 0 then "in-flight \($pending | map(.at) | map(select(. != "")) | min // "-")"
+      elif any($required[]; .phase == "failed") then "failed -"
+      elif $approval != null and $approval.phase != "passed" then "approval -"
+      else "ready -" end)'
+
+status=0
+now="$(date -u +%s)"
+declare -A branch_of  # each armed pull request's head branch, by number
+for repository in $repositories; do
+  owner="${repository%/*}" name="${repository#*/}"
+  # Armed pull requests into the default branch, oldest auto-merge first.
+  armed="$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" --jq '
+    .data.repository as $r | [$r.pullRequests.nodes[]
+    | select(.autoMergeRequest != null and .baseRefName == $r.defaultBranchRef.name)] | sort_by(.autoMergeRequest.enabledAt, .number)[]
+    | "\(.number) \(.headRefOid) \(.mergeStateStatus) \(if any(.labels.nodes[]; .name == "hold") then "hold" else "-" end) \(.headRefName)"')"
+  queue=() branch_of=()
+  merge_number="" merge_head=""
+  while read -r number head state hold branch; do
+    [ -n "$number" ] || continue
+    branch_of[$number]="$branch"
+    if [ "$hold" = hold ]; then
+      case "$state" in CLEAN|BEHIND) skips+="$repository#$number: labelled hold; not merging or updating it"$'\n' ;; esac
+      continue
+    fi
+    if [ "$state" = CLEAN ] && [ -z "$merge_number" ]; then
+      merge_number="$number" merge_head="$head"
+      continue
+    fi
+    if [ "$state" = BEHIND ] && [ -n "$runner_blocked" ]; then
+      skips+="$repository#$number: behind its base; not updating it while ticket-runner holds its lock"$'\n'
+    fi
+    queue+=("$number")
+  done <<< "$armed"
+
+  # Merge the oldest clean pull request; the others are behind once it lands, so none is tried after it this tick.
+  if [ -n "$merge_number" ]; then
+    log "$repository#$merge_number: auto-merge enabled and clean at ${merge_head:0:7}; merging"
+    # GitHub's auto-merge may get there first.
+    if gh pr merge "$merge_number" --repo "$repository" --squash --match-head-commit "$merge_head"; then
+      log "$repository#$merge_number: merged by merge-when-ready"
+      [ "$repository" != "$served" ] || served_merge="$repository#$merge_number"
+    elif [ "$(gh pr view "$merge_number" --repo "$repository" --json state --jq .state)" = MERGED ]; then
+      log "$repository#$merge_number: already merged (GitHub auto-merge)"
+    else
+      log "$repository#$merge_number: merge failed" >&2
+      status=1
+    fi
+  fi
+  [ -z "$runner_blocked" ] || continue
+
+  # Update at most one branch: the oldest behind pull request that could merge once current, and only while no other
+  # armed pull request is in flight (unless that one has stalled). Each is judged by its head as GitHub reports it now.
+  holder="" candidate="" candidate_head=""
+  for number in "${queue[@]}"; do
+    if ! verdict="$(gh api graphql -f query="$checks_query" -f owner="$owner" -f name="$name" -F number="$number" \
+      --jq "$checks_verdict")"; then
+      log "$repository#$number: reading its checks failed; not updating any branch this tick" >&2
+      status=1
+      holder=unknown
+      break
+    fi
+    read -r head state verdict since <<< "$verdict"
+    case "$verdict" in
+      in-flight)
+        # No readable creation time holds the line: stalling is only judged from a time GitHub reported.
+        since_epoch="$now"
+        [ "$since" = - ] || since_epoch="$(date -u -d "$since" +%s 2>/dev/null)" || since_epoch="$now"
+        if [ $((now - since_epoch)) -gt $((stall_minutes * 60)) ]; then
+          skips+="$repository#$number: in flight since $since, past $stall_minutes minutes; stalled, not holding the line"$'\n'
+        elif [ -z "$holder" ]; then
+          holder="$number"
+        fi ;;
+      failed)
+        [ "$state" != BEHIND ] || skips+="$repository#$number: behind its base with a failed required check; not updating it"$'\n' ;;
+      approval)
+        [ "$state" != BEHIND ] || skips+="$repository#$number: behind its base, waiting for owner-approval; not updating it"$'\n' ;;
+      ready)
+        # One the runner may push to still holds the line while in flight, but is never updated.
+        if [ "$state" = BEHIND ] && runner_owns "$repository" "$number" "${branch_of[$number]}"; then
+          skips+="$repository#$number: not updating it while ticket-runner $runner_doing"$'\n'
+        elif [ "$state" = BEHIND ] && [ -z "$candidate" ]; then
+          candidate="$number" candidate_head="$head"
+        fi ;;
+    esac
+  done
+  [ -n "$candidate" ] && [ "$holder" != unknown ] || continue
+  if [ -n "$holder" ]; then
+    skips+="$repository#$holder in flight; not updating #$candidate"$'\n'
+    continue
+  fi
+  log "$repository#$candidate: armed but behind its base at ${candidate_head:0:7}; updating the branch"
+  if ! gh pr update-branch "$candidate" --repo "$repository" >/dev/null; then
+    log "$repository#$candidate: branch update failed" >&2
+    status=1
+  fi
+done
+log_changed_skips "$state_home/merge-when-ready$suffix.skips" "${skips%$'\n'}"
+
+# Start the ticket runner once after a merge into the repository it serves.
+if [ -n "$served_merge" ]; then
+  read_brakes
+  if [ -n "$brakes" ]; then
+    log "not starting ticket-runner after merging $served_merge: $brakes"
+  elif sh -c "$start_runner"; then
+    log "started ticket-runner after merging $served_merge"
+  else
+    log "starting ticket-runner after merging $served_merge failed" >&2
+  fi
+fi
+exit "$status"

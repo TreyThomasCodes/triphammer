@@ -1,0 +1,227 @@
+#!/usr/bin/env -S python3 -I
+"""Publishes a pull request's demo to the gallery on the agent machine: the Triphammer config's demo module.
+
+  demo-publish <pr> --summary <line> <folder>   copy the screenshots (.png) and videos (.webm, .mp4) found under
+                                               <folder> for <pr>, with a one-line summary; videos become H.264 MP4
+  demo-publish --reindex                        refresh pull request states and rebuild the page
+
+Publishing <pr> again replaces its media. Symlinks inside the folder, and a folder argument that is itself a symlink,
+are never followed, and a file whose real path leaves the folder is never copied; each one is named in the output as
+skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
+DEMO_URL; with the demo module off, or either setting missing, it exits 2 (bin/README.md, "Configuration").
+"""
+import html, json, os, shutil, stat, subprocess, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def demo_settings():
+    """The repository, the gallery directory and its URL, read by bin/config.sh, the one reader of Triphammer
+    config, from the checkout this script lives in; or exit 2 with its message, which names the file and the setting,
+    or the demo module when it is off."""
+    bin_dir = Path(__file__).resolve().parent
+    result = subprocess.run(["bash", bin_dir / "config.sh", "--print", "demo-publish", bin_dir.parent,
+                             "--module", "demo", "DEMO_GALLERY_DIR", "DEMO_URL", "--", "REPO", "DEMO_GALLERY_DIR", "DEMO_URL"],
+                            capture_output=True)
+    values = result.stdout.split(b"\0") if result.returncode == 0 else []
+    if len(values) != 4:
+        sys.stderr.buffer.write(result.stderr or b"demo-publish: bin/config.sh failed\n")
+        sys.exit(2)
+    repo, gallery, url = map(os.fsdecode, values[:3])
+    return repo, Path(gallery), url
+
+
+def pr_info(number):
+    raw = subprocess.run(
+        ["gh", "pr", "view", str(number), "-R", REPO, "--json", "title,url,state,labels,mergedAt"],
+        check=True, capture_output=True, text=True).stdout
+    info = json.loads(raw)
+    return {
+        "title": info["title"], "url": info["url"], "state": info["state"], "merged_at": info["mergedAt"],
+        "needs_owner": any(label["name"] == "needs-owner" for label in info["labels"]),
+    }
+
+
+def skip(path, reason):
+    print(f"skipped {path}: {reason}")
+
+
+def walk(folder, root):
+    """The regular files under folder, never following a symlink, as (path, root) pairs; the rest is skipped."""
+    found = []
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.is_symlink():
+                skip(path, "a symlink, not followed")
+            elif entry.is_dir(follow_symlinks=False):
+                found += walk(path, root)
+            elif entry.is_file(follow_symlinks=False):
+                found.append((path, root))
+            else:
+                skip(path, "not a regular file")
+    return found
+
+
+def collect(source):
+    """Every regular file under the source folder, each paired with the real path of the folder it must stay inside."""
+    if source.is_symlink():
+        skip(source, "a symlink, not followed")
+        return []
+    return sorted(walk(source, source.resolve()))
+
+
+def open_inside(path, root):
+    """A read descriptor for path when it is a regular file, not a symlink or hard link, whose real path is inside root;
+    else None. A hard link has another name that may lie outside root, so a file with more than one link is refused."""
+    if not path.resolve().is_relative_to(root):
+        skip(path, f"outside {root}")
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)  # a symlink fails, a FIFO cannot block
+    except OSError as error:
+        skip(path, f"could not be opened without following a symlink ({error.strerror})")
+        return None
+    info = os.fstat(fd)
+    refusal = ("not a regular file" if not stat.S_ISREG(info.st_mode)
+               else "has other hard links" if info.st_nlink > 1 else None)
+    if refusal:
+        os.close(fd)
+        skip(path, refusal)
+        return None
+    return fd
+
+
+def publish(number, summary, source):
+    # Every file is checked and opened before the old entry is removed, so a run where nothing survives leaves it intact.
+    media = []
+    try:
+        for index, (path, root) in enumerate(collect(source)):
+            suffix = path.suffix.lower()
+            if suffix in (".png", ".webm", ".mp4") and (fd := open_inside(path, root)) is not None:
+                media.append((f"{index:02d}-{path.parent.name[:40]}-{path.stem}".replace(" ", "-"), suffix, fd))
+        if not media:
+            sys.exit("demo-publish: no .png, .webm or .mp4 files found")
+        info = pr_info(number)  # fails before anything is written when the pull request does not exist
+        folder = ROOT / f"pr-{number}"
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+        images, videos = [], []
+        for name, suffix, fd in media:
+            # Media is read only through the descriptor checked above, so the path cannot be swapped for a symlink first.
+            if suffix == ".png":
+                with open(fd, "rb", closefd=False) as source, open(folder / f"{name}.png", "wb") as target:
+                    shutil.copyfileobj(source, target)
+                images.append(f"{name}.png")
+            else:
+                subprocess.run(
+                    ["ffmpeg", "-loglevel", "error", "-y", "-i", f"/dev/fd/{fd}", "-c:v", "libx264", "-pix_fmt",
+                     "yuv420p", "-movflags", "+faststart", "-an", str(folder / f"{name}.mp4")],
+                    check=True, pass_fds=(fd,))
+                videos.append(f"{name}.mp4")
+    finally:
+        for _, _, fd in media:
+            os.close(fd)
+    meta = {"pr": number, "summary": summary, "images": images, "videos": videos,
+            "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **info}
+    (folder / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"published PR #{number} to {URL}: {len(videos)} video(s), {len(images)} screenshot(s)")
+
+
+def entries():
+    for path in ROOT.glob("pr-*/meta.json"):
+        yield path, json.loads(path.read_text())
+
+
+def reindex():
+    for path, meta in entries():
+        if meta["state"] == "OPEN":
+            try:
+                meta.update(pr_info(meta["pr"]))
+                path.write_text(json.dumps(meta, indent=2))
+            except subprocess.CalledProcessError:
+                pass
+
+
+def badge(meta):
+    if meta["state"] == "MERGED":
+        return "merged", "Merged"
+    if meta["state"] == "CLOSED":
+        return "closed", "Closed"
+    return ("waiting", "Waiting on you") if meta["needs_owner"] else ("open", "In progress")
+
+
+def render():
+    cards = []
+    for _, meta in sorted(entries(), key=lambda e: e[1]["published_at"], reverse=True):
+        kind, label = badge(meta)
+        base = f"pr-{meta['pr']}/"
+        media = "".join(
+            f'<video controls muted playsinline preload="metadata" src="{base}{html.escape(v)}"></video>' for v in meta["videos"])
+        shots = "".join(
+            f'<a href="{base}{html.escape(i)}"><img loading="lazy" src="{base}{html.escape(i)}" alt=""></a>' for i in meta["images"])
+        when = (meta.get("merged_at") or meta["published_at"])[:16].replace("T", " ")
+        summary = f"<p>{html.escape(meta['summary'])}</p>" if meta.get("summary") else ""
+        cards.append(
+            f'<article data-kind="{kind}"><header><a href="{html.escape(meta["url"])}">#{meta["pr"]} {html.escape(meta["title"])}</a>'
+            f'<span class="badge {kind}">{label}</span><time>{when} UTC</time></header>{summary}'
+            f'<div class="videos">{media}</div><div class="shots">{shots}</div></article>')
+    body = "".join(cards) or "<p>No demos yet.</p>"
+    page = PAGE.replace("{{cards}}", body)
+    (ROOT / "index.html.tmp").write_text(page)
+    os.replace(ROOT / "index.html.tmp", ROOT / "index.html")
+
+
+PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Options X-Ray Demos</title>
+<style>
+:root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#5b6470; --line:#dde1e6; --merged:#8250df; --waiting:#bf3989; --open:#1a7f37; --closed:#6e7781; }
+@media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#9198a1; --line:#30363d; --merged:#a371f7; --waiting:#db61a2; --open:#3fb950; --closed:#8b949e; } }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+main { max-width:960px; margin:0 auto; padding:16px; }
+h1 { font-size:20px; margin:8px 0 12px; }
+nav { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+nav button { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:999px; padding:4px 12px; cursor:pointer; }
+nav button[aria-pressed=true] { border-color:var(--text); font-weight:600; }
+article { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:16px; }
+header { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
+header a { color:var(--text); font-weight:600; text-decoration:none; flex:1 1 280px; }
+header a:hover { text-decoration:underline; }
+time { color:var(--muted); font-size:13px; }
+.badge { font-size:12px; color:#fff; border-radius:999px; padding:1px 8px; }
+.merged { background:var(--merged); } .waiting { background:var(--waiting); } .open { background:var(--open); } .closed { background:var(--closed); }
+article p { margin:6px 0 10px; color:var(--muted); }
+video { width:100%; border-radius:6px; border:1px solid var(--line); margin-top:8px; background:#000; }
+.shots { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:8px; margin-top:8px; }
+.shots img { width:100%; border-radius:6px; border:1px solid var(--line); display:block; }
+</style></head>
+<body><main><h1>Options X-Ray demos</h1>
+<nav><button aria-pressed="true" data-filter="all">All</button><button aria-pressed="false" data-filter="waiting">Waiting on you</button><button aria-pressed="false" data-filter="merged">Merged</button></nav>
+{{cards}}
+</main>
+<script>
+document.querySelectorAll('nav button').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+  document.querySelectorAll('article').forEach(card => {
+    card.hidden = button.dataset.filter !== 'all' && card.dataset.kind !== button.dataset.filter;
+  });
+}));
+</script></body></html>
+"""
+
+if __name__ == "__main__":
+    os.umask(0o022)  # a server running as another user may serve the gallery; ticket-runner runs under umask 077
+    args = sys.argv[1:]
+    reindexing = args == ["--reindex"]
+    if not reindexing and not (len(args) == 4 and args[0].isdigit() and args[1] == "--summary" and args[2].strip()
+                               and (Path(args[3]).is_symlink() or Path(args[3]).is_dir())):
+        sys.exit(__doc__)
+    REPO, ROOT, URL = demo_settings()
+    ROOT.mkdir(parents=True, exist_ok=True)
+    if reindexing:
+        reindex()
+    else:
+        publish(int(args[0]), args[2], Path(args[3]))
+    render()

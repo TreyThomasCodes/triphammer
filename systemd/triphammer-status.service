@@ -1,0 +1,19 @@
+# Read-only ticket runner status page. Install from the main checkout (see README.md):
+#   systemctl --user link <main checkout>/systemd/triphammer-status.service
+#   systemctl --user enable --now triphammer-status.service
+# It runs ~/.local/bin/triphammer-status, the symlink to the main checkout's server.mjs the install creates, so the unit names
+# no checkout. One unit serves every project: without TRIPHAMMER_PROJECT the server shows each Triphammer config it finds
+# (README.md, "Run"); restart it after adding or removing one.
+# The address, port and allowed Host names are STATUS_HOST, STATUS_PORT and STATUS_ALLOWED_HOSTS in the
+# project configs (../bin/README.md, "Configuration"); without them it listens on 127.0.0.1:8787.
+[Unit]
+Description=Read-only status page for the ticket runner of every project on the machine
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env node %h/.local/bin/triphammer-status
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

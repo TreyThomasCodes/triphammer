@@ -1,0 +1,31 @@
+{
+  "issues": [],
+  "prs": [
+    {"number": 40, "title": "Product fix with tests, still classifying", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "BLOCKED",
+     "files": [{"path": "src/Example/A.cs", "changeType": "MODIFIED"}, {"path": "tests/Example.Tests/ATests.cs", "changeType": "MODIFIED"}],
+     "statusCheckRollup": [{"__typename": "StatusContext", "context": "owner-approval", "state": "PENDING", "startedAt": "2026-01-02T00:00:00Z"}]},
+    {"number": 41, "title": "Product fix with tests, auto", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "BLOCKED",
+     "files": [{"path": "src/Example/A.cs", "changeType": "MODIFIED"}, {"path": "tests/Example.Tests/ATests.cs", "changeType": "MODIFIED"}],
+     "statusCheckRollup": [{"__typename": "StatusContext", "context": "owner-approval", "state": "SUCCESS", "startedAt": "2026-01-02T00:00:00Z"}]},
+    {"number": 42, "title": "Rename out of Triphammer", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "BLOCKED",
+     "files": [{"path": "src/Example/Moved.cs", "changeType": "RENAMED"}],
+     "statusCheckRollup": [{"__typename": "StatusContext", "context": "owner-approval", "state": "PENDING", "startedAt": "2026-01-02T00:00:00Z"}]},
+    {"number": 43, "title": "Tooling change, no status yet", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "BLOCKED",
+     "files": [{"path": "scripts/gate.sh", "changeType": "MODIFIED"}], "statusCheckRollup": []}
+  ],
+  "labelEvents": {"data": {"repository": {
+    "defaultBranchRef": {"name": "main"},
+    "issues": {"nodes": []},
+    "pullRequests": {"nodes": []},
+    "approvals": {"nodes": [
+      {"number": 40, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Classifying the change"}}}}]}},
+      {"number": 41, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "SUCCESS", "description": "Auto tier: no approval needed"}}}}]}},
+      {"number": 42, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Escalate: waiting for @o to approve 4200000 (Files changed, Review changes, Approve)"}}}}]}},
+      {"number": 43, "commits": {"nodes": [{"commit": {"status": null}}]}}
+    ]}
+  }}}
+}

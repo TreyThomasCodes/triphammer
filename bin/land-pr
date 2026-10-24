@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Lands a pull request with main's copy of scripts/land-pr.sh (the merge-policy skill), as one command a session
+# can run where piping fetched content into bash would be refused. Usage, from the worktree whose HEAD is the pull
+# request's pushed head:
+#   land-pr <pr>
+# The landing scripts come from Triphammer's checkout, the one this file lives in (through any symlink), which may be a
+# repository other than the project's worktree it runs in. It fetches that checkout's main and runs only when this file
+# is byte for byte main's copy of bin/land-pr there, so a branch's copy of the wrapper never lands anything. It
+# never runs a working tree's scripts/land-pr.sh, and tells land-pr.sh where Triphammer's checkout is
+# ($TRIPHAMMER_CHECKOUT), so main's classifier there is the one that runs.
+# Exit code: land-pr.sh's (0 landed, 3 blocked, 1 anything else), or 1 when it refuses before running it.
+set -euo pipefail
+
+# One function, read whole before it runs, so an update of this file mid-run cannot change the run.
+main() {
+  [ "$#" -eq 1 ] || { echo "usage: land-pr <pull request number>" >&2; exit 1; }
+  pr="$1"
+  self="$(readlink -f "${BASH_SOURCE[0]}")"
+  triphammer="$(git -C "$(dirname "$self")" rev-parse --show-toplevel)" \
+    || { echo "land-pr: $self is not in a git checkout; nothing ran" >&2; exit 1; }
+
+  git -C "$triphammer" fetch -q origin main || { echo "land-pr: cannot fetch origin main in $triphammer; nothing ran" >&2; exit 1; }
+  if ! git -C "$triphammer" show refs/remotes/origin/main:bin/land-pr 2>/dev/null | cmp -s - "$self"; then
+    # The direct command for this worktree: plain when it is in Triphammer's own repository, with Triphammer's checkout
+    # named when the project is another repository.
+    direct="git fetch origin main && git show refs/remotes/origin/main:scripts/land-pr.sh | bash -s -- $pr"
+    if [ "$(git -C "$triphammer" rev-parse --path-format=absolute --git-common-dir)" \
+      != "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)" ]; then
+      direct="git -C $triphammer fetch origin main && git -C $triphammer show refs/remotes/origin/main:scripts/land-pr.sh | TRIPHAMMER_CHECKOUT=$triphammer bash -s -- $pr"
+    fi
+    echo "land-pr: $self is not main's copy of bin/land-pr; nothing ran. Its checkout is behind origin/main; run main's script directly: $direct" >&2
+    exit 1
+  fi
+  script="$(git -C "$triphammer" show refs/remotes/origin/main:scripts/land-pr.sh)" \
+    || { echo "land-pr: cannot read main's scripts/land-pr.sh; nothing ran" >&2; exit 1; }
+  # land-pr.sh is fed on stdin, as `bash -s` expects, and closes stdin for everything it starts.
+  TRIPHAMMER_CHECKOUT="$triphammer" exec bash -s -- "$pr" <<< "$script"
+}
+main "$@"

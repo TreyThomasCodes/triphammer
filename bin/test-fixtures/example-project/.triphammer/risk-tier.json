@@ -1,0 +1,68 @@
+{
+  "rules": [
+    {
+      "why": "Applied migrations are history: change the schema with a new migration instead.",
+      "tier": "blocked",
+      "paths": ["^database/migrations/V\\d{4}__.+\\.sql$"],
+      "exceptStatuses": ["A"],
+      "reason": "applied migrations are immutable; add a new migration"
+    },
+    {
+      "why": "Agent instructions, skills and plugins at any depth.",
+      "tier": "escalate",
+      "paths": ["(^|/)((AGENTS|CLAUDE)\\.md|\\.agents|\\.claude|\\.claude-plugin)(/|$)", "^plugins/"],
+      "reason": "agent instructions or skills"
+    },
+    {
+      "why": "The workflow's own rules and settings for this project, at any depth.",
+      "tier": "escalate",
+      "paths": ["(^|/)\\.triphammer(/|$)"],
+      "reason": "workflow rules or settings"
+    },
+    {
+      "why": "A modified npm manifest or lockfile merges automatically only when it moves packages already in use to registry releases at least a week old.",
+      "check": "npmDependencyUpdates",
+      "manifests": ["(^|/)package\\.json$"],
+      "lockfiles": ["(^|/)package-lock\\.json$"]
+    },
+    {
+      "why": "Build and package configuration changes what gets built, wherever it lives.",
+      "tier": "escalate",
+      "paths": ["(^|/)(package(-lock)?\\.json|[^/]+\\.csproj|Directory\\.[^/]+\\.props)$"],
+      "ignoreCase": true,
+      "reason": "build or package configuration"
+    },
+    {
+      "why": "CI, scripts and tools are the checks agents run under.",
+      "tier": "escalate",
+      "paths": ["^(\\.github/|scripts/|tools/)"],
+      "reason": "checks or tooling"
+    },
+    {
+      "why": "Deleting a test file could quietly weaken the checks.",
+      "tier": "escalate",
+      "paths": ["^(tests/.+Tests\\.cs|src/.+\\.spec\\.ts)$"],
+      "statuses": ["D"],
+      "reason": "deletes a test"
+    },
+    {
+      "why": "Files that declare test cases.",
+      "check": "testFiles",
+      "csharp": {
+        "files": ["^tests/.+\\.cs$"],
+        "removedTests": true,
+        "conditionalCompilation": true
+      },
+      "javascript": {
+        "files": ["^src/.+\\.(spec|test)\\.(ts|tsx|js|mjs)$"],
+        "removedTests": true
+      }
+    },
+    {
+      "why": "Production code, tests and docs merge automatically once CI is green.",
+      "tier": "auto",
+      "paths": ["^src/.+", "^tests/.+", "^docs/.+\\.md$"]
+    }
+  ],
+  "unmatchedReason": "outside the areas that merge automatically"
+}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Appends the agents' Co-Authored-By trailer to a commit message that has none for noreply@anthropic.com (any name or
+# letter case counts), so agents never have to remember it. Merge commits and empty messages are left alone.
+# bin/ticket-runner points core.hooksPath of each worktree it creates at Triphammer's checkout's copy of this
+# directory.
+set -euo pipefail
+
+message="$1"
+trailer='Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>'
+
+[ ! -e "$(git rev-parse --git-path MERGE_HEAD)" ] || exit 0
+# What git will keep: the text above a `git commit -v` scissors line, without comment lines.
+content="$(sed '/^# -\{24\} >8 -\{24\}$/,$d' "$message" | git stripspace --strip-comments)"
+[ -n "$content" ] || exit 0  # git aborts an empty message; a trailer must not turn it into a commit
+if grep -qiE '^co-authored-by:.*<noreply@anthropic\.com>[[:space:]]*$' <<< "$content"; then exit 0; fi
+git interpret-trailers --in-place --no-divider --trailer "$trailer" "$message"

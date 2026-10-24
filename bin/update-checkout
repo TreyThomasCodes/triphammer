@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Fast-forwards a checkout to origin/main, so merged changes to bin/ and status/ go live without anyone
+# pulling. ticket-runner calls it at the start of each tick on Triphammer's checkout, and on the project's checkout when
+# that is another repository; see bin/README.md.
+#
+#   update-checkout [checkout]        default: the Triphammer config's CHECKOUT (bin/config.sh)
+#
+# It only updates a checkout that is on `main` with a clean tree (no staged, unstaged or untracked files outside
+# .gitignore), and only by fast-forward. Otherwise it prints why and leaves the checkout alone. The long-running servers
+# read their code and the Triphammer config reader once, at startup, so when the update changes them it restarts them:
+#   status/ or bin/config.sh      the status page, with $STATUS_RESTART
+#                                                     (default `systemctl --user restart triphammer-status.service`)
+#   bin/demo-gallery or bin/config.sh every running demo gallery, with $DEMO_GALLERY_RESTART
+#                                                     (default `systemctl --user try-restart 'demo-gallery@*.service'`,
+#                                                     which leaves alone a gallery unit that is not running)
+# Every line it prints is meant for the caller's log; nothing is printed when the checkout is already current. It exits
+# non-zero only when git or a restart fails; a failed restart is printed and the other restart still runs.
+set -euo pipefail
+
+checkout="${1:-}"
+if [ -z "$checkout" ]; then
+  bin="$(dirname "$(readlink -f "$0")")"
+  # shellcheck source=bin/config.sh
+  source "$bin/config.sh"
+  load_config update-checkout "$bin/.."
+  checkout="$cfg_checkout"
+fi
+status_restart="${STATUS_RESTART:-systemctl --user restart triphammer-status.service}"
+gallery_restart="${DEMO_GALLERY_RESTART:-systemctl --user try-restart 'demo-gallery@*.service'}"
+
+branch="$(git -C "$checkout" symbolic-ref -q --short HEAD || true)"
+if [ "$branch" != main ]; then
+  echo "self-update skipped: $checkout is on ${branch:-a detached HEAD}, not main"
+  exit 0
+fi
+if [ -n "$(git -C "$checkout" status --porcelain)" ]; then
+  echo "self-update skipped: $checkout has uncommitted or untracked changes"
+  exit 0
+fi
+
+git -C "$checkout" fetch -q origin
+before="$(git -C "$checkout" rev-parse HEAD)"
+if ! git -C "$checkout" merge -q --ff-only refs/remotes/origin/main >/dev/null 2>&1; then
+  echo "self-update skipped: main in $checkout cannot fast-forward to origin/main"
+  exit 0
+fi
+after="$(git -C "$checkout" rev-parse HEAD)"
+[ "$before" != "$after" ] || exit 0
+echo "self-update: fast-forwarded $checkout from ${before:0:7} to ${after:0:7}"
+
+failed=0
+# restart <name> <command> <path>...: runs <command> when the update changed any <path>, naming the ones it changed.
+restart() {
+  local name="$1" command="$2" path changed=()
+  shift 2
+  for path; do
+    git -C "$checkout" diff --quiet "$before" "$after" -- "$path" || changed+=("$path")
+  done
+  [ "${#changed[@]}" -gt 0 ] || return 0
+  echo "self-update: ${changed[*]} changed; restarting $name"
+  if ! sh -c "$command"; then
+    echo "self-update: restarting $name failed"
+    failed=1
+  fi
+}
+restart triphammer-status "$status_restart" status/ bin/config.sh
+restart demo-gallery "$gallery_restart" bin/demo-gallery bin/config.sh
+exit "$failed"

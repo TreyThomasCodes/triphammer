@@ -1,0 +1,18 @@
+{
+  "name": "example-project",
+  "demos": true,
+  "worktreeTeardown": ["scripts/local-db.sh", "down"],
+  "shellEditRoots": ["src", "tests"],
+  "composeProjectPattern": "^example-project-(local|it)-[0-9]+$",
+  "securityReviewPaths": "^(bin/|status/|plugins/triphammer/hooks/|\\.claude/settings\\.json$|scripts/risk-tier|\\.github/|\\.triphammer/)|\\.(service|timer|path)$",
+  "securityReviewArea": "bin/, status/, the Triphammer plugin's hooks (plugins/triphammer/hooks/), the hooks in .claude/settings.json, scripts/risk-tier.mjs and scripts/risk-tier-base.sh, .github/, .triphammer/, and the systemd units (*.service, *.timer, *.path)",
+  "checks": {
+    "build": "make build",
+    "focused": "make test TEST=<file>",
+    "suite": "make test",
+    "gate": "scripts/gate.sh"
+  },
+  "reviewChecklist": ".agents/skills/example-review-checklist/SKILL.md",
+  "reviewSkills": [".agents/skills/example-safety-review/SKILL.md"],
+  "uiVerificationSkill": ".agents/skills/example-web-verification/SKILL.md"
+}

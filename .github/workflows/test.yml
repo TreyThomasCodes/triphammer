@@ -1,0 +1,29 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Tooling tests
+        run: npm run test:tooling
+      - name: shellcheck
+        run: |
+          mapfile -t scripts < <(grep -lE '^#!.*\b(bash|sh)\b' bin/* scripts/* scripts/git-hooks/* .github/scripts/* 2>/dev/null)
+          shellcheck -x -S warning "${scripts[@]}"

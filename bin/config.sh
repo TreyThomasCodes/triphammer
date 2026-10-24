@@ -1,0 +1,294 @@
+# shellcheck shell=bash
+# Sourced by Triphammer's bash scripts; the grammar and the checks are in bin/README.md ("Configuration").
+# It is the Triphammer config's one reader: bin/demo-publish, bin/demo-gallery and status/config.mjs
+# run it as a command:
+#
+#   bash config.sh --print <script name> <checkout> [--module <name> [<setting>...] --] <KEY>...
+#
+# runs load_config <script name> <checkout>, then, with --module, module_needs <script name> <name> <setting>...,
+# and prints each KEY's value followed by NUL: Bash variables cannot hold NUL, so NUL separates the values whatever
+# they contain. A KEY is REPO, CHECKOUT, APP_AUTHOR, STATE_DIR, PROJECT or an optional setting, which prints empty
+# when the config leaves it out. Any failure prints its message, prefixed with the script name, and exits 2.
+#
+# load_config <script name> <checkout the script lives in>: reads Triphammer's settings into cfg_repo, cfg_checkout,
+# cfg_app_author and cfg_state_dir, every setting the file gives into the associative array cfg, the modules it turns
+# on into cfg_modules (separated by spaces), the file's path into cfg_file, the project's name into cfg_project and the
+# shared directory every project shares into cfg_shared_dir, or prints which file and which setting is wrong and exits 2.
+# The file is $TRIPHAMMER_CONFIG when that is set, else ${XDG_CONFIG_HOME:-~/.config}/triphammer/<name>.conf, where
+# <name> is $TRIPHAMMER_PROJECT when that is set (the template units set it to their instance name), else the `name` in
+# the .triphammer/project.json of the checkout the script lives in. The project's name is $TRIPHAMMER_PROJECT when that
+# is set, else the file's name without `.conf`. The shared directory is $TRIPHAMMER_SHARED_DIR when that is set, else
+# ${XDG_STATE_HOME:-~/.local/state}/triphammer.
+#
+# module_on <module>: succeeds when the config turns the module on. module_needs <script name> <module>
+# [<setting>...]: prints why and exits 2 when the module is off or the config leaves one of the settings out.
+#
+# check_project <script name> <checkout>: checks <checkout>/.triphammer/project.json, the project's data, or prints what
+# is wrong with it and returns 2. project_get <checkout> <field>: prints a string or boolean field of that file, or
+# each element of an array field on its own line, or nothing when the project does not declare it (an object field,
+# such as checks, is read with jq instead).
+#
+# same_repo <dir> <dir>: succeeds when both directories are in one git repository (one common git directory), as a
+# project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is.
+
+# The optional modules, and every setting a Triphammer config may give besides the four required ones.
+known_modules=(demo qwen-audit codex)
+optional_settings=(OWNER MODULES STATUS_HOST STATUS_PORT STATUS_ALLOWED_HOSTS DEMO_GALLERY_DIR DEMO_URL
+  DEMO_GALLERY_HOST DEMO_GALLERY_PORT QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL
+  CODEX_WEEKLY_CAP CODEX_FLOOR_PERCENT CODEX_RUN_PERCENT)
+
+load_config() {
+  local script="$1" own="$2" file name line n=0 key value module pattern
+  local -A found=() seen=()
+  if [ -n "${TRIPHAMMER_PROJECT:-}" ] && ! [[ "$TRIPHAMMER_PROJECT" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; then
+    echo "$script: TRIPHAMMER_PROJECT must be a project name (letters, digits, dots, dashes or underscores, not starting with a dot), not $TRIPHAMMER_PROJECT" >&2
+    exit 2
+  fi
+  if [ -n "${TRIPHAMMER_CONFIG:-}" ]; then
+    file="$TRIPHAMMER_CONFIG"
+  elif [ -n "${TRIPHAMMER_PROJECT:-}" ]; then
+    file="${XDG_CONFIG_HOME:-$HOME/.config}/triphammer/$TRIPHAMMER_PROJECT.conf"
+  else
+    check_project "$script" "$own" || exit 2
+    name="$(project_get "$own" name)"
+    file="${XDG_CONFIG_HOME:-$HOME/.config}/triphammer/$name.conf"
+  fi
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    echo "$script: the Triphammer config $file is missing or unreadable; create it with REPO, CHECKOUT, APP_AUTHOR and STATE_DIR (bin/README.md)" >&2
+    exit 2
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if ! [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]]; then
+      echo "$script: $file line $n is not KEY=value" >&2
+      exit 2
+    fi
+    key="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+    if [[ " REPO CHECKOUT APP_AUTHOR STATE_DIR ${optional_settings[*]} " != *" $key "* ]]; then
+      echo "$script: $file line $n sets $key, which is not a config setting" >&2
+      exit 2
+    fi
+    if [ -n "${found[$key]+set}" ]; then
+      echo "$script: $file line $n sets $key a second time" >&2
+      exit 2
+    fi
+    found[$key]="$value"
+  done < "$file"
+  for key in REPO CHECKOUT APP_AUTHOR STATE_DIR; do
+    if [ -z "${found[$key]:-}" ]; then
+      echo "$script: $file does not set $key" >&2
+      exit 2
+    fi
+  done
+  if ! [[ "${found[REPO]}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "$script: $file: REPO must be owner/name, not ${found[REPO]}" >&2
+    exit 2
+  fi
+  for key in CHECKOUT STATE_DIR; do
+    if [[ "${found[$key]}" != /* ]]; then
+      echo "$script: $file: $key must be an absolute path, not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  if [[ "${found[APP_AUTHOR]}" =~ [[:space:]] ]]; then
+    echo "$script: $file: APP_AUTHOR must be one login, not ${found[APP_AUTHOR]}" >&2
+    exit 2
+  fi
+  # The optional settings are checked only when given; a module that needs one checks for it (module_needs).
+  # A GitHub login: letters, digits and single dashes between them, at most 39 characters.
+  if [ -n "${found[OWNER]:-}" ] && { ! [[ "${found[OWNER]}" =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]] || [ "${#found[OWNER]}" -gt 39 ]; }; then
+    echo "$script: $file: OWNER must be one GitHub login (letters, digits and single dashes between them, at most 39 characters), not ${found[OWNER]}" >&2
+    exit 2
+  fi
+  if [ -n "${found[MODULES]:-}" ]; then
+    if ! [[ "${found[MODULES]}" =~ ^[a-z-]+(,[a-z-]+)*$ ]]; then
+      echo "$script: $file: MODULES must be module names separated by commas, not ${found[MODULES]}" >&2
+      exit 2
+    fi
+    for module in ${found[MODULES]//,/ }; do
+      if [[ " ${known_modules[*]} " != *" $module "* ]]; then
+        echo "$script: $file: MODULES names $module, which is not a module (${known_modules[*]})" >&2
+        exit 2
+      fi
+      if [ -n "${seen[$module]:-}" ]; then
+        echo "$script: $file: MODULES names $module twice" >&2
+        exit 2
+      fi
+      seen[$module]=1
+    done
+  fi
+  for key in DEMO_GALLERY_DIR QWEN_KEY_FILE; do
+    if [ -n "${found[$key]:-}" ] && [[ "${found[$key]}" != /* ]]; then
+      echo "$script: $file: $key must be an absolute path, not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  for key in DEMO_URL QWEN_BASE_URL; do
+    if [ -n "${found[$key]:-}" ] && ! [[ "${found[$key]}" =~ ^https?://[^[:space:]]+$ ]]; then
+      echo "$script: $file: $key must be an http or https URL, not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  for key in STATUS_HOST DEMO_GALLERY_HOST; do
+    if [ -n "${found[$key]:-}" ] && ! [[ "${found[$key]}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+      echo "$script: $file: $key must be an address or host name (letters, digits and ._:-), not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  for key in STATUS_PORT DEMO_GALLERY_PORT; do
+    if [ -n "${found[$key]:-}" ] && { ! [[ "${found[$key]}" =~ ^[0-9]{1,5}$ ]] \
+        || [ "$((10#${found[$key]}))" -lt 1 ] || [ "$((10#${found[$key]}))" -gt 65535 ]; }; then
+      echo "$script: $file: $key must be a port from 1 to 65535, not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  # Brackets are allowed for IPv6 addresses; a ] must come first in a bracket expression, so the pattern is a variable.
+  pattern='^[][A-Za-z0-9._:-]+(,[][A-Za-z0-9._:-]+)*$'
+  if [ -n "${found[STATUS_ALLOWED_HOSTS]:-}" ] && ! [[ "${found[STATUS_ALLOWED_HOSTS]}" =~ $pattern ]]; then
+    echo "$script: $file: STATUS_ALLOWED_HOSTS must be host names separated by commas, no blanks, not ${found[STATUS_ALLOWED_HOSTS]}" >&2
+    exit 2
+  fi
+  for key in QWEN_MODEL CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL; do
+    if [ -n "${found[$key]:-}" ] && ! [[ "${found[$key]}" =~ ^[A-Za-z0-9._:/-]+$ ]]; then
+      echo "$script: $file: $key must be a model name, not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  for key in CODEX_WEEKLY_CAP CODEX_FLOOR_PERCENT CODEX_RUN_PERCENT; do
+    if [ -n "${found[$key]:-}" ] && { ! [[ "${found[$key]}" =~ ^[0-9]{1,6}$ ]] \
+        || { [ "$key" != CODEX_WEEKLY_CAP ] && [ "${found[$key]}" -gt 100 ]; }; }; then
+      echo "$script: $file: $key must be a whole number$([ "$key" = CODEX_WEEKLY_CAP ] || echo ' from 0 to 100'), not ${found[$key]}" >&2
+      exit 2
+    fi
+  done
+  module="${found[MODULES]:-}"
+  declare -gA cfg=()
+  for key in "${!found[@]}"; do cfg[$key]="${found[$key]}"; done
+  # shellcheck disable=SC2034  # read by the scripts that source this file
+  cfg_repo="${found[REPO]}" cfg_checkout="${found[CHECKOUT]}" cfg_app_author="${found[APP_AUTHOR]}" \
+    cfg_state_dir="${found[STATE_DIR]}" cfg_modules="${module//,/ }" cfg_file="$file"
+  name="${file##*/}"
+  # shellcheck disable=SC2034  # read by the scripts that source this file
+  cfg_project="${TRIPHAMMER_PROJECT:-${name%.conf}}" cfg_shared_dir="${TRIPHAMMER_SHARED_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/triphammer}"
+}
+
+module_on() {
+  [[ " $cfg_modules " == *" $1 "* ]]
+}
+
+module_needs() {
+  local script="$1" module="$2" key
+  shift 2
+  if ! module_on "$module"; then
+    echo "$script: the $module module is off; add it to MODULES in $cfg_file (bin/README.md)" >&2
+    exit 2
+  fi
+  for key in "$@"; do
+    if [ -z "${cfg[$key]:-}" ]; then
+      echo "$script: $cfg_file: the $module module needs $key" >&2
+      exit 2
+    fi
+  done
+}
+
+check_project() {
+  local script="$1" file="$2/.triphammer/project.json" problem key pattern status
+  if [ ! -f "$file" ]; then
+    echo "$script: the project file $file is missing" >&2
+    return 2
+  fi
+  problem="$(jq -r '
+    def strings: type == "array" and length > 0 and all(.[]; type == "string" and length > 0 and (contains("\n") | not));
+    def text: type == "string" and length > 0;
+    . as $root | if type != "object" then "it is not a JSON object"
+    else [
+      (if (.name | type == "string" and test("^[A-Za-z0-9._-]+$")) then empty
+       else "name must be letters, digits, dots, dashes or underscores" end),
+      (if .worktreeTeardown == null or (.worktreeTeardown | strings and (.[0] | startswith("/") | not)) then empty
+       else "worktreeTeardown must be a command: a list of words whose first is a path relative to the worktree" end),
+      (if .demos == null or (.demos | type == "boolean") then empty else "demos must be true or false" end),
+      (("composeProjectPattern", "securityReviewPaths", "securityReviewArea", "reviewChecklist", "uiVerificationSkill") as $key
+        | if $root[$key] == null or ($root[$key] | text) then empty else "\($key) must be text" end),
+      (if .reviewSkills == null or (.reviewSkills | strings) then empty else "reviewSkills must be a list of paths" end),
+      (if .shellEditRoots == null or (.shellEditRoots | type == "array" and all(.[]; type == "string" and length > 0
+          and (startswith("/") | not) and (rtrimstr("/") | split("/") | all(. != "" and . != "." and . != ".."))))
+       then empty else "shellEditRoots must be a list of paths relative to the repository root, inside it" end),
+      (if .checks == null or (.checks | type == "object" and length > 0) then empty else "checks must be an object" end),
+      (.checks | if type == "object" then to_entries[] else empty end
+        | if (.key | IN("build", "focused", "suite", "gate") | not) then "checks may name only build, focused, suite and gate, not \(.key)"
+          elif (.value | type == "string" and test("^[A-Za-z0-9._/:=@+,<>-]+( [A-Za-z0-9._/:=@+,<>-]+)*$") | not)
+          then "checks.\(.key) must be a command: words of letters, digits and ._/:=@+,<>- separated by single spaces"
+          # local-audit allows a command with a placeholder as its text up to the first "<" plus anything, so a
+          # placeholder in the first word would allow commands the check never names, and one alone any command.
+          elif (.value | test("^[^ <]+( |$)") | not) then "checks.\(.key) must start with a command word, not a <placeholder>"
+          else empty end)
+    ] | first // empty end' "$file" 2>/dev/null)" || problem="it is not valid JSON"
+  for key in composeProjectPattern securityReviewPaths; do
+    [ -z "$problem" ] || break
+    pattern="$(project_get "$2" "$key")"
+    # [[ =~ ]] returns 2 for a pattern that does not compile, and 0 or 1 otherwise.
+    status=0
+    # shellcheck disable=SC2319  # the status of the match itself is the point
+    [[ x =~ $pattern ]] || status=$?
+    [ "$status" -ne 2 ] || problem="$key is not a valid extended regular expression"
+  done
+  if [ -n "$problem" ]; then
+    echo "$script: the project file $file is malformed: $problem" >&2
+    return 2
+  fi
+}
+
+project_get() {
+  jq -r --arg key "$2" '.[$key] // empty | if type == "array" then .[] else . end' "$1/.triphammer/project.json"
+}
+
+same_repo() {
+  local a b
+  a="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  b="$(git -C "$2" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ "$(readlink -f "$a")" = "$(readlink -f "$b")" ]
+}
+
+# The command mode (see the top of the file); sourcing the file only defines the functions.
+config_print() {
+  local script="${2:-config.sh}" own key module=""
+  local -a needs=()
+  local usage="usage: bash config.sh --print <script name> <checkout> [--module <name> [<setting>...] --] <KEY>..."
+  if [ "${1:-}" != --print ] || [ $# -lt 4 ] || [ -z "$2" ]; then
+    echo "$script: $usage" >&2
+    exit 2
+  fi
+  own="$3"
+  shift 3
+  if [ "$1" = --module ]; then
+    module="${2:-}"
+    [ -n "$module" ] || { echo "$script: $usage" >&2; exit 2; }
+    shift 2
+    while [ $# -gt 0 ] && [ "$1" != -- ]; do needs+=("$1"); shift; done
+    shift # the --; without one no KEY is left and the check below stops
+  fi
+  [ $# -gt 0 ] || { echo "$script: $usage" >&2; exit 2; }
+  for key in "${needs[@]}"; do
+    if [[ " ${optional_settings[*]} " != *" $key "* ]]; then
+      echo "$script: $key is not an optional config setting; $usage" >&2
+      exit 2
+    fi
+  done
+  for key in "$@"; do
+    if [[ " REPO CHECKOUT APP_AUTHOR STATE_DIR PROJECT ${optional_settings[*]} " != *" $key "* ]]; then
+      echo "$script: $key is not a config setting; $usage" >&2
+      exit 2
+    fi
+  done
+  load_config "$script" "$own"
+  [ -z "$module" ] || module_needs "$script" "$module" "${needs[@]}"
+  # cfg holds every setting the file gives, the four required ones included.
+  for key in "$@"; do
+    if [ "$key" = PROJECT ]; then printf '%s\0' "$cfg_project"; else printf '%s\0' "${cfg[$key]:-}"; fi
+  done
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  config_print "$@"
+fi

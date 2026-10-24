@@ -1,0 +1,13 @@
+{
+  "unmatchedReason": "Triphammer's own code: the owner approves every change",
+  "rules": [
+    {
+      "why": "Triphammer is the machinery that runs and merges the agents' work, so nothing in it merges without the owner.",
+      "tier": "escalate",
+      "paths": [
+        "^"
+      ],
+      "reason": "Triphammer's own code: the owner approves every change"
+    }
+  ]
+}

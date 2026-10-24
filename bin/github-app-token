@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Prints a GitHub App installation token for the agents' App, minting a new one when the cached token is within 10
+# minutes of expiry. Agents use it for gh (GH_TOKEN, through bin/gh) and git (credential helper); the owner's own
+# credentials are not on the machine.
+#   github-app-token                       print the token
+#   github-app-token git-credential [get]  act as a git credential helper: print username and password
+#   github-app-token git-credential <any other action, such as store or erase>   do nothing, exit 0
+#
+# It reads the files the owner fills in (bin/README.md, Install) from $GITHUB_APP_CONFIG_DIR, by default
+# ~/.config/github-app: app-id (the App's numeric id), owner (the default account the App is installed on) and
+# agents.pem (the App's private key). The key only goes to openssl to sign the JWT; this script never prints or copies
+# it.
+# An installation token reaches only the repositories of the account the installation is on, so the token is for the
+# installation on the account that owns the repository being worked on, the first of:
+#   - in git-credential get mode, the first segment of the path git asks about for github.com (git sends it with
+#     credential.https://github.com.useHttpPath set);
+#   - $GITHUB_APP_OWNER (ticket-runner and merge-when-ready set it to their project's owner; bin/gh sets it from
+#     -R/--repo);
+#   - the owner file.
+# Each installation's token and its expiry are cached in ${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json
+# (the account's login in lower case), mode 600 in a directory of mode 700, so one account's token is never handed
+# out for another's.
+# Everything fails closed: a missing or unreadable file, a failed request or a response without a token stops with exit
+# 1, prints no token and leaves the cache as it was. A cache that cannot be parsed counts as expired.
+set -euo pipefail
+umask 077
+
+fail() { printf 'github-app-token: %s\n' "$*" >&2; exit 1; }
+
+case "${1:-}" in
+  '') mode=print ;;
+  git-credential)
+    # git passes the action after the helper's own arguments; only get asks for credentials.
+    [ "${2:-get}" = get ] || exit 0
+    mode=credential
+    # git writes the request's attributes, one key=value per line, up to a blank line or the end of input; all of it is
+    # read before anything else, and only github.com's path is used.
+    git_host='' git_path=''
+    while IFS= read -r line && [ -n "$line" ]; do
+      case "$line" in
+        host=*) git_host="${line#host=}" ;;
+        path=*) git_path="${line#path=}" ;;
+      esac
+    done ;;
+  *) printf 'usage: github-app-token [git-credential [get|store|erase]]\n' >&2; exit 2 ;;
+esac
+
+config_dir="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/github-app"
+install_hint='the owner fills it in (bin/README.md, Install)'
+
+# A file the owner fills in: it must exist and be readable.
+config_file() {
+  local path="$config_dir/$1"
+  [ -e "$path" ] || fail "$path is missing; $install_hint"
+  { [ -f "$path" ] && [ -r "$path" ]; } || fail "$path is not a readable file; $install_hint, mode 600, owned by the service user"
+  printf '%s' "$path"
+}
+
+app_id_file="$(config_file app-id)"
+owner_file="$(config_file owner)"
+key="$(config_file agents.pem)"
+app_id="$(cat "$app_id_file")"
+owner="$(cat "$owner_file")"
+[[ $app_id =~ ^[0-9]+$ ]] || fail "$app_id_file must hold the App's numeric id; $install_hint"
+login='^[A-Za-z0-9-]+$'
+[[ $owner =~ $login ]] || fail "$owner_file must hold the login of the account the App is installed on; $install_hint"
+# Where the account came from, for the message when the App is not installed on it.
+owner_source="correct $owner_file"
+if [ "$mode" = credential ] && [ "$git_host" = github.com ] && [ -n "${git_path#/}" ]; then
+  owner="${git_path#/}"
+  owner="${owner%%/*}" owner_source="check the repository git asked about (path=$git_path)"
+  [[ $owner =~ $login ]] || fail "git asked about path=$git_path, whose first segment is not an account's login"
+elif [ -n "${GITHUB_APP_OWNER:-}" ]; then
+  owner="$GITHUB_APP_OWNER" owner_source='correct GITHUB_APP_OWNER'
+  [[ $owner =~ $login ]] || fail "GITHUB_APP_OWNER must be the login of an account the App is installed on, not $owner"
+fi
+cache="$cache_dir/token-${owner,,}.json"
+
+# The jq filter that accepts a token record: a token and an expiry, both non-empty and printable without blanks, so a
+# bad record can never be printed as the token or break the credential protocol's lines.
+valid='select((.token | type) == "string" and (.token | test("^[!-~]+$"))
+  and (.expires_at | type) == "string" and (.expires_at | test("^[!-~]+$")))'
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# Runs curl with the JWT in a config on stdin, so it never appears in a process's arguments.
+github() {
+  local jwt="$1"; shift
+  printf 'header = "Authorization: Bearer %s"\n' "$jwt" \
+    | curl -fsS -K - -H 'Accept: application/vnd.github+json' "$@"
+}
+
+mint() {
+  local now header payload signature jwt installations installation response tmp
+  now="$(date +%s)"
+  header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+  payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$app_id" | b64url)"
+  signature="$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary 2>/dev/null | b64url)" \
+    || signature=''
+  [ -n "$signature" ] || fail "openssl could not sign with $key; it must be the App's private key in PEM form; $install_hint"
+  jwt="$header.$payload.$signature"
+
+  installations="$(github "$jwt" https://api.github.com/app/installations)" \
+    || fail "listing the App's installations failed (GET https://api.github.com/app/installations); check app-id and agents.pem in $config_dir and the network"
+  # GitHub logins are case-insensitive.
+  installation="$(jq -er --arg owner "$owner" 'first(.[] | select(.account.login? | type == "string"
+    and ascii_downcase == ($owner | ascii_downcase)) | .id)' <<<"$installations" 2>/dev/null)" \
+    || installation=''
+  [[ $installation =~ ^[0-9]+$ ]] || fail "the App is not installed for $owner; install it on that account or $owner_source"
+
+  response="$(github "$jwt" -X POST "https://api.github.com/app/installations/$installation/access_tokens")" \
+    || fail "minting an installation token failed (POST https://api.github.com/app/installations/$installation/access_tokens); check the App's permissions and the network"
+
+  mkdir -p "$cache_dir" && chmod 700 "$cache_dir"
+  tmp="$(mktemp "$cache.XXXXXX")"
+  if ! jq -e "{token, expires_at} | $valid" <<<"$response" > "$tmp" 2>/dev/null \
+    || ! date -d "$(jq -r .expires_at "$tmp")" +%s > /dev/null 2>&1; then
+    rm -f "$tmp"
+    fail "GitHub's access_tokens response had no token or expiry; the cache is unchanged"
+  fi
+  mv "$tmp" "$cache"
+}
+
+# Whether the cache holds a valid token that expires more than 10 minutes from now; a cache that cannot be read or
+# parsed is not fresh.
+fresh() {
+  [ -f "$cache" ] || return 1
+  local expires_at expires
+  expires_at="$(jq -er "$valid | .expires_at" "$cache" 2>/dev/null)" || return 1
+  expires="$(date -d "$expires_at" +%s 2>/dev/null)" || return 1
+  [ $((expires - $(date +%s))) -gt 600 ]
+}
+
+fresh || mint
+token="$(jq -er "$valid | .token" "$cache" 2>/dev/null)" || fail "$cache holds no valid token; delete it and run again"
+
+if [ "$mode" = credential ]; then
+  printf 'username=x-access-token\npassword=%s\n' "$token"
+else
+  printf '%s\n' "$token"
+fi

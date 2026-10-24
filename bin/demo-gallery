@@ -1,0 +1,164 @@
+#!/usr/bin/env node
+// Serves the demo gallery, the directory bin/demo-publish writes to: the Triphammer config's demo module.
+//
+//   demo-gallery     serve DEMO_GALLERY_DIR at http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/ until stopped
+//
+// The settings are read by bin/config.sh, the one reader of the Triphammer config, from the checkout this script
+// lives in; the address defaults to 127.0.0.1 and the port to 8788. With the demo module off, DEMO_GALLERY_DIR missing
+// or the config malformed, it exits 2 with the reader's message (bin/README.md, "Configuration").
+//
+// Read-only: GET and HEAD only (anything else gets 405), a directory serves its index.html and is never listed, and a
+// path that leaves the gallery, by `..` or by a symlink whose target lies outside it, gets 404, as does anything that
+// is not a regular file. One byte range is honoured, so browsers can seek in the videos.
+'use strict';
+const {spawnSync} = require('node:child_process');
+const fs = require('node:fs');
+const http = require('node:http');
+const path = require('node:path');
+
+const contentTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.webm': 'video/webm',
+  '.mp4': 'video/mp4',
+  '.vtt': 'text/vtt; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+/** The gallery directory, address and port, or exit 2 with config.sh's message. */
+function settings() {
+  const bin = path.dirname(fs.realpathSync(__filename));
+  const result = spawnSync('bash', [path.join(bin, 'config.sh'), '--print', 'demo-gallery', path.join(bin, '..'),
+    '--module', 'demo', 'DEMO_GALLERY_DIR', '--', 'DEMO_GALLERY_DIR', 'DEMO_GALLERY_HOST', 'DEMO_GALLERY_PORT'], {encoding: 'utf8'});
+  const values = result.status === 0 ? result.stdout.split('\0') : [];
+  if (values.length !== 4) {
+    process.stderr.write(result.stderr || `demo-gallery: ${result.error?.message ?? 'bin/config.sh failed'}\n`);
+    process.exit(2);
+  }
+  return {root: values[0], host: values[1] || '127.0.0.1', port: Number(values[2] || '8788')};
+}
+
+/** Whether `target` is `root` or inside it; both are real paths. */
+const inside = (root, target) => target === root || target.startsWith(root + path.sep);
+
+/**
+ * The real path and stat of the regular file a request path names inside the gallery, the index.html of a directory,
+ * or a redirect for a directory named without its trailing slash; null for anything else.
+ * @param {string} root
+ * @param {string} pathname the request's path, still percent-encoded
+ */
+function resolve(root, pathname) {
+  let segments;
+  try {
+    segments = pathname.split('/').map(decodeURIComponent);
+  } catch {
+    return null;
+  }
+  if (segments.some(segment => segment === '..' || segment.includes('/') || segment.includes('\\') || segment.includes('\0'))) return null;
+  let realRoot;
+  try {
+    realRoot = fs.realpathSync(root);
+  } catch {
+    return null;
+  }
+  /** @param {string} candidate */
+  const real = candidate => {
+    try {
+      const resolved = fs.realpathSync(candidate);
+      return inside(realRoot, resolved) ? {resolved, stat: fs.statSync(resolved)} : null;
+    } catch {
+      return null;
+    }
+  };
+  const found = real(path.join(realRoot, ...segments));
+  if (!found) return null;
+  if (found.stat.isDirectory()) {
+    const index = real(path.join(found.resolved, 'index.html'));
+    if (!index || !index.stat.isFile()) return null;
+    // One leading slash only, so the redirect can never read as another host (`//name/`).
+    return pathname.endsWith('/') ? index : {redirect: `/${pathname.replace(/^\/+/, '')}/`};
+  }
+  return found.stat.isFile() ? found : null;
+}
+
+/**
+ * The one byte range a Range header asks for within `size`, null without a usable one, or 'unsatisfiable'.
+ * @param {string | undefined} header
+ * @param {number} size
+ */
+function byteRange(header, size) {
+  const match = header === undefined ? null : /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match || (match[1] === '' && match[2] === '')) return null;
+  const [start, end] = match[1] === ''
+    ? [Math.max(0, size - Number(match[2])), size - 1]
+    : [Number(match[1]), Math.min(size - 1, match[2] === '' ? size - 1 : Number(match[2]))];
+  return start > end || start >= size ? 'unsatisfiable' : {start, end};
+}
+
+/** @param {string} root */
+function handler(root) {
+  return (request, response) => {
+    const plain = (status, text, headers = {}) => {
+      response.writeHead(status, {'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(text),
+        'X-Content-Type-Options': 'nosniff', ...headers});
+      response.end(request.method === 'HEAD' ? undefined : text);
+    };
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      plain(405, 'Method not allowed\n', {Allow: 'GET, HEAD'});
+      return;
+    }
+    const pathname = (request.url ?? '/').split('?')[0];
+    const found = pathname.startsWith('/') ? resolve(root, pathname) : null;
+    if (!found) {
+      plain(404, 'Not found\n');
+      return;
+    }
+    if ('redirect' in found) {
+      plain(301, 'Moved\n', {Location: found.redirect});
+      return;
+    }
+    let fd;
+    try {
+      fd = fs.openSync(found.resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    } catch {
+      plain(404, 'Not found\n');
+      return;
+    }
+    const size = fs.fstatSync(fd).size;
+    const range = byteRange(request.headers.range, size);
+    const headers = {
+      'Content-Type': contentTypes[path.extname(found.resolved).toLowerCase()] ?? 'application/octet-stream',
+      'Accept-Ranges': 'bytes',
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'no-cache',
+    };
+    if (range === 'unsatisfiable') {
+      fs.closeSync(fd);
+      plain(416, 'Range not satisfiable\n', {'Content-Range': `bytes */${size}`});
+      return;
+    }
+    const {start, end} = range ?? {start: 0, end: size - 1};
+    response.writeHead(range ? 206 : 200, {...headers, 'Content-Length': size === 0 ? 0 : end - start + 1,
+      ...(range ? {'Content-Range': `bytes ${start}-${end}/${size}`} : {})});
+    if (request.method === 'HEAD' || size === 0) {
+      fs.closeSync(fd);
+      response.end();
+      return;
+    }
+    fs.createReadStream('', {fd, start, end}).on('error', () => response.destroy()).pipe(response);
+  };
+}
+
+const {root, host, port} = settings();
+const server = http.createServer(handler(root));
+server.on('error', error => {
+  console.error(`demo-gallery: cannot listen on ${host}:${port}: ${error.message}`);
+  process.exit(1);
+});
+server.listen(port, host, () => console.log(`demo-gallery: serving ${root} at http://${host}:${port}/`));

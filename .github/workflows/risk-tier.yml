@@ -1,0 +1,189 @@
+name: risk-tier
+
+# Classifies the change and posts the required `owner-approval` commit status, whose text says what the pull request
+# needs: auto succeeds; blocked fails; escalate stays pending until the owner approves the current head commit after
+# its latest base change. An approval of an earlier commit still counts while the pull request's own changes against
+# the base are identical (same patch id), so updating the branch from main does not need a new approval. While it
+# waits, the owner's review is (re)requested. The owner merges their own escalate pull requests through the ruleset's
+# admin bypass. A hold label or the owner's latest review requesting changes keeps any tier pending.
+# The same job posts the required `closing-issue` status from the default branch's validate-pr-contract.sh, here
+# because this workflow already runs on every event that can change it (a push, an edited description, a retarget).
+# Agents cannot edit this file (their GitHub App has no workflows permission) or post statuses (no statuses permission).
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+      - labeled
+      - unlabeled
+  pull_request_review:
+    types:
+      - submitted
+      - dismissed
+
+permissions:
+  contents: read
+  # validate-pr-contract.sh reads closingIssuesReferences, which are issues.
+  issues: read
+  pull-requests: write
+  statuses: write
+
+jobs:
+  risk-tier:
+    name: risk-tier
+    # Label events matter only for hold; any other label leaves the tier unchanged.
+    if: >-
+      github.event_name == 'pull_request_review' ||
+      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'hold'
+    # Job-level, so a skipped label run never cancels the run in flight.
+    concurrency:
+      group: risk-tier-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out pull-request head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Post the closing-issue status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.event.repository.name }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE: refs/remotes/origin/${{ github.event.repository.default_branch }}
+        run: |
+          # The default branch's validator, never the pull request's. Its last line says why it failed.
+          git show "$BASE:.github/scripts/validate-pr-contract.sh" > "$RUNNER_TEMP/validate-pr-contract.sh"
+          code=0
+          message="$(bash "$RUNNER_TEMP/validate-pr-contract.sh" 2>&1)" || code=$?
+          printf '%s\n' "$message"
+          if [ "$code" = 0 ]; then state=success description="The pull request closes an issue"
+          else state=failure description="$(tail -n 1 <<< "$message" | cut -c1-140)"; fi
+          gh api -X POST "repos/$OWNER/$REPOSITORY/statuses/$HEAD_SHA" -f context=closing-issue -f state="$state" \
+            -f description="$description" -f target_url="$RUN_URL" > /dev/null
+          echo "closing-issue: $state: $description" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read the default branch's Node version
+        run: git show "refs/remotes/origin/${{ github.event.repository.default_branch }}:.node-version" > "$RUNNER_TEMP/node-version"
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: ${{ runner.temp }}/node-version
+
+      - name: Classify and gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          OWNER: ${{ vars.TRIPHAMMER_OWNER || github.repository_owner }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PULL_REQUEST_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # Fully qualified: a pushed tag named origin/<branch> must not shadow the remote-tracking ref.
+          BASE: refs/remotes/origin/${{ github.event.repository.default_branch }}
+        run: |
+          # Posts the owner-approval status (description: at most 140 characters) and ends the job: only a blocked
+          # change or a failure fails the job; waiting for the owner is pending, not a failure.
+          status() {
+            gh api -X POST "repos/$REPOSITORY/statuses/$HEAD_SHA" -f context=owner-approval -f state="$1" \
+              -f description="$2" -f target_url="$RUN_URL" > /dev/null
+            echo "owner-approval: $1: $2"
+            echo "owner-approval: $1: $2" >> "$GITHUB_STEP_SUMMARY"
+            case "$2" in
+              "Escalate: waiting for"*)
+                gh api -X POST "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels" -f "labels[]=needs-owner" \
+                  > /dev/null || echo "Could not add needs-owner." ;;
+              *)
+                gh api -X DELETE "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels/needs-owner" \
+                  > /dev/null 2>&1 || true ;;
+            esac
+            case "$1" in success|pending) exit 0 ;; *) exit 1 ;; esac
+          }
+          # A rerun must not leave an earlier success standing while it decides.
+          gh api -X POST "repos/$REPOSITORY/statuses/$HEAD_SHA" -f context=owner-approval -f state=pending \
+            -f description="Classifying the change" -f target_url="$RUN_URL" > /dev/null
+          set +e
+          # Wrapper and classifier both come from the default branch, never from the pull request.
+          if git cat-file -e "$BASE:scripts/risk-tier-base.sh" 2>/dev/null; then
+            git show "$BASE:scripts/risk-tier-base.sh" | bash -s -- "$BASE" > tier.json
+            code=${PIPESTATUS[1]}
+          else
+            printf '{\n  "tier": "escalate",\n  "reasons": ["%s has no risk classifier yet"]\n}\n' "$BASE" > tier.json
+            code=2
+          fi
+          set -e
+          trap 'status error "The risk-tier check failed; see the run"' ERR
+          { echo '### Risk tier'; echo '```json'; cat tier.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat tier.json
+          case "$code" in
+            0|2) ;;
+            3) status failure "Blocked: this change must not merge (see the run)" ;;
+            *) status error "The risk classifier failed; see the run" ;;
+          esac
+          # escalated is the permanent record that this pull request needed the owner; it is never removed.
+          if [ "$code" = 2 ]; then
+            gh api -X POST "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels" -f "labels[]=escalated" \
+              > /dev/null || echo "Could not add escalated."
+          fi
+
+          # The owner's brakes hold any tier: a hold label, or the owner's latest review requesting changes (until
+          # the owner approves or dismisses it).
+          labels="$(gh api --paginate "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels" --jq '.[].name')"
+          if grep -qx hold <<< "$labels"; then
+            status pending "Held: the pull request is labelled hold"
+          fi
+          reviews="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews")"
+          latest="$(jq -r --arg owner "$OWNER" \
+            '[.[][] | select(.user.login == $owner and .state != "COMMENTED")] | last | .state // ""' <<< "$reviews")"
+          if [ "$latest" = CHANGES_REQUESTED ]; then
+            status pending "Held: @$OWNER requested changes; approve or dismiss that review to release it"
+          fi
+          if [ "$code" = 0 ]; then
+            status success "Auto tier: no approval needed"
+          fi
+
+          # Check results attach to the head commit, not the pull request, so only a pull request into the default branch
+          # may turn an approval into a pass; otherwise a pass on a side pull request could satisfy one into main.
+          if [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            status pending "Escalate: approvals count only on a pull request into $DEFAULT_BRANCH"
+          fi
+          # The owner's latest review must approve the exact head commit, after the latest base change (manual or
+          # automatic retarget, or a force-push of the base): a later push or retarget needs a new approval.
+          timeline="$(gh api --paginate --slurp "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/timeline")"
+          since="$(jq -r '[.[][] | select(.event == "base_ref_changed" or .event == "automatic_base_change_succeeded" or .event == "base_ref_force_pushed") | .created_at] | max // ""' <<< "$timeline")"
+          state="$(jq -r --arg owner "$OWNER" --arg since "$since" \
+            '[.[][] | select(.user.login == $owner and .state != "COMMENTED" and .submitted_at > $since)]
+             | last | select(. != null) | "\(.state) \(.commit_id)"' <<< "$reviews")"
+          if [ "$state" = "APPROVED $HEAD_SHA" ]; then
+            status success "Escalate: approved by @$OWNER at ${HEAD_SHA:0:7}"
+          fi
+          # An approval of an earlier commit counts while the pull request's own changes are byte-identical: the
+          # same patch id for base...approved and base...head. Any change to them, even inside a merge, differs.
+          approved="${state#APPROVED }"
+          if [ "${state%% *}" = APPROVED ] && git cat-file -e "$approved^{commit}" 2>/dev/null; then
+            approved_patch="$(git diff "$BASE...$approved" | git patch-id --verbatim | cut -d' ' -f1)"
+            head_patch="$(git diff "$BASE...$HEAD_SHA" | git patch-id --verbatim | cut -d' ' -f1)"
+            if [ -n "$approved_patch" ] && [ "$approved_patch" = "$head_patch" ]; then
+              status success "Escalate: approved by @$OWNER at ${approved:0:7}; changes unchanged since"
+            fi
+          fi
+          echo "Latest owner review since the last base change: ${state:-none}."
+          # Put the pull request back in the owner's review queue. GitHub refuses a review request on the owner's own
+          # pull request, and a failed request must not hide the status.
+          if [ "$PULL_REQUEST_AUTHOR" != "$OWNER" ]; then
+            gh api -X POST "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/requested_reviewers" -f "reviewers[]=$OWNER" > /dev/null \
+              || echo "Could not request the owner's review."
+          fi
+          status pending "Escalate: waiting for @$OWNER to approve ${HEAD_SHA:0:7} (Files changed, Review changes, Approve)"

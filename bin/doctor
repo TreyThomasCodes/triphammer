@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# Lists what is missing or wrong on the machine for one project, one line per problem with its fix, and exits 1
+# when anything is, or prints `all good` and exits 0. `ticket-runner --doctor` runs it; see bin/README.md
+# ("Doctor"). It changes nothing: no self-update, no claims, no sessions. Its one write is `git fetch origin` in the
+# checkout, so the checkout is compared with the current origin/main.
+#
+# It reads the project's Triphammer config (config.sh; a malformed or missing config stops it with exit 2 and the
+# config's own message), looks every command up on the units' PATH rather than the caller's, and runs the checks the
+# README's Doctor table lists. Credential files are checked with stat only; nothing here opens, reads or prints them.
+# No command's output is passed on except version numbers, so no token, key or account name reaches the output.
+set -euo pipefail
+
+bin="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$bin/config.sh"
+load_config "ticket-runner --doctor" "$bin/.."
+checkout="$cfg_checkout" project="$cfg_project"
+
+problems=0
+# problem <what is wrong> <the fix>: prints one line.
+problem() {
+  printf '%s. Fix: %s\n' "$1" "$2"
+  problems=$((problems + 1))
+}
+# version_at_least <a> <b>: succeeds when version a is b or later.
+version_at_least() {
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
+}
+# first_version <text>: prints the first dotted version number in the text, or nothing.
+first_version() {
+  grep -oE '[0-9]+(\.[0-9]+)+' <<< "$1" | head -n 1 || true
+}
+# tool <command> <what it is> <how to install it>: succeeds when the command runs `--version`; otherwise reports it.
+tool() {
+  if ! command -v "$1" >/dev/null 2>&1 || ! "$1" --version >/dev/null 2>&1; then
+    problem "$2 ($1) is not installed or does not run on the units' PATH" "$3"
+    return 1
+  fi
+}
+
+# The units' PATH: Triphammer's units find their tools there, so a tool only on the caller's PATH (nvm's node, say) is
+# missing to them. ticket-runner@'s is taken, as the sessions run under it; merge-when-ready@ and demo-gallery@ build
+# and test nothing. The unit file is Triphammer's, so it is read from Triphammer's checkout (this script's), not the
+# project's. Without it the checks run on the caller's PATH, and that is a problem of its own. A drop-in of the user's
+# (ticket-runner@.service.d/*.conf for every project, ticket-runner@<project>.service.d/*.conf for this one) that sets
+# PATH replaces the unit's, as systemd reads them after the unit, in the order of their file names, the instance's
+# file before the template's of the same name.
+path_of() { sed -n 's/^Environment="\{0,1\}PATH=\([^"]*\)"\{0,1\}$/\1/p' "$@" 2>/dev/null | tail -n 1 || true; }
+triphammer="$(cd "$bin/.." && pwd)"
+unit_file="$triphammer/systemd/ticket-runner@.service"
+unit_path="$(path_of "$unit_file")"
+if [ -n "$unit_path" ]; then
+  user_units="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  while IFS= read -r name; do
+    drop_in="$user_units/ticket-runner@$project.service.d/$name"
+    [ -f "$drop_in" ] || drop_in="$user_units/ticket-runner@.service.d/$name"
+    drop_in_path="$(path_of "$drop_in")"
+    [ -z "$drop_in_path" ] || unit_path="$drop_in_path"
+  done < <(find "$user_units/ticket-runner@.service.d" "$user_units/ticket-runner@$project.service.d" -maxdepth 1 \
+    -name '*.conf' -printf '%f\n' 2>/dev/null | LC_ALL=C sort -u)
+  PATH="${unit_path//%h/$HOME}"
+else
+  problem "$unit_file is missing, unreadable or sets no PATH, so the tools were looked up on the caller's PATH" \
+    "restore it from origin/main in Triphammer's checkout (git -C $triphammer checkout origin/main -- systemd/ticket-runner@.service)"
+fi
+units_path="where the units' PATH finds it"
+
+# jq first: the .NET SDK, Node engines and Claude Code login checks read JSON with it and are skipped without it, so
+# a missing jq is reported once rather than as their false problems.
+jq_ok=""
+if tool jq jq "install jq $units_path; the .NET SDK, Node engines and Claude Code login checks are skipped until it runs"; then jq_ok=1; fi
+
+# The .NET SDK: one SDK the checkout's global.json accepts. rollForward disable takes the pinned version only; patch
+# and latestPatch (and no rollForward) the same feature band (the hundreds of the patch number) at or after it;
+# feature and latestFeature the same major.minor; minor and latestMinor the same major; major and latestMajor any later
+# version. A prerelease SDK counts only with allowPrerelease true. Without a global.json there is no pin to check.
+if [ -n "$jq_ok" ] && [ -f "$checkout/global.json" ]; then
+  pin="$(jq -r '.sdk.version // empty' "$checkout/global.json" 2>/dev/null || true)"
+  roll="$(jq -r '.sdk.rollForward // "latestPatch"' "$checkout/global.json" 2>/dev/null || true)"
+  prerelease="$(jq -r '.sdk.allowPrerelease // false' "$checkout/global.json" 2>/dev/null || true)"
+  if [[ "$pin" =~ ^([0-9]+)\.([0-9]+)\.([0-9])[0-9]{2}$ ]]; then
+    major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" band="${BASH_REMATCH[3]}"
+    case "$roll" in
+      disable) accept="^${pin//./\\.}\$" ;;
+      patch|latestPatch) accept="^$major\\.$minor\\.${band}[0-9]{2}\$" ;;
+      feature|latestFeature) accept="^$major\\.$minor\\.[0-9]+\$" ;;
+      minor|latestMinor) accept="^$major\\.[0-9]+\\.[0-9]+\$" ;;
+      *) accept='^[0-9]+\.[0-9]+\.[0-9]+$' ;;
+    esac
+    [ "$prerelease" != true ] || accept="${accept%\$}(-.*)?\$"
+    found=""
+    if sdks="$(dotnet --list-sdks 2>/dev/null)"; then
+      while read -r sdk _; do
+        if [[ "$sdk" =~ $accept ]] && version_at_least "${sdk%%-*}" "$pin"; then found="$sdk"; fi
+      done <<< "$sdks"
+    fi
+    [ -n "$found" ] || problem "no .NET SDK matches $pin (rollForward $roll) from $checkout/global.json" \
+      "install the .NET SDK $pin or a later one global.json accepts (https://dotnet.microsoft.com/download) $units_path (~/.dotnet, with the drop-in of bin/README.md, Install, A project's toolchain)"
+  else
+    problem "$checkout/global.json pins no SDK version this doctor can read" "give sdk.version as major.minor.patch"
+  fi
+fi
+
+# Node: within the checkout's package.json engines.node, whose comparators (>=, >, <=, <, = or a bare version,
+# separated by blanks, each with one to three version parts) are checked; any other form (^, ~, ||) only needs Node
+# to run. A partial version is a range as in semver: 24 is 24.x, so <=24 is <25.0.0 and >24 is >=25.0.0, and
+# 24.1 is 24.1.x.
+if tool node Node "install Node (https://nodejs.org) $units_path"; then
+  node_version="$(node --version 2>/dev/null)" node_version="${node_version#v}"
+  engines=""
+  [ -z "$jq_ok" ] || engines="$(jq -r '.engines.node // empty' "$checkout/package.json" 2>/dev/null || true)"
+  if [ -n "$engines" ] && [[ "$engines" =~ ^[[:space:]]*((>=|>|<=|<|=)?[0-9]+(\.[0-9]+){0,2}[[:space:]]*)+$ ]]; then
+    fits=1
+    for comparator in $engines; do
+      bound="${comparator##*[<>=]}" op="${comparator%"$bound"}"
+      # low: the bound's first version; high: the first version after a partial bound's range (none for a full one).
+      case "$bound" in
+        *.*.*) low="$bound" high="" ;;
+        *.*) low="$bound.0" high="${bound%.*}.$((10#${bound#*.} + 1)).0" ;;
+        *) low="$bound.0.0" high="$((10#$bound + 1)).0.0" ;;
+      esac
+      case "${op:-=}" in
+        '>=') version_at_least "$node_version" "$low" || fits="" ;;
+        '<') ! version_at_least "$node_version" "$low" || fits="" ;;
+        '>') if [ -n "$high" ]; then version_at_least "$node_version" "$high" || fits=""
+             else { version_at_least "$node_version" "$low" && [ "$node_version" != "$low" ]; } || fits=""; fi ;;
+        '<=') if [ -n "$high" ]; then ! version_at_least "$node_version" "$high" || fits=""
+              else version_at_least "$low" "$node_version" || fits=""; fi ;;
+        '=') if [ -n "$high" ]; then { version_at_least "$node_version" "$low" && ! version_at_least "$node_version" "$high"; } || fits=""
+             else [ "$node_version" = "$low" ] || fits=""; fi ;;
+      esac
+    done
+    [ -n "$fits" ] || problem "Node $node_version is outside $engines, which $checkout/package.json requires" \
+      "install a Node version within $engines (https://nodejs.org) $units_path"
+  fi
+fi
+
+# Docker: the engine answers this user (docker info reaches the daemon), and Compose is v2 or later.
+if command -v docker >/dev/null 2>&1; then
+  if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
+    problem "Docker Engine does not answer this user (docker info fails)" \
+      "start the Docker daemon and add this user to the docker group (sudo usermod -aG docker \$USER, then log in again)"
+  fi
+  compose="$(first_version "$(docker compose version --short 2>/dev/null || true)")"
+  if [ -z "$compose" ] || ! version_at_least "$compose" 2; then
+    problem "Docker Compose v2 is missing (docker compose version reports ${compose:-nothing})" \
+      "install the docker-compose-plugin package (https://docs.docker.com/compose/install/linux/)"
+  fi
+else
+  problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
+fi
+
+# Playwright's browsers: a Chromium in its browser cache. Which revision the project's Playwright wants is left to the
+# web tests, which say so when it is missing.
+browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
+if ! compgen -G "$browsers/chromium*-[0-9]*" >/dev/null; then
+  problem "Playwright's Chromium is not installed in $browsers" \
+    "run npx playwright install chromium in the checkout's web app, as this user"
+else
+  # Each kind of Chromium Playwright installed, newest revision first, must print a blank page headless, as
+  # Playwright starts it (no sandbox); one that cannot lacks its system libraries.
+  for pattern in 'chromium-*/chrome-linux*/chrome' 'chromium_headless_shell-*/chrome-*/chrome-headless-shell'; do
+    browser="$(compgen -G "$browsers/$pattern" | sort -V | tail -n 1 || true)"
+    [ -n "$browser" ] || continue
+    if ! timeout 60 "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>/dev/null | grep -q '<html'; then
+      problem "Chromium does not start headless ($browser)" \
+        "install its system libraries: as root, npx playwright install-deps chromium in the checkout's web app, or run bin/provision again (bin/README.md, On a machine of its own)"
+    fi
+  done
+fi
+
+if tool git git "install git $units_path"; then
+  # The identity Triphammer's commits carry: git refuses to commit without one on a machine whose host name has no domain.
+  # Only whether it is set is checked; neither value is printed.
+  identity_dir="$checkout"
+  [ -d "$identity_dir" ] || identity_dir=/
+  for key in user.name user.email; do
+    [ -n "$(git -C "$identity_dir" config --get "$key" 2>/dev/null || true)" ] \
+      || problem "git has no $key for this user, so it may refuse to commit" \
+        "set it with git config --global $key, as bin/provision does from APP_AUTHOR (bin/README.md, On a machine of its own)"
+  done
+fi
+if tool python3 "Python 3" "install python3 $units_path"; then
+  python_version="$(python3 --version 2>&1 || true)"
+  [[ "$python_version" =~ ^Python\ 3\. ]] || problem "python3 is ${python_version:-unknown}, not Python 3" "install Python 3 as python3 $units_path"
+fi
+
+# The App's credential files and, with qwen-audit on, the Qwen key file: by path, owner and mode only.
+# credential <path> <the fix's subject>: reports a file that is missing, not a regular file, someone else's, or not
+# mode 600.
+credential() {
+  local path="$1" owner mode
+  if [ ! -e "$path" ]; then
+    problem "$path is missing" "$2"
+  elif [ ! -f "$path" ]; then
+    problem "$path is not a regular file" "$2"
+  else
+    read -r owner mode < <(stat -L -c '%u %a' -- "$path")
+    [ "$owner" = "$(id -u)" ] || problem "$path is not owned by $(id -un), the user Triphammer runs as" "chown $(id -un) $path"
+    [ "$mode" = 600 ] || problem "$path has mode $mode, not 600" "chmod 600 $path"
+  fi
+}
+app_dir="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
+for name in app-id owner agents.pem; do
+  credential "$app_dir/$name" "the owner fills in the App's $name, mode 600 (bin/README.md, Install)"
+done
+if module_on qwen-audit; then
+  if [ -n "${cfg[QWEN_KEY_FILE]:-}" ]; then
+    credential "${cfg[QWEN_KEY_FILE]}" "put the Qwen server's API key in it, mode 600, owned by $(id -un)"
+  else
+    problem "$cfg_file turns qwen-audit on but sets no QWEN_KEY_FILE" "set QWEN_KEY_FILE to the file holding the key (bin/README.md, Modules)"
+  fi
+fi
+
+# gh as the App: only an installation token may list the installation's repositories.
+if tool gh "GitHub's gh" "install gh (https://cli.github.com) $units_path; through bin/gh it also needs the App's token (github-app-token)"; then
+  if ! gh api installation/repositories --jq .total_count >/dev/null 2>&1; then
+    problem "gh does not act as the agents' GitHub App (gh api installation/repositories fails)" \
+      "link bin/gh and github-app-token into ~/.local/bin ahead of GitHub's gh and check the App's files (bin/README.md, Install)"
+  fi
+fi
+
+if tool claude "Claude Code" "install Claude Code (https://docs.anthropic.com/en/docs/claude-code) $units_path"; then
+  if [ -n "$jq_ok" ] && ! claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null 2>&1; then
+    problem "Claude Code is not logged in" "run claude auth login as this user"
+  fi
+fi
+
+if module_on codex && tool codex Codex "install the Codex CLI (npm install -g @openai/codex) $units_path"; then
+  codex login status >/dev/null 2>&1 || problem "Codex is not logged in" "run codex login as this user"
+fi
+# Codex's sandbox is bwrap, which needs unprivileged user namespaces; Ubuntu restricts them with AppArmor.
+if module_on codex && tool bwrap bubblewrap "install bubblewrap (apt-get install bubblewrap) $units_path"; then
+  bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1 \
+    || problem "bwrap cannot create a user namespace, so Codex's sandbox fails" \
+      "install the AppArmor profile /etc/apparmor.d/bwrap that allows it userns and load it (apparmor_parser -r), as bin/provision does with the codex module (bin/README.md, Codex)"
+fi
+
+if module_on qwen-audit; then
+  if [ -z "${cfg[QWEN_BASE_URL]:-}" ]; then
+    problem "$cfg_file turns qwen-audit on but sets no QWEN_BASE_URL" "set QWEN_BASE_URL to the model server (bin/README.md, Modules)"
+  elif ! curl -sS -o /dev/null --max-time 10 "${cfg[QWEN_BASE_URL]}" >/dev/null 2>&1; then
+    problem "QWEN_BASE_URL ${cfg[QWEN_BASE_URL]} does not answer" "start the model server or correct QWEN_BASE_URL in $cfg_file"
+  fi
+fi
+
+units=("ticket-runner@$project.timer" "merge-when-ready@$project.timer")
+! module_on demo || units+=("demo-gallery@$project.service")
+for unit in "${units[@]}"; do
+  if ! state="$(systemctl --user is-enabled "$unit" 2>/dev/null)" || [ "$state" != enabled ]; then
+    problem "the unit $unit is ${state:-not enabled}" \
+      "link the template unit and run systemctl --user enable --now $unit (bin/README.md, Install)"
+  fi
+done
+
+# The checkout: on main, clean, and at origin/main after a fetch (update-checkout's conditions, plus not ahead).
+if ! git -C "$checkout" rev-parse --git-dir >/dev/null 2>&1; then
+  problem "$checkout is not a git checkout" "clone the repository there or correct CHECKOUT in $cfg_file"
+else
+  branch="$(git -C "$checkout" symbolic-ref -q --short HEAD || true)"
+  [ "$branch" = main ] || problem "$checkout is on ${branch:-a detached HEAD}, not main" "git -C $checkout switch main"
+  [ -z "$(git -C "$checkout" status --porcelain 2>/dev/null)" ] \
+    || problem "$checkout has uncommitted or untracked changes" "commit, move or remove them, so the runner can update it"
+  if ! git -C "$checkout" fetch -q origin 2>/dev/null; then
+    problem "git fetch origin fails in $checkout" "check the network and the App's git credential helper (bin/README.md, Install)"
+  elif [ "$(git -C "$checkout" rev-parse -q --verify HEAD 2>/dev/null)" \
+      != "$(git -C "$checkout" rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" ]; then
+    problem "$checkout is not at origin/main" "git -C $checkout merge --ff-only origin/main, or reset it there when it is ahead"
+  fi
+fi
+
+if [ "$problems" -gt 0 ]; then
+  echo "$problems problem(s) found"
+  exit 1
+fi
+echo "all good"

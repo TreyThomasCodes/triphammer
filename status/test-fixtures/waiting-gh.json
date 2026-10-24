@@ -1,0 +1,63 @@
+{
+  "issues": [
+    {"number": 20, "title": "Pick a store", "createdAt": "2026-01-01T00:00:00Z", "labels": [{"name": "needs-owner"}],
+     "body": "Some context.\n\n**Decision for the owner:** Pick store A or store B. Store A is faster.\n\nMore."},
+    {"number": 21, "title": "Title <b>21</b>", "createdAt": "2025-12-01T00:00:00Z", "labels": [{"name": "needs-owner"}],
+     "body": "No decision line here."},
+    {"number": 22, "title": "Ordinary ticket", "createdAt": "2025-12-01T00:00:00Z", "labels": [], "body": ""},
+    {"number": 23, "title": "Stop everything", "createdAt": "2026-01-10T00:00:00Z", "labels": [{"name": "stop-agents"}], "body": ""}
+  ],
+  "prs": [
+    {"number": 30, "title": "Tooling change", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [{"name": "needs-owner"}], "autoMergeRequest": {"enabledAt": "2026-01-04T00:00:00Z"}, "mergeStateStatus": "BLOCKED",
+     "files": [{"path": "bin/ticket-runner", "changeType": "MODIFIED"}, {"path": "src/Domain/A.cs", "changeType": "ADDED"}],
+     "statusCheckRollup": [{"__typename": "StatusContext", "context": "owner-approval", "state": "PENDING", "startedAt": "2026-01-04T00:00:00Z"}]},
+    {"number": 31, "title": "Green product fix", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": null, "mergeStateStatus": "CLEAN",
+     "files": [{"path": "src/Domain/B.cs", "changeType": "MODIFIED"}],
+     "statusCheckRollup": [
+       {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-01-01T12:00:00Z", "completedAt": "2026-01-02T00:00:00Z"},
+       {"__typename": "StatusContext", "context": "owner-approval", "state": "SUCCESS", "startedAt": "2026-01-01T13:00:00Z"}]},
+    {"number": 32, "title": "Held fix", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [{"name": "hold"}], "autoMergeRequest": null, "mergeStateStatus": "CLEAN",
+     "files": [{"path": "src/Domain/C.cs", "changeType": "MODIFIED"}],
+     "statusCheckRollup": [{"__typename": "StatusContext", "context": "owner-approval", "state": "PENDING", "startedAt": "2026-01-01T13:00:00Z"}]},
+    {"number": 33, "title": "Approved tooling change", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "BEHIND",
+     "files": [{"path": "scripts/gate.sh", "changeType": "MODIFIED"}],
+     "statusCheckRollup": [
+       {"__typename": "StatusContext", "context": "owner-approval", "state": "PENDING", "startedAt": "2026-01-01T13:00:00Z"},
+       {"__typename": "StatusContext", "context": "owner-approval", "state": "SUCCESS", "startedAt": "2026-01-02T13:00:00Z"}]},
+    {"number": 34, "title": "Armed green fix", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": {"enabledAt": "2026-01-02T00:00:00Z"}, "mergeStateStatus": "CLEAN",
+     "files": [{"path": "src/Domain/D.cs", "changeType": "MODIFIED"}], "statusCheckRollup": []},
+    {"number": 35, "title": "Draft", "createdAt": "2026-01-01T00:00:00Z", "isDraft": true, "baseRefName": "main",
+     "labels": [], "autoMergeRequest": null, "mergeStateStatus": "CLEAN",
+     "files": [{"path": "scripts/gate.sh", "changeType": "MODIFIED"}], "statusCheckRollup": []},
+    {"number": 36, "title": "Into another branch", "createdAt": "2026-01-01T00:00:00Z", "isDraft": false, "baseRefName": "feature",
+     "labels": [], "autoMergeRequest": null, "mergeStateStatus": "CLEAN",
+     "files": [{"path": "scripts/gate.sh", "changeType": "MODIFIED"}], "statusCheckRollup": []}
+  ],
+  "labelEvents": {"data": {"repository": {
+    "defaultBranchRef": {"name": "main"},
+    "issues": {"nodes": [
+      {"number": 20, "timelineItems": {"nodes": [{"createdAt": "2026-01-05T00:00:00Z", "label": {"name": "needs-owner"}}]}},
+      {"number": 21, "timelineItems": {"nodes": [
+        {"createdAt": "2025-12-15T00:00:00Z", "label": {"name": "needs-owner"}},
+        {"createdAt": "2026-01-03T00:00:00Z", "label": {"name": "needs-owner"}}]}},
+      {"number": 23, "timelineItems": {"nodes": [{"createdAt": "2026-01-10T00:00:00Z", "label": {"name": "stop-agents"}}]}}
+    ]},
+    "pullRequests": {"nodes": [
+      {"number": 30, "timelineItems": {"nodes": [{"createdAt": "2026-01-04T00:00:00Z", "label": {"name": "needs-owner"}}]}},
+      {"number": 32, "timelineItems": {"nodes": [{"createdAt": "2026-01-06T00:00:00Z", "label": {"name": "hold"}}]}}
+    ]},
+    "approvals": {"nodes": [
+      {"number": 30, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Escalate: waiting for @o to approve 3000000 (Files changed, Review changes, Approve)", "targetUrl": "https://github.com/o/r/actions/runs/30?a=1&b=\"x\""}}}}]}},
+      {"number": 31, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "SUCCESS", "description": "Auto tier: no approval needed"}}}}]}},
+      {"number": 32, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Held: the pull request is labelled hold"}}}}]}},
+      {"number": 33, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "SUCCESS", "description": "Escalate: approved by @o at 3300000"}}}}]}},
+      {"number": 35, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Escalate: waiting for @o to approve 3500000 (Files changed, Review changes, Approve)"}}}}]}},
+      {"number": 36, "commits": {"nodes": [{"commit": {"status": {"context": {"state": "PENDING", "description": "Escalate: approvals count only on a pull request into main"}}}}]}}
+    ]}
+  }}}
+}

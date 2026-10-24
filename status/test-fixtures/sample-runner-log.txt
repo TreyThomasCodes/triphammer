@@ -1,0 +1,11 @@
+2026-01-02T10:00:00Z ticket #7: run 1 of 3 starting; transcript /state/runs/20260102T100000Z-ticket-7.jsonl
+2026-01-02T10:05:00Z ticket #7: run 1 of 3 starting; transcript /state/runs/20260102T100500Z-ticket-7.jsonl
+2026-01-02T10:30:00Z ticket #7: run 1 finished (exit 0)
+2026-01-02T10:40:00Z #3: every slice is closed; closing it
+2026-01-02T10:50:00Z repair #12 (failing-checks): run 2 of 3 starting; transcript /state/runs/20260102T105000Z-repair-12.jsonl
+2026-01-02T11:00:00Z repair #12: run 2 ended without progress (exit 1)
+2026-01-02T11:10:00Z ticket #8: run 1 of 3 starting; transcript /state/runs/20260102T111000Z-ticket-8.jsonl
+2026-01-02T11:12:00Z ticket #8: stopped by a usage or rate limit; not counted, pausing an hour
+2026-01-02T12:20:00Z paused: an open issue is labelled stop-agents
+demo gallery reindex failed
+2026-01-02T13:00:00Z ticket #9: run 1 of 3 starting; transcript /state/runs/20260102T130000Z-ticket-9.jsonl

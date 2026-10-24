@@ -1,0 +1,669 @@
+#!/usr/bin/env bash
+# Runs the backlog of the repository the Triphammer config names (bin/README.md, "Configuration") unattended, one fresh
+# Claude Code session at a time across every project of Triphammer. The ticket-runner systemd user timer (or, one per
+# project, ticket-runner@<project>.timer) starts it every ten minutes; a run of this project already in progress makes
+# later starts exit at once.
+#
+# The projects share the shared directory (config.sh): its `lock` is held from the decision to start a run until the
+# run ends, so a run in any project makes the others' ticks exit before they claim anything; its `backoff`, written
+# when a session hits a usage or rate limit, pauses every project; its `stop` stops every project. Projects take
+# turns: a tick that has a run to start marks its project in `waiting/`, and the project that ran last (`last`) yields
+# its tick, starting nothing, while another project's mark is fresher than 30 minutes.
+#
+# Each start first fast-forwards Triphammer's checkout (the one this script lives in) to origin/main
+# (bin/update-checkout), and the project's main checkout too when that is another repository, and runs the
+# updated copy of this script once if that changed it. It then sweeps: it removes the runner worktrees no run will use again
+# and the databases whose worktree is gone (prune_worktrees, prune_databases). Then it does at most one thing, in
+# this order:
+#   1. closes a parent issue whose `Slice k of #N` issues are all closed;
+#   2. repairs an open agent pull request that has conflicts, failing checks, or changes the owner requested after
+#      its latest commit;
+#   3. runs an open issue that the owner or the App opened, whose dependencies (`Depends on #N.`, and slice k-1 of
+#      the same parent) are closed, with no open pull request and no open slices: ready issues labelled `next` first,
+#      lowest number first, then the rest in number order;
+#   4. when no issue labelled `upkeep` (open or closed) was created in the last 7 days, opens one titled
+#      `Upkeep: week of <UTC date>` and runs it like a ready issue; the session follows the triphammer:upkeep skill
+#      and closes the issue.
+# The session runs as the triphammer:orchestrator agent and follows the triphammer:ticket-run skill, both from the
+# Triphammer plugin in Triphammer's checkout (plugins/triphammer, which tracks origin/main, never the worktree's copy, so
+# a branch cannot change the skills, agents or hooks it runs under), in a worktree of the project's main checkout
+# branched from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
+# its prompt names Triphammer
+# config's modules that are on. When it ends, with the demo module on, the runner publishes the demos it left in that worktree
+# (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
+# of the run (advisory: it comments only on escalated ones that touch Triphammer, and its failures are logged and
+# ignored). With the demo module on, each tick also refreshes the demo gallery (bin/demo-publish --reindex). A
+# module that is off gets none of its steps and no log line.
+# The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` for as long as the run
+# lasts, so the owner sees in GitHub's lists what not to touch. It is information, never a brake or a lock. Each tick
+# first removes it from everything else, so a killed run's label is gone within one tick. A failed label call is logged
+# and never stops a run or a tick.
+#
+# `ticket-runner --plan` prints what the next start would do; `ticket-runner --prune-dry-run` prints what the sweep
+# would remove. Neither changes anything. `ticket-runner --doctor` lists what is missing or wrong on the machine
+# (bin/doctor), and starts no tick.
+#
+# The owner only brakes:
+#   - a `hold` label on an issue or pull request skips it;
+#   - closing an issue drops it;
+#   - an open issue labelled `stop-agents`, or the file `stop` in the state directory, pauses this project; the file
+#     `stop` in the shared directory pauses every project;
+#   - `systemctl --user stop ticket-runner.service` (or ticket-runner@<project>.service) ends the current session.
+# The brakes also stop a run in progress: at least once a minute while a session runs, the runner checks the stop
+# files, a stop-agents issue, `hold` on the run's issue, `needs-owner` on it that anyone but the App added (a session
+# adds it itself when it stops for the owner), the issue being closed (a ticket that is not upkeep, whose session closes
+# its own issue, and not by a merged pull request, the run's own), and `hold` on the pull request a repair works on.
+# When one applies, it ends the session and every process it started, Bash tool commands in sessions of their own
+# included, as `systemctl stop` would (SIGTERM, then SIGKILL after 90 seconds), logs the brake, removes
+# `agent-working`, and does not count the run. A brake lookup that fails is logged and ignored.
+# A ticket that ends three runs without a pull request gets `needs-owner` (one that ends with its issue closed, as an
+# upkeep run does, made progress); a pull request that three repair runs could not move gets `hold`. Removing the
+# label retries from zero.
+set -euo pipefail
+# The state directory holds session transcripts, so everything the runner and its sessions create is private to the
+# service user, under systemd (UMask=0077 in ticket-runner.service) or not.
+umask 077
+
+bin="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$bin/config.sh"
+# --doctor lists what is missing or wrong on the machine (bin/doctor) and does nothing else.
+[ "${1:-}" != --doctor ] || exec "$bin/doctor"
+load_config ticket-runner "$bin/.."
+repo="$cfg_repo" checkout="$cfg_checkout" app_author="$cfg_app_author" state="$cfg_state_dir"
+project="$cfg_project" shared="$cfg_shared_dir"
+# Every gh, git and Claude session this run starts gets its token from the App's installation on the account that owns
+# the served repository (bin/github-app-token).
+export GITHUB_APP_OWNER="${repo%%/*}"
+# The owner: the person whose issues the runner takes and whose change requests start a repair, the config's OWNER, by
+# default the account that owns REPO. That account is a different thing from GITHUB_APP_OWNER above.
+owner="${cfg[OWNER]:-${repo%%/*}}"
+# A project's waiting mark older than this no longer makes the project that ran last yield (three ticks), so a project
+# that is stopped or removed cannot hold the others back.
+waiting_seconds=1800
+# While a session runs, the brakes are checked every TICKET_RUNNER_BRAKE_SECONDS (default 60), and a session a brake
+# stops gets TICKET_RUNNER_BRAKE_GRACE_SECONDS (default 90, systemd's TimeoutStopSec) between SIGTERM and SIGKILL.
+brake_seconds="${TICKET_RUNNER_BRAKE_SECONDS:-60}" brake_grace="${TICKET_RUNNER_BRAKE_GRACE_SECONDS:-90}"
+# An interval of 0 would poll gh without pause; a number with a nonzero digit is positive.
+if ! [[ "$brake_seconds" =~ ^[0-9]+(\.[0-9]+)?$ && "$brake_seconds" =~ [1-9] ]] || ! [[ "$brake_grace" =~ ^[0-9]+$ ]]; then
+  echo "ticket-runner: TICKET_RUNNER_BRAKE_SECONDS must be a positive number of seconds and TICKET_RUNNER_BRAKE_GRACE_SECONDS a whole number" >&2
+  exit 2
+fi
+mkdir -p "$state/runs" "$state/attempts"
+chmod 700 "$state" "$state/runs" "$state/attempts"
+log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$state/log"; }
+# replace_file <file> <text>: writes the text and a newline through a rename, so no reader sees the file half written.
+replace_file() { printf '%s\n' "$2" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+# working_label add|remove issue|pr <number>: adds or removes `agent-working`, logging the outcome either way.
+working_label() {
+  local err done=added
+  [ "$1" = add ] || done=removed
+  if err="$(gh "$2" edit "$3" -R "$repo" "--$1-label" agent-working 2>&1 >/dev/null)"; then
+    log "$2 #$3: $done agent-working"
+  else
+    log "$2 #$3: could not $1 agent-working: ${err//$'\n'/ }"
+  fi
+}
+
+# --plan prints the action the next start would take, and does nothing. --prune-dry-run prints what the sweep would
+# remove, and does nothing.
+plan_only="${1:-}"
+dry_run=""
+[ "$plan_only" != --prune-dry-run ] || dry_run=1
+# The sweep's lines go to the log, or only to standard output in a dry run, which writes nothing.
+say() { if [ -n "$dry_run" ]; then printf '%s\n' "$*"; else log "$*"; fi; }
+
+# The project's data, from .triphammer/project.json in the main checkout (load_project, after the self-update): the
+# command that tears down a worktree's resources, and the compose project names the sweep may prune. Either may be
+# absent, and then its step is skipped without a word.
+teardown=() compose_pattern=""
+load_project() {
+  check_project ticket-runner "$checkout" || exit 2
+  mapfile -t teardown < <(project_get "$checkout" worktreeTeardown)
+  compose_pattern="$(project_get "$checkout" composeProjectPattern)"
+}
+
+# Removes a worktree, first running the project's teardown command in it (when the project declares one and the
+# worktree has its first word as an executable file), so its resources do not outlive it.
+remove_worktree() {
+  local wt="$1" out
+  if [ "${#teardown[@]}" -gt 0 ] && [ -x "$wt/${teardown[0]}" ]; then
+    if out="$(cd "$wt" && "$wt/${teardown[0]}" "${teardown[@]:1}" 2>&1)"; then
+      [ -z "$out" ] || say "tore down $wt: $(tail -n 1 <<< "$out")"
+    else
+      say "teardown failed in $wt: $(tail -n 1 <<< "$out")"
+    fi
+  fi
+  git -C "$checkout" worktree remove --force "$wt"
+}
+
+# Removes the runner worktrees no run will use again: .worktrees/issue-N when issue N is closed, has an open pull
+# request, or used all 3 runs, and .worktrees/pr-N when pull request N is closed or merged. Never the worktree the
+# `current` file names, nor any other worktree (manual or harness ones). Reads the issue and pull request lists in $1.
+prune_worktrees() {
+  local lists="$1" current_wt="" kind number wt name n found reason attempts err in_flight
+  if [ -f "$state/current" ]; then
+    kind="$(sed -n 's/^kind //p' "$state/current")"
+    number="$(sed -n 's/^number //p' "$state/current")"
+    case "$kind" in
+      ticket) current_wt="$checkout/.worktrees/issue-$number" ;;
+      repair) current_wt="$checkout/.worktrees/pr-$number" ;;
+    esac
+  fi
+  in_flight="$(python3 -I "$bin/ticket-decide.py" --closed "$lists/prs.json" "$repo")" || in_flight=""
+  while IFS= read -r wt; do
+    name="${wt#"$checkout/.worktrees/"}"
+    [[ "$name" =~ ^(issue|pr)-([0-9]+)$ ]] || continue
+    if [ "$wt" = "$current_wt" ] || [ ! -d "$wt" ]; then continue; fi
+    n="${BASH_REMATCH[2]}"
+    reason=""
+    if [ "${BASH_REMATCH[1]}" = issue ]; then
+      found="$(jq -r --argjson n "$n" '.[] | select(.number == $n) | .state' "$lists/issues.json" 2>/dev/null)" || found=""
+      attempts="$(cat "$state/attempts/ticket-$n" 2>/dev/null || true)"
+      if [ -n "$found" ] && [ "$found" != OPEN ]; then reason="issue #$n is closed"
+      elif grep -qx "$n" <<< "$in_flight"; then reason="issue #$n has an open pull request"
+      elif [[ "$attempts" =~ ^[0-9]+$ ]] && [ "$attempts" -ge 3 ]; then reason="issue #$n used all 3 runs"
+      fi
+    else
+      found="$(gh pr view "$n" -R "$repo" --json state --jq .state 2>/dev/null)" || found=""
+      if [ "$found" = CLOSED ] || [ "$found" = MERGED ]; then reason="pull request #$n is ${found,,}"; fi
+    fi
+    [ -n "$reason" ] || continue
+    if [ -n "$dry_run" ]; then
+      say "would remove worktree $wt ($reason)"
+    elif err="$(remove_worktree "$wt" 2>&1 >/dev/null)"; then  # its own lines are in the log already
+      say "removed worktree $wt ($reason)"
+    else
+      say "could not remove worktree $wt ($reason): $(tail -n 1 <<< "$err")"
+    fi
+  done < <(git -C "$checkout" worktree list --porcelain | sed -n 's/^worktree //p')
+  [ -n "$dry_run" ] || git -C "$checkout" worktree prune || say "git worktree prune failed"
+}
+
+# Removes every compose project whose name matches the project's composeProjectPattern and whose working directory,
+# <worktree>/database, and that worktree are gone. A project any of whose containers names a directory that exists, or
+# names none, is never touched. Without a pattern it does nothing, not even ask Docker.
+prune_databases() {
+  local rows project dir out why
+  local -A keep=() gone=()
+  [ -n "$compose_pattern" ] || return 0
+  if ! command -v docker >/dev/null 2>&1 || ! rows="$(docker ps -a --filter label=com.docker.compose.project \
+      --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)"; then
+    say "database sweep skipped: docker is unavailable"
+    return 0
+  fi
+  while IFS=$'\t' read -r project dir; do
+    [[ "$project" =~ $compose_pattern ]] || continue
+    if [ -z "$dir" ] || [ -e "$dir" ] || [ -e "${dir%/database}" ]; then keep[$project]=1; else gone[$project]="$dir"; fi
+  done <<< "$rows"
+  for project in $(printf '%s\n' "${!gone[@]}" | sort); do
+    [ -z "${keep[$project]:-}" ] || continue
+    why="$project (worktree ${gone[$project]%/database} is gone)"
+    if [ -n "$dry_run" ]; then
+      say "would prune database $why"
+    elif out="$(docker compose -p "$project" down --volumes --remove-orphans 2>&1)"; then
+      say "pruned database $why"
+    else
+      say "could not prune database $why: $(tail -n 1 <<< "$out")"
+    fi
+  done
+}
+
+if [ -n "$dry_run" ]; then
+  load_project
+  lists="$(mktemp -d)"
+  trap 'rm -rf "$lists"' EXIT
+  gh issue list -R "$repo" --state all --limit 1000 --json number,state > "$lists/issues.json"
+  gh pr list -R "$repo" --state open --limit 30 --json number,closingIssuesReferences > "$lists/prs.json"
+  prune_worktrees "$lists"
+  prune_databases
+  exit 0
+fi
+
+if [ "$plan_only" != --plan ] && [ -z "${TICKET_RUNNER_UPDATED:-}" ]; then  # an updated re-run keeps the lock on fd 9
+  exec 9>"$state/lock"
+  flock -n 9 || exit 0
+fi
+# The owner's brakes that pause the whole project, checked before a tick and, with the run's own, while a session runs
+# (run_brake). Each prints the brake that applies, or nothing; a failed lookup is logged (on standard error, since
+# they run in a command substitution) and is no brake.
+stop_file_brake() {
+  if [ -e "$state/stop" ]; then echo "the stop file $state/stop"
+  elif [ -e "$shared/stop" ]; then echo "the shared stop file $shared/stop"
+  fi
+}
+stop_agents_brake() {
+  local open
+  if ! open="$(gh issue list -R "$repo" --state open --label stop-agents --json number --jq '.[].number' 2>/dev/null)"; then
+    log "could not look for an open stop-agents issue" >&2
+  elif [ -n "$open" ]; then
+    echo "an open issue is labelled stop-agents"
+  fi
+}
+[ -z "$(stop_file_brake)" ] || exit 0
+# The shared backoff pauses every project; a backoff left in the state directory still pauses this one.
+for backoff in "$shared/backoff" "$state/backoff"; do
+  if [ -e "$backoff" ] && [ "$(date +%s)" -lt "$(cat "$backoff")" ]; then exit 0; fi
+done
+if [ -n "$(stop_agents_brake)" ]; then
+  log "paused: an open issue is labelled stop-agents"
+  exit 0
+fi
+
+# Triphammer's checkout, the one this script lives in: the plugin and the git hooks come from it. The project's main
+# checkout ($checkout) is usually the same one; when it is another repository, it needs only .triphammer/ and its own
+# checks.
+triphammer="$(git -C "$bin" rev-parse --show-toplevel)"
+separate=""
+same_repo "$triphammer" "$checkout" || separate=1
+
+if [ "$plan_only" != --plan ] && [ -z "${TICKET_RUNNER_UPDATED:-}" ]; then
+  self="$(cat "$bin/ticket-runner")"
+  for target in "$triphammer" ${separate:+"$checkout"}; do
+    "$bin/update-checkout" "$target" 2>&1 | while IFS= read -r line; do log "$line"; done \
+      || log "self-update failed; continuing with the checkout as it is"
+  done
+  # Bash reads a script as it runs, so the rest of this tick runs the updated copy from its start, once. The copy is
+  # always the one next to this script, in Triphammer's checkout.
+  if [ "$(cat "$bin/ticket-runner")" != "$self" ]; then
+    log "self-update changed ticket-runner; running the updated copy"
+    TICKET_RUNNER_UPDATED=1 exec "$bin/ticket-runner" "$@"
+  fi
+fi
+
+load_project
+if [ "$plan_only" != --plan ] && module_on demo; then
+  "$bin/demo-publish" --reindex >/dev/null 2>&1 || log "demo gallery reindex failed"
+fi
+git -C "$checkout" fetch -q origin
+[ -z "$separate" ] || git -C "$triphammer" fetch -q origin
+# Sessions load the plugin from Triphammer's checkout and follow its ticket-run skill; until it is on Triphammer's main
+# there is nothing to follow.
+plugin="$triphammer/plugins/triphammer"
+git -C "$triphammer" cat-file -e origin/main:plugins/triphammer/skills/ticket-run/SKILL.md 2>/dev/null || exit 0
+
+# No run is in progress while this tick holds the lock, so any `agent-working` label is a killed run's.
+[ "$plan_only" = --plan ] || for type in issue pr; do
+  if ! stale="$(gh "$type" list -R "$repo" --state all --label agent-working --limit 1000 --json number \
+    --jq '.[].number')"; then
+    log "could not list ${type}s labelled agent-working; not removing stale labels"
+    continue
+  fi
+  for n in $stale; do working_label remove "$type" "$n"; done
+done
+
+# An organization opens no issues and writes no reviews, so a runner that took one for the owner would act for no one:
+# it refuses to plan until OWNER names a person. A failed lookup refuses too.
+if ! owner_type="$(gh api "users/$owner" --jq .type)"; then
+  echo "ticket-runner: could not look up the owner, $owner, on GitHub; not planning" >&2
+  exit 1
+fi
+if [ "$owner_type" = Organization ]; then
+  if [ -n "${cfg[OWNER]:-}" ]; then
+    echo "ticket-runner: OWNER in $cfg_file is $owner, an organization; set OWNER to the login of the person whose issues the runner takes (bin/README.md, Configuration)" >&2
+  else
+    echo "ticket-runner: $owner, the owner part of REPO, is an organization; set OWNER in $cfg_file to the login of the person whose issues the runner takes (bin/README.md, Configuration)" >&2
+  fi
+  exit 2
+fi
+
+gh issue list -R "$repo" --state all --limit 1000 --json number,state,author,body,labels,createdAt > "$state/issues.json"
+gh pr list -R "$repo" --state open --limit 30 \
+  --json number,author,isDraft,labels,mergeStateStatus,statusCheckRollup,reviews,commits,closingIssuesReferences \
+  > "$state/prs.json"
+if [ "$plan_only" != --plan ]; then
+  prune_worktrees "$state"
+  prune_databases
+fi
+
+# Prints one action: "close <issue>", "repair <pr> <issue> <reason>", "ticket <issue>", "upkeep", or nothing
+# (ticket-decide.py).
+action="$(python3 -I "$bin/ticket-decide.py" "$state/issues.json" "$state/prs.json" "$app_author" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$owner")"
+if [ "$plan_only" = --plan ]; then echo "${action:-idle}"; exit 0; fi
+mkdir -p "$shared/waiting"
+chmod 700 "$shared" "$shared/waiting"
+[ -n "$action" ] || { rm -f "$shared/waiting/$project"; exit 0; }
+read -r kind number issue reason <<< "$action"
+
+if [ "$kind" = close ]; then
+  log "#$number: every slice is closed; closing it"
+  gh issue close "$number" -R "$repo" --comment "Every slice of this issue is closed." >/dev/null
+  exit 0
+fi
+
+# This project has a run to start: it waits for its turn until it starts one. The shared lock, taken after this project's
+# own (fd 9) and never waited for, is held until the run ends, so no two projects run sessions at once.
+replace_file "$shared/waiting/$project" "$(date +%s)"
+exec 8>"$shared/lock"
+flock -n 8 || exit 0
+if [ "$(cat "$shared/last" 2>/dev/null || true)" = "$project" ]; then
+  now="$(date +%s)"
+  for mark in "$shared"/waiting/*; do
+    other="${mark##*/}"
+    if [ ! -f "$mark" ] || [ "$other" = "$project" ] || [[ "$other" == *.tmp ]]; then continue; fi
+    at="$(cat "$mark" 2>/dev/null || true)"
+    if ! [[ "$at" =~ ^[0-9]+$ ]] || [ $((now - at)) -gt "$waiting_seconds" ]; then continue; fi
+    log "$kind${number:+ #$number}: $project ran last and $other is waiting; yielding this turn to it"
+    exit 0
+  done
+fi
+rm -f "$shared/waiting/$project"
+replace_file "$shared/last" "$project"
+
+# The weekly upkeep issue is opened here and then runs as a ticket.
+if [ "$kind" = upkeep ]; then
+  title="Upkeep: week of $(date -u +%F)"
+  gh label create upkeep -R "$repo" --force --color c5def5 \
+    --description "Weekly upkeep run by the ticket runner" >/dev/null
+  url="$(gh issue create -R "$repo" --title "$title" --label upkeep --body "The ticket runner's weekly upkeep. The \
+session follows the \`triphammer:upkeep\` skill: it reports on this issue and closes it, with no pull request.")"
+  number="${url##*/}"
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then log "upkeep: could not read the new issue's number from '$url'"; exit 1; fi
+  log "#$number: opened $title"
+  kind=ticket
+fi
+
+attempts_file="$state/attempts/$kind-$number"
+attempts="$(cat "$attempts_file" 2>/dev/null || echo 0)"
+[ "$attempts" -lt 3 ] || attempts=0  # the owner removed the give-up label, so start over
+attempts=$((attempts + 1))
+echo "$attempts" > "$attempts_file"
+
+# A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
+# tracks origin/main: the Co-Authored-By trailer), so a branch cut before a hook existed, or a project without hooks of
+# its own, still gets it and a branch cannot change its own hook. core.hooksPath is set in that worktree's own config,
+# so the main checkout is unaffected.
+add_worktree() {
+  remove_worktree "$worktree" 2>/dev/null || true
+  git -C "$checkout" worktree add -q -B "$1" "$worktree" "$2"
+  git -C "$checkout" config extensions.worktreeConfig true
+  git -C "$worktree" config --worktree core.hooksPath "$triphammer/scripts/git-hooks"
+}
+
+run="$state/runs/$(date -u +%Y%m%dT%H%M%SZ)-$kind-$number.jsonl"
+# The skills skip the steps of a module that is off (the plugin's ticket-run and upkeep skills).
+if [ -n "$cfg_modules" ]; then
+  modules=" Modules on: ${cfg_modules// /, }."
+else
+  modules=" No module is on."
+fi
+if [ "$kind" = ticket ]; then
+  worktree="$checkout/.worktrees/issue-$number"
+  branch="ticket/$number"
+  add_worktree "$branch" origin/main
+  prompt="Run issue #$number of $repo unattended. You are in a fresh worktree on branch $branch from origin/main (an earlier run may have left origin/$branch without a pull request; build on it or replace it). This is run $attempts of 3.$modules Follow the triphammer:ticket-run skill."
+  before=""
+else
+  branch="$(gh pr view "$number" -R "$repo" --json headRefName --jq .headRefName)"
+  worktree="$checkout/.worktrees/pr-$number"
+  add_worktree "$branch" "origin/$branch"
+  prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a worktree on its branch $branch. This is run $attempts of 3.$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
+  before="$(git -C "$worktree" rev-parse HEAD)"
+fi
+
+# The state directory's `current` file names this run for merge-when-ready, which updates every armed pull request's
+# branch except the ones named there: the runner's pid and its start time (field 22 of /proc/<pid>/stat, which tells
+# this process from an earlier one with the same pid), the run's kind and number, the branch the session works on (a
+# pull request it opens during the run has it), and the open pull requests the session may push to (the one being
+# repaired; none for a ticket, since ticket-decide.py never starts an issue that has an open closing pull request). It
+# is written whole with a rename, before the session starts, rewritten without the session's pull requests and branch
+# when the session ends, and removed when the run ends, however it ends.
+prs=""
+[ "$kind" = ticket ] || prs="$number"
+started=""
+if read -r stat 2>/dev/null < "/proc/$$/stat"; then
+  read -ra fields <<< "${stat##*) }"
+  started="${fields[19]:-}"
+fi
+# The session's processes: `tree` maps the pid of each process seen descending from the session, or sharing a process
+# group with one, to its start time (field 22 of /proc/<pid>/stat), and `groups` holds their process groups. Claude Code
+# runs each Bash tool command in a session of its own (setsid), so the session's process group alone misses them, and
+# a tool process outlives the session's own when it is reparented; walk_tree finds them by parent pid while their
+# parents live, and stop_session walks again each second. A process forked after the last walk by a parent that then
+# exits, outside every known process group (a double fork), escapes.
+declare -A tree=() groups=()
+# walk_tree [root]: adds the root and every live process descending from one in `tree`, or in a process group in
+# `groups`, and drops the ones that are gone (a pid whose start time changed is another process).
+walk_tree() {
+  local f stat rest pid changed=1
+  local -A parent=() start=() group=() live=()
+  local -a fields
+  for f in /proc/[0-9]*/stat; do
+    { read -r stat < "$f"; } 2>/dev/null || continue
+    pid="${f#/proc/}" pid="${pid%/stat}" rest="${stat##*) }"
+    read -ra fields <<< "$rest"
+    [ "${fields[0]}" != Z ] || continue
+    parent[$pid]="${fields[1]}" group[$pid]="${fields[2]}" start[$pid]="${fields[19]}"
+  done
+  if [ -n "${1:-}" ] && [ -n "${start[$1]:-}" ]; then tree[$1]="${start[$1]}"; fi
+  for pid in "${!tree[@]}"; do
+    if [ "${start[$pid]:-}" = "${tree[$pid]}" ]; then live[$pid]=1; groups[${group[$pid]}]=1; else unset "tree[$pid]"; fi
+  done
+  while [ "$changed" = 1 ]; do
+    changed=0
+    for pid in "${!start[@]}"; do
+      [ -z "${live[$pid]:-}" ] || continue
+      if [ -n "${live[${parent[$pid]}]:-}" ] || [ -n "${groups[${group[$pid]}]:-}" ]; then
+        tree[$pid]="${start[$pid]}" live[$pid]=1 groups[${group[$pid]}]=1 changed=1
+      fi
+    done
+  done
+}
+
+# Stops every process of the session the way `systemctl stop` stops the unit's cgroup (KillMode=control-group with
+# systemd's default TimeoutStopSec): SIGTERM to each, then SIGKILL to whatever is left, or started since, after the
+# grace period. Fails when the session has already ended.
+stop_session() {
+  local waited=0
+  tree=() groups=()
+  walk_tree "$session"
+  [ "${#tree[@]}" -gt 0 ] || return 1
+  kill -TERM "${!tree[@]}" 2>/dev/null || true
+  while [ "$waited" -lt "$brake_grace" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    walk_tree
+    [ "${#tree[@]}" -gt 0 ] || return 0
+  done
+  walk_tree
+  [ "${#tree[@]}" -eq 0 ] || kill -KILL "${!tree[@]}" 2>/dev/null || true
+}
+
+# Ends the watcher, then (when the runner itself is stopped while a session runs) the session.
+end_session() {
+  if [ -n "$watcher" ]; then kill -TERM "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true; fi
+  watcher=""
+  if [ -n "$session" ]; then stop_session || true; fi
+  session=""
+}
+
+# Bash runs an EXIT trap on a signal only when that signal is trapped, so a stopped service removes the file too.
+# The EXIT trap also removes the run's `agent-working` label, on every way the run can end.
+# Everything the trap calls is defined above it, and a failing step cannot skip the ones after it.
+labelled=issue
+[ "$kind" = ticket ] || labelled="pr"
+session="" watcher=""  # the session's pid and the brake watcher's, once they run
+trap '{ end_session || true; }; rm -f "$state/current" || true; working_label remove "$labelled" "$number"' EXIT
+trap 'exit 143' TERM INT HUP
+write_current() {
+  replace_file "$state/current" "$(printf 'pid %s\nstarted %s\nkind %s\nnumber %s\nbranch %s\nprs %s' \
+    "$$" "${started:--}" "$kind" "$number" "$1" "$2")"
+}
+write_current "$branch" "$prs"
+working_label add "$labelled" "$number"
+
+# The brakes on a ticket's issue: `hold`; `needs-owner` that anyone but the App added (the session adds it itself when
+# it stops for the owner, as review-loop step 4 and ticket-run tell it to; the events API's actor tells the App, as
+# `<app>[bot]`, from the owner); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
+# own issue) or a merged pull request closed it (the run's own, which merge-when-ready may merge while the session still
+# runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
+# failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
+app_login="$app_author"
+[[ "$app_author" != app/* ]] || app_login="${app_author#app/}[bot]"
+# shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
+issue_brake() {
+  local facts by closer
+  if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq '(.labels | map(.name)) as $names
+      | [if $names | index("hold") then "hold" else empty end,
+         if $names | index("needs-owner") then "needs-owner" else empty end,
+         if .state != "OPEN" and ($names | index("upkeep") | not) then "closed" else empty end] | join(" ")' 2>/dev/null)"
+  then
+    log "$kind #$number: could not look up the brakes on issue #$number" >&2
+    return 0
+  fi
+  facts=" $facts "
+  if [[ "$facts" == *" hold "* ]]; then echo "labelled hold"; return 0; fi
+  if [[ "$facts" == *" needs-owner "* ]]; then
+    by="$(gh api "repos/$repo/issues/$number/events" --paginate --jq '.[]
+      | select(.event == "labeled" and .label.name == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
+    if [ -z "$by" ]; then
+      log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
+    elif [ "$by" != "$app_login" ]; then
+      echo "labelled needs-owner"
+      return 0
+    fi
+  fi
+  [[ "$facts" == *" closed "* ]] || return 0
+  if ! closer="$(gh api graphql -F number="$number" -f owner="${repo%%/*}" -f name="${repo#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) {
+    timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { closer { ... on PullRequest { merged } } } } } } } }' \
+      --jq '.data.repository.issue.timelineItems.nodes
+        | if length == 0 then "unknown" elif .[-1].closer.merged == true then "merged" else "" end' 2>/dev/null)" \
+      || [ "$closer" = unknown ]; then
+    log "$kind #$number: could not look up what closed issue #$number" >&2
+  elif [ "$closer" != merged ]; then
+    echo "closed"
+  fi
+}
+
+# The brakes that end a session in progress: the project's (stop_file_brake, stop_agents_brake), the ticket's issue's
+# (issue_brake), and `hold` on the pull request a repair works on. Prints the first that applies, or nothing; a failed
+# lookup is logged and is no brake.
+run_brake() {
+  local found
+  found="$(stop_file_brake)"
+  [ -n "$found" ] || found="$(stop_agents_brake)"
+  if [ -z "$found" ] && [ "$kind" = ticket ]; then
+    found="$(issue_brake)"
+    [ -z "$found" ] || found="issue #$number is $found"
+  elif [ -z "$found" ]; then
+    found="$(gh pr view "$number" -R "$repo" --json labels \
+      --jq 'if .labels | map(.name) | index("hold") then "labelled hold" else "" end' 2>/dev/null)" \
+      || { log "$kind #$number: could not look up the brakes on pull request #$number" >&2; found=""; }
+    [ -z "$found" ] || found="pull request #$number is $found"
+  fi
+  printf '%s' "$found"
+}
+
+# Every $brake_seconds while the session runs, checks run_brake; when one applies, writes it to $brake_file and stops
+# the session. The runner sends it SIGTERM when the session has ended, which it obeys between checks and ignores while
+# it stops the session, so a session it started stopping is always stopped to the end.
+brake_watch() {
+  local found sleeper=""
+  trap - EXIT
+  trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+  while :; do
+    sleep "$brake_seconds" & sleeper=$!
+    wait "$sleeper" || true
+    found="$(run_brake)"
+    [ -n "$found" ] || continue
+    trap '' TERM
+    if stop_session; then replace_file "$brake_file" "$found"; fi
+    exit 0
+  done
+}
+
+log "$kind #$number${reason:+ ($reason)}: run $attempts of 3 starting; transcript $run"
+status=0
+brake_file="$state/brake"
+rm -f "$brake_file"
+# Subagents run in the foreground: each Agent call blocks until its report arrives, so the session never has to wait
+# with sleeps or end its turn while one is still working. The session leads its own process group (setsid execs
+# timeout, which keeps the group); a brake stops it with every process it started (stop_session).
+# TRIPHAMMER_SESSION tells the plugin's agent-guard hook that Triphammer started the session and names the only
+# directory, besides the temporary ones, it may write (plugins/triphammer/hooks/agent-guard.py, worktree-only).
+# TRIPHAMMER_OWNER is the owner checked above, the login scripts/land-pr.sh requests an escalation's review from; the
+# App's token cannot read repository variables, so the session gets it here.
+(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+  --output-format stream-json --verbose) > "$run" 2>&1 &
+session=$!
+brake_watch &
+watcher=$!
+wait "$session" || status=$?
+session=""
+end_session
+if [ -f "$brake_file" ]; then
+  echo $((attempts - 1)) > "$attempts_file"
+  log "$kind #$number: ended by the owner's brake: $(cat "$brake_file"); not counted (exit $status)"
+  rm -f "$brake_file"
+  exit 0
+fi
+
+# With the demo module on, publish the demos the session left (bin/publish-demos) before anything can remove the
+# worktree.
+if module_on demo; then
+  "$bin/publish-demos" "$worktree" 2>&1 | while IFS= read -r line; do log "$kind #$number: $line"; done \
+    || log "$kind #$number: publishing demos failed"
+fi
+
+# The run's pull requests, which the session usually opened, decide its progress below, and with the codex module on
+# each gets the advisory security review. The review never stops the run, and never delays a merge: the session has
+# ended, so `current` stops naming its pull requests and its branch ("-", which no branch can be) and merge-when-ready
+# may update them while the review runs. It still names this live process, so merge-when-ready does not take a missing
+# file for a lock held without one.
+write_current - "" || log "$kind #$number: could not rewrite current; merge-when-ready waits for this run to end"
+if [ "$kind" = ticket ]; then
+  # The open pull requests GitHub links as closing issue $number.
+  review_prs="$(gh pr list -R "$repo" --state open --limit 30 --json number,closingIssuesReferences \
+    | jq -r --argjson n "$number" --arg repo "$repo" '[.[] | select(any(.closingIssuesReferences[]?; .number == $n
+      and ("\(.repository.owner.login)/\(.repository.name)" | ascii_downcase) == ($repo | ascii_downcase))) | .number]
+      | map(tostring) | join(" ")')" \
+    || { log "$kind #$number: could not list the run's pull requests"; review_prs=""; }
+else
+  review_prs="$number"
+fi
+if module_on codex; then
+  for pr in $review_prs; do
+    "$bin/security-review" --pr "$pr" --repo "$checkout" 2>&1 | while IFS= read -r line; do
+      log "$kind #$number: security review of #$pr: $line"; done \
+      || log "$kind #$number: security review of #$pr failed"
+  done
+fi
+
+if [ "$status" -ne 0 ] && tail -n 20 "$run" | grep -qiE 'usage limit|rate.?limit|limit reached|overloaded'; then
+  echo $(( $(date +%s) + 3600 )) > "$shared/backoff"
+  echo $((attempts - 1)) > "$attempts_file"
+  log "$kind #$number: stopped by a usage or rate limit; not counted, pausing every project an hour"
+  exit 0
+fi
+
+if [ "$kind" = ticket ]; then
+  progressed="$(gh issue view "$number" -R "$repo" --json state,labels --jq \
+    'if .state != "OPEN" or (.labels | map(.name) | index("needs-owner")) then "yes" else "" end')"
+  # An open pull request GitHub links as closing the issue: the list above.
+  [ -n "$progressed" ] || [ -z "$review_prs" ] || progressed=yes
+  [ -n "$progressed" ] || progressed="$(gh issue list -R "$repo" --state all --search "\"of #$number\" in:body" --json number \
+    --jq 'if length > 0 then "yes" else "" end')"
+else
+  progressed="$(gh pr view "$number" -R "$repo" --json state,headRefOid --jq \
+    "if .state != \"OPEN\" or .headRefOid != \"$before\" then \"yes\" else \"\" end")"
+fi
+
+if [ -n "$progressed" ]; then
+  rm -f "$attempts_file"
+  remove_worktree "$worktree" 2>/dev/null || true
+  log "$kind #$number: run $attempts finished (exit $status)"
+  exit 0
+fi
+
+log "$kind #$number: run $attempts ended without progress (exit $status)"
+if [ "$attempts" -lt 3 ]; then
+  gh issue comment "$number" -R "$repo" --body "Ticket runner: run $attempts of 3 ended without a pull request or repair push (exit $status). Transcript on the agent machine: \`$run\`. It retries on its next start." >/dev/null
+elif [ "$kind" = ticket ]; then
+  gh issue edit "$number" -R "$repo" --add-label needs-owner >/dev/null
+  gh issue comment "$number" -R "$repo" --body "Ticket runner: three runs ended without a pull request, so it stopped. Transcripts are under \`$state/runs\` on the agent machine. Remove \`needs-owner\` to retry, or split the issue." >/dev/null
+else
+  gh pr edit "$number" -R "$repo" --add-label hold >/dev/null
+  gh pr comment "$number" -R "$repo" --body "Ticket runner: three repair runs ($reason) did not move this pull request, so it stopped. Transcripts are under \`$state/runs\` on the agent machine. Remove \`hold\` to retry." >/dev/null
+fi

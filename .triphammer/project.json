@@ -1,0 +1,17 @@
+{
+  "name": "triphammer",
+  "demos": false,
+  "shellEditRoots": [
+    "bin",
+    "systemd",
+    "status",
+    "scripts",
+    "plugins"
+  ],
+  "securityReviewPaths": "^(bin/|systemd/|status/|plugins/triphammer/hooks/|scripts/|\\.github/|\\.triphammer/)",
+  "securityReviewArea": "bin/, systemd/, status/, the plugin's hooks (plugins/triphammer/hooks/), scripts/, .github/ and .triphammer/",
+  "checks": {
+    "focused": "node --test <file>",
+    "suite": "npm run test:tooling"
+  }
+}

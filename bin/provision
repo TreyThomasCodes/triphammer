@@ -1,0 +1,742 @@
+#!/usr/bin/env bash
+# Turns a fresh Ubuntu server into a machine of Triphammer's own: the owner runs it once as root, and again whenever
+# they like, since a second run changes nothing that is already right. See bin/README.md ("On a machine of its
+# own") for the arguments, the machine's size and what the owner does afterwards.
+#
+#   provision --triphammer <owner/name> <checkout> --app-author <login>
+#             --project <owner/name> <checkout> [--modules <m,...>] [--set KEY=VALUE]... [--project ...]...
+#             [--user <name>] [--home <dir>] [--dry-run]
+#
+# --triphammer is the repository that holds bin/ and the plugin, and where to clone it; the units, the
+# ~/.local/bin links and the plugin install point at that checkout. Each --project is a repository the machine serves
+# and its checkout, with one config file (<name>.conf, <name> from its .triphammer/project.json) and one pair of timers
+# each; --modules and --set after a --project apply to that project. A repository may be both, at one checkout.
+#
+# It installs, each only when it is not there already: git, jq, Python 3, curl and the like from Ubuntu's archive;
+# Docker Engine with Compose v2 and the GitHub CLI from their vendors' apt repositories, or Ubuntu's own packages when
+# a vendor's repository does not serve this release (it says which); the service user (default `triphammer`) in the
+# docker group with lingering on; the checkouts, cloned as that user; Node from nodejs.org at the version the
+# checkouts' .node-version pins; the .NET SDK each checkout's global.json pins, through dotnet-install into ~/.dotnet,
+# with the drop-in that puts it on ticket-runner@.service's PATH (the README's Install section, A project's toolchain);
+# Claude Code through its installer; Playwright's Chromium at the version each package.json pins, with its system
+# libraries from Playwright or else from Ubuntu's archive; Codex, bubblewrap and the AppArmor profile that lets bwrap
+# create user namespaces when a project turns the codex module on, and ffmpeg for the demo module. It links the units
+# and scripts as the README's Install section does, installs the Triphammer plugin at user scope, points git's
+# github.com credentials at github-app-token, gives git a commit identity from --app-author unless the user has one,
+# and writes each project's config file with the values given. It enables no timer: the owner places the credentials,
+# runs the doctor and starts the timers (it prints how).
+#
+# It never reads or writes a credential's value: it creates ~/.config/github-app (mode 700) and nothing in it, before
+# any clone, and clones with github-app-token as git's credential helper: the checkout's once it is linked, until then
+# a copy of the one beside this script, so a private repository clones once the owner has placed the App's files. What
+# it runs in the user's checkouts (git, jq) runs as the user, never as root. Every argument is checked before anything
+# changes; an unknown flag or a bad value exits 2 with the usage. A step that fails exits 1 naming it, and a later run
+# carries on from there. --dry-run prints each change it would make (`would: ...`) and makes none.
+#
+# Tests (provision.test.mjs) run it with fakes of the package and account tools first on PATH, and two variables meant
+# for them only: TRIPHAMMER_PROVISION_ROOT, a directory the system paths it writes (/etc/apt, /etc/apparmor.d,
+# /usr/local, /tmp) and reads (/etc/os-release) are taken under, and TRIPHAMMER_PROVISION_GIT_BASE, the URL the repositories
+# are cloned under instead of https://github.com/.
+# shellcheck disable=SC2016  # the sh -c and bash -c scripts expand their own arguments, not this shell's
+set -euo pipefail
+umask 022
+
+here="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$here/config.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: provision --triphammer <owner/name> <checkout> --app-author <login>
+                 --project <owner/name> <checkout> [--modules <m,...>] [--set KEY=VALUE]... [--project ...]...
+                 [--user <name>] [--home <dir>] [--dry-run]
+EOF
+}
+usage_error() {
+  printf 'provision: %s\n' "$1" >&2
+  usage
+  exit 2
+}
+fail() {
+  printf 'provision: %s\n' "$1" >&2
+  exit 1
+}
+
+root="${TRIPHAMMER_PROVISION_ROOT:-}"
+git_base="${TRIPHAMMER_PROVISION_GIT_BASE:-https://github.com/}"
+repo_pattern='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+# The settings --set may give: config.sh's optional ones but MODULES (--modules gives it), and STATE_DIR.
+settable=(STATE_DIR)
+for key in "${optional_settings[@]}"; do [ "$key" = MODULES ] || settable+=("$key"); done
+# The settings each module needs; a project that turns it on without them is refused before anything changes.
+declare -A module_needs=([demo]="DEMO_GALLERY_DIR DEMO_URL" [qwen-audit]="QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL"
+  [codex]="CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL")
+
+tri_repo="" tri_checkout="" app_author="" user=triphammer home="" home_given="" dry_run=""
+proj_repo=() proj_checkout=() proj_modules=() proj_sets=()
+need_value() { [ "$1" -gt "$2" ] || usage_error "$3 needs $4"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --triphammer)
+      [ -z "$tri_repo" ] || usage_error "--triphammer is given twice"
+      need_value $# 2 --triphammer "a repository and a checkout"
+      tri_repo="$2" tri_checkout="$3"
+      shift 3 ;;
+    --project)
+      need_value $# 2 --project "a repository and a checkout"
+      proj_repo+=("$2") proj_checkout+=("$3") proj_modules+=("") proj_sets+=("")
+      shift 3 ;;
+    --modules|--set)
+      [ ${#proj_repo[@]} -gt 0 ] || usage_error "$1 applies to the --project before it, and none comes before it"
+      need_value $# 1 "$1" "a value"
+      i=$((${#proj_repo[@]} - 1))
+      if [ "$1" = --modules ]; then
+        [ -z "${proj_modules[$i]}" ] || usage_error "--modules is given twice for ${proj_repo[$i]}"
+        [ -n "$2" ] || usage_error "--modules needs a value"
+        proj_modules[i]="$2"
+      else
+        [[ "$2" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || usage_error "--set takes KEY=VALUE, not $2"
+        key="${BASH_REMATCH[1]}"
+        case "$key" in
+          REPO|CHECKOUT) usage_error "--set cannot give $key; --project gives it" ;;
+          APP_AUTHOR) usage_error "--set cannot give APP_AUTHOR; --app-author gives it" ;;
+          MODULES) usage_error "--set cannot give MODULES; --modules gives it" ;;
+        esac
+        [[ " ${settable[*]} " == *" $key "* ]] || usage_error "--set names $key, which is not a setting --set may give (${settable[*]})"
+        [[ "$2" != *$'\n'* ]] || usage_error "--set $key: the value may not hold a line break"
+        [[ $'\n'"${proj_sets[$i]}" != *$'\n'"$key="* ]] || usage_error "--set gives $key twice for ${proj_repo[$i]}"
+        proj_sets[i]="${proj_sets[$i]:+${proj_sets[$i]}$'\n'}$2"
+      fi
+      shift 2 ;;
+    --app-author|--user|--home)
+      need_value $# 1 "$1" "a value"
+      case "$1" in
+        --app-author) app_author="$2" ;;
+        --user) user="$2" ;;
+        --home) home="$2" home_given=1 ;;
+      esac
+      shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage_error "unknown argument $1" ;;
+  esac
+done
+[ -n "$tri_repo" ] || usage_error "--triphammer is missing"
+[ ${#proj_repo[@]} -gt 0 ] || usage_error "no --project is given"
+[ -n "$app_author" ] || usage_error "--app-author is missing"
+[[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || usage_error "--user must be a user name (lower-case letters, digits, _ and -), not $user"
+[ -z "$home" ] || [[ "$home" == /* ]] || usage_error "--home must be an absolute path, not $home"
+check_place() {
+  [[ "$2" =~ $repo_pattern ]] || usage_error "$1 takes a repository as owner/name, not $2"
+  [[ "$3" == /* && "$3" != */ && "$3" != *//* && "/$3/" != */../* && "/$3/" != */./* ]] \
+    || usage_error "$1 $2: the checkout must be an absolute path without . or .. parts or a trailing /, not $3"
+}
+check_place --triphammer "$tri_repo" "$tri_checkout"
+for i in "${!proj_repo[@]}"; do
+  check_place --project "${proj_repo[$i]}" "${proj_checkout[$i]}"
+  for j in "${!proj_repo[@]}"; do
+    [ "$j" -lt "$i" ] || break
+    [ "${proj_repo[$j],,}" != "${proj_repo[$i],,}" ] || usage_error "--project ${proj_repo[$i]} is given twice"
+    [ "${proj_checkout[$j]}" != "${proj_checkout[$i]}" ] \
+      || usage_error "--project ${proj_repo[$j]} and ${proj_repo[$i]} share the checkout ${proj_checkout[$i]}"
+  done
+  if [ "${proj_checkout[$i]}" = "$tri_checkout" ] && [ "${proj_repo[$i],,}" != "${tri_repo,,}" ]; then
+    usage_error "--project ${proj_repo[$i]} uses the checkout of --triphammer $tri_repo, another repository"
+  fi
+done
+[ -n "$home" ] || home="/home/$user"
+
+# project_setting <project index> <key>: the value --set gave it, or nothing.
+project_setting() {
+  local setting
+  while IFS= read -r setting; do
+    [[ "$setting" != "$2="* ]] || { printf '%s' "${setting#*=}"; return 0; }
+  done <<< "${proj_sets[$1]}"
+}
+# config_text <project index> <state dir>: the project's config file.
+config_text() {
+  local i="$1"
+  printf '# Written by bin/provision; bin/README.md (Configuration) describes each setting.\n'
+  printf 'REPO=%s\nCHECKOUT=%s\nAPP_AUTHOR=%s\n' "${proj_repo[$i]}" "${proj_checkout[$i]}" "$app_author"
+  [ -n "$(project_setting "$i" STATE_DIR)" ] || printf 'STATE_DIR=%s\n' "$2"
+  [ -z "${proj_modules[$i]}" ] || printf 'MODULES=%s\n' "${proj_modules[$i]}"
+  [ -z "${proj_sets[$i]}" ] || printf '%s\n' "${proj_sets[$i]}"
+}
+# project_module <project index> <module>: succeeds when the project turns the module on; any_module <module>: when
+# any project does.
+project_module() { [[ ",${proj_modules[$1]}," == *",$2,"* ]]; }
+any_module() {
+  local i
+  for i in "${!proj_modules[@]}"; do project_module "$i" "$1" && return 0; done
+  return 1
+}
+# Each project's settings go through config.sh's own reader before anything changes, so a config provision would
+# write is one the scripts accept.
+for i in "${!proj_repo[@]}"; do
+  scratch="$(mktemp)"
+  config_text "$i" "$home/.local/state/triphammer/projects/check" > "$scratch"
+  if ! problem="$( (
+      export TRIPHAMMER_CONFIG="$scratch"
+      unset TRIPHAMMER_PROJECT
+      load_config provision /
+      # shellcheck disable=SC2154  # set by load_config
+      for module in $cfg_modules; do
+        # shellcheck disable=SC2086  # the settings are words
+        module_needs provision "$module" ${module_needs[$module]}
+      done
+    ) 2>&1)"; then
+    rm -f "$scratch"
+    usage_error "--project ${proj_repo[$i]}: ${problem//"provision: $scratch"/its settings}"
+  fi
+  rm -f "$scratch"
+done
+
+[ "$(id -u)" = 0 ] || fail "run it as root (sudo $0 ...); --dry-run too, as it reads what only root may"
+[ -r "$root/etc/os-release" ] || fail "$root/etc/os-release is missing; provision runs on Ubuntu"
+os_id="$(sed -n 's/^ID=//p' "$root/etc/os-release" | tr -d '"')"
+codename="$(sed -n 's/^VERSION_CODENAME=//p' "$root/etc/os-release" | tr -d '"')"
+[ "$os_id" = ubuntu ] || fail "this is ${os_id:-an unknown system}, not Ubuntu; provision runs on Ubuntu"
+[[ "$codename" =~ ^[a-z]+$ ]] || fail "$root/etc/os-release names no release (VERSION_CODENAME)"
+arch="$(dpkg --print-architecture)"
+case "$arch" in
+  amd64) node_arch=x64 ;;
+  arm64) node_arch=arm64 ;;
+  *) fail "the machine's architecture is $arch; provision supports amd64 and arm64" ;;
+esac
+
+changes=0
+# change <what> <command...>: runs a change, or with --dry-run prints it; either way it counts.
+change() {
+  local what="$1"
+  shift
+  changes=$((changes + 1))
+  if [ -n "$dry_run" ]; then
+    printf 'would: %s\n' "$what"
+    return 0
+  fi
+  printf '+ %s\n' "$what"
+  "$@"
+}
+note() { printf '%s\n' "$1"; }
+
+user_exists() { getent passwd "$user" >/dev/null 2>&1; }
+# as_user <command...>: runs a command as the service user, from /, with only its own environment. Before the user
+# exists (with --dry-run) it fails, as every check that needs the user then does.
+as_user() {
+  user_exists || return 1
+  (cd / && runuser -u "$user" -- env -i HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash LANG=C.UTF-8 \
+    PATH="$home/.local/bin:$home/.dotnet:$home/.dotnet/tools${root:+:$root/usr/local/bin}:/usr/local/bin:/usr/bin:/bin" \
+    DOTNET_ROOT="$home/.dotnet" DOTNET_CLI_TELEMETRY_OPTOUT=1 "$@")
+}
+
+# A user that exists already keeps its home; --home must then name that one.
+if user_exists; then
+  existing="$(getent passwd "$user" | cut -d: -f6)"
+  [ -z "$home_given" ] || [ "$existing" = "$home" ] || fail "the user $user exists with the home $existing, not $home"
+  home="$existing"
+fi
+
+# The checkouts: each one is absent, an empty directory, or already a clone of its repository; anything else is the
+# owner's to sort out, so it stops here before anything changes.
+same_remote() {
+  local url="${1%/}" want="${2,,}"
+  url="${url%.git}" url="${url,,}"
+  local base="${git_base,,}"
+  [ "$url" = "$base$want" ] || [ "$url" = "https://github.com/$want" ] || [ "$url" = "git@github.com:$want" ] \
+    || [ "$url" = "ssh://git@github.com/$want" ]
+}
+# checkout_state <repo> <path>: prints absent, empty or cloned, or fails naming what is wrong.
+checkout_state() {
+  if [ ! -e "$2" ] && [ ! -L "$2" ]; then
+    echo absent
+  elif [ -d "$2" ] && [ ! -L "$2" ] && [ -z "$(ls -A -- "$2")" ]; then
+    echo empty
+  elif user_exists && [ "$(as_user git -C "$2" rev-parse --show-toplevel 2>/dev/null)" = "$(readlink -f -- "$2")" ] \
+      && same_remote "$(as_user git -C "$2" remote get-url origin 2>/dev/null)" "$1"; then
+    echo cloned
+  else
+    fail "$2 exists and is not $user's clone of $1; move it away, or give another checkout"
+  fi
+}
+checkout_state "$tri_repo" "$tri_checkout" >/dev/null
+for i in "${!proj_repo[@]}"; do checkout_state "${proj_repo[$i]}" "${proj_checkout[$i]}" >/dev/null; done
+
+# Packages from Ubuntu's archive (or a vendor's repository once it is added).
+apt_fresh=""
+installed() {
+  [ "$(dpkg-query -W -f='${db:Status-Status}' "$1" 2>/dev/null)" = installed ]
+}
+apt_update() {
+  [ -n "$apt_fresh" ] || { apt-get update -q && apt_fresh=1; }
+}
+apt_run() {
+  apt_update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@"
+}
+# apt_install <package...>: installs the packages that are not installed yet.
+apt_install() {
+  local missing=() package
+  for package; do installed "$package" || missing+=("$package"); done
+  [ ${#missing[@]} -eq 0 ] || change "install ${missing[*]}" apt_run "${missing[@]}" \
+    || fail "apt-get could not install ${missing[*]}"
+}
+# root_file <path> <mode> <content>: writes a file root owns, unless it holds exactly <content> with <mode> already.
+write_root_file() {
+  install -d -m 755 -- "$(dirname "$1")" && printf '%s' "$3" > "$1.provision" && chmod "$2" "$1.provision" \
+    && mv -f -- "$1.provision" "$1"
+}
+same_root_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && cmp -s -- "$1" <(printf '%s' "$3") && [ "$(stat -c %a -- "$1")" = "$2" ]
+}
+root_file() {
+  same_root_file "$@" || change "write $1" write_root_file "$@" || fail "could not write $1"
+}
+
+base=(ca-certificates curl git jq python3 openssl xz-utils)
+! any_module codex || base+=(bubblewrap apparmor)
+! any_module demo || base+=(ffmpeg)
+apt_install "${base[@]}"
+
+# vendor_repo <name> <key URL> <keyring> <sources file> <sources> <package...>: adds a vendor's apt repository and
+# installs its packages, or fails, leaving no sources file behind, so the caller falls back to Ubuntu's packages.
+vendor_repo() {
+  local name="$1" key_url="$2" keyring="$3" sources="$4" text="$5"
+  shift 5
+  if install -d -m 755 -- "$(dirname "$keyring")" "$(dirname "$sources")" \
+      && curl -fsSL --max-time 120 -o "$keyring.provision" "$key_url" && chmod 644 "$keyring.provision" \
+      && mv -f -- "$keyring.provision" "$keyring" && printf '%s' "$text" > "$sources" \
+      && apt-get update -q && apt_fresh=1 \
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "$@"; then
+    return 0
+  fi
+  echo "provision: $name's apt repository failed; removing it" >&2
+  rm -f -- "$sources" "$keyring.provision"
+  apt_fresh=""
+  return 1
+}
+keyrings="$root/etc/apt/keyrings"
+lists="$root/etc/apt/sources.list.d"
+
+if { installed docker-ce || installed docker.io; } && { installed docker-compose-plugin || installed docker-compose-v2; }; then
+  note "Docker Engine: installed already ($(installed docker-ce && echo "Docker's repository" || echo "Ubuntu's archive"))"
+elif curl -fsSIL --max-time 30 -o /dev/null "https://download.docker.com/linux/ubuntu/dists/$codename/Release" \
+    && change "add Docker's apt repository for $codename and install Docker Engine with Compose v2 from it" \
+      vendor_repo Docker https://download.docker.com/linux/ubuntu/gpg "$keyrings/docker.asc" "$lists/docker.sources" \
+      "Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $codename
+Components: stable
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/docker.asc
+" docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; then
+  note "Docker Engine: from Docker's repository"
+else
+  note "Docker Engine: from Ubuntu's archive (docker.io, docker-compose-v2), as Docker's repository does not serve $codename"
+  apt_install docker.io docker-compose-v2
+fi
+
+if installed gh; then
+  note "GitHub CLI: installed already"
+elif change "add the GitHub CLI's apt repository and install gh from it" \
+    vendor_repo "The GitHub CLI" https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      "$keyrings/githubcli-archive-keyring.gpg" "$lists/github-cli.sources" "Types: deb
+URIs: https://cli.github.com/packages
+Suites: stable
+Components: main
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/githubcli-archive-keyring.gpg
+" gh; then
+  note "GitHub CLI: from the GitHub CLI's repository"
+else
+  note "GitHub CLI: from Ubuntu's archive (gh), as the GitHub CLI's repository failed"
+  apt_install gh
+fi
+
+# The service user: its own group, a login shell for the owner's sudo -iu, the docker group, lingering on.
+if ! user_exists; then
+  change "create the user $user with the home $home" \
+    useradd --create-home --home-dir "$home" --shell /bin/bash --user-group "$user" || fail "useradd failed"
+fi
+if ! id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  change "add $user to the docker group" usermod -aG docker "$user" || fail "usermod failed"
+fi
+if [ "$(loginctl show-user "$user" --property=Linger --value 2>/dev/null)" != yes ]; then
+  change "turn lingering on for $user, so its user units run without a login" loginctl enable-linger "$user" \
+    || fail "loginctl enable-linger failed"
+fi
+
+# The App's directory, for the owner to fill in, and git's github.com credentials, which come from github-app-token
+# alone; both before any clone, as a private repository clones only with the App's token.
+app_dir="$home/.config/github-app"
+if [ ! -d "$app_dir" ] || [ -L "$app_dir" ] || [ "$(stat -c %a -- "$app_dir")" != 700 ]; then
+  change "create $app_dir, mode 700, for the App's files" as_user sh -c 'mkdir -p "$1" && chmod 700 "$1"' sh "$app_dir" \
+    || fail "could not create $app_dir"
+fi
+helpers="$(as_user git config --global --get-all credential.https://github.com.helper 2>/dev/null || true)"
+if [ "$helpers" != $'\n!github-app-token git-credential' ]; then
+  change "point git's github.com credentials at github-app-token" as_user sh -c \
+    "git config --global --replace-all credential.https://github.com.helper '' \
+      && git config --global --add credential.https://github.com.helper '!github-app-token git-credential'" \
+    || fail "could not set git's credential helper"
+fi
+# git tells the helper which repository it asks about, so the token is for the App's installation on that repository's
+# account.
+if [ "$(as_user git config --global --get credential.https://github.com.useHttpPath 2>/dev/null || true)" != true ]; then
+  change "have git name the repository when it asks github-app-token for credentials" \
+    as_user git config --global credential.https://github.com.useHttpPath true \
+    || fail "could not set git's credential.https://github.com.useHttpPath"
+fi
+# The identity the user's commits carry, from --app-author, unless one is set already: an App's bot account
+# (app/<slug> commits as <slug>[bot]) or the account itself, each at its GitHub noreply address.
+git_name="${app_author#app/}"
+[ "$git_name" = "$app_author" ] || git_name="${git_name}[bot]"
+for key in user.name user.email; do
+  value="$git_name"
+  [ "$key" = user.name ] || value="$git_name@users.noreply.github.com"
+  if [ -z "$(as_user git config --global --get "$key" 2>/dev/null || true)" ]; then
+    change "set git's $key for $user to $value" as_user git config --global "$key" "$value" \
+      || fail "could not set git's $key"
+  fi
+done
+
+# clone <repo> <path>: clones the repository as the user unless it is cloned there already.
+# Until Triphammer's checkout puts github-app-token on the user's PATH, the clone asks a copy of the one beside this
+# script for credentials, in a directory root owns that the user may read and run, removed when provision ends.
+bootstrap=""
+bootstrap_helper() {
+  [ -z "$bootstrap" ] || return 0
+  bootstrap="$(mktemp -d "$root/tmp/github-app-token.XXXXXX")" || return 1
+  trap 'rm -rf -- "$bootstrap"' EXIT
+  [[ "$bootstrap" =~ ^[A-Za-z0-9/._-]+$ ]] || { echo "provision: the temporary directory $bootstrap needs quoting" >&2; return 1; }
+  chmod 755 -- "$bootstrap" && install -m 755 -- "$here/github-app-token" "$bootstrap/github-app-token"
+}
+clone_into() {
+  if [ ! -e "$2" ]; then mkdir -p -- "$2" || return 1; fi
+  chown -- "$user:" "$2" || return 1
+  if as_user test -x "$home/.local/bin/github-app-token"; then
+    as_user git clone -q -- "$git_base$1.git" "$2"
+  else
+    bootstrap_helper || return 1
+    as_user git -c credential.https://github.com.helper= \
+      -c "credential.https://github.com.helper=!$bootstrap/github-app-token git-credential" \
+      clone -q -- "$git_base$1.git" "$2"
+  fi
+}
+clone() {
+  local state
+  state="$(checkout_state "$1" "$2")"
+  [ "$state" != cloned ] || return 0
+  change "clone $1 into $2 as $user" clone_into "$1" "$2" \
+    || fail "could not clone $1 into $2; a private repository needs the App's files in $home/.config/github-app first (bin/README.md, On a machine of its own), then run provision again"
+}
+# cloned <repo> <path>: succeeds when the checkout is there: always, but with --dry-run, where a clone may only be
+# planned.
+cloned() { [ -z "$dry_run" ] || [ "$(checkout_state "$1" "$2" 2>/dev/null)" = cloned ]; }
+# user_link <link> <target>: a symlink the user owns, unless it points there already.
+user_link() {
+  [ "$(readlink -- "$1" 2>/dev/null)" = "$2" ] && return 0
+  change "link $1 to $2" as_user sh -c 'mkdir -p "$(dirname "$1")" && ln -sfn "$2" "$1"' sh "$1" "$2" \
+    || fail "could not link $1"
+}
+# user_file <path> <mode> <content>: a file the user owns, unless it holds exactly <content> with <mode> already. A
+# file with other content is kept beside it as <path>.old.
+write_user_file() {
+  printf '%s' "$3" | as_user sh -c 'umask 077 && mkdir -p "$(dirname "$1")" && { [ ! -e "$1" ] || cp -p "$1" "$1.old"; } \
+    && cat > "$1.provision" && chmod "$2" "$1.provision" && mv -f "$1.provision" "$1"' sh "$1" "$2"
+}
+user_file() {
+  if printf '%s' "$3" | as_user cmp -s -- "$1" - 2>/dev/null && [ "$(stat -c %a -- "$1")" = "$2" ]; then return 0; fi
+  local what="write $1"
+  [ ! -e "$1" ] || what="rewrite $1 (the file it replaces is kept as $1.old)"
+  change "$what" write_user_file "$@" || fail "could not write $1"
+}
+
+clone "$tri_repo" "$tri_checkout"
+if cloned "$tri_repo" "$tri_checkout"; then
+  for path in bin/config.sh bin/ticket-runner status/server.mjs .claude-plugin/marketplace.json; do
+    as_user test -f "$tri_checkout/$path" || fail "$tri_checkout has no $path; --triphammer must be Triphammer's repository"
+  done
+fi
+
+# The scripts on the units' PATH and the units, linked from Triphammer's checkout as the Install section does.
+for script in ticket-runner merge-when-ready land-pr github-app-token gh demo-gallery; do
+  user_link "$home/.local/bin/$script" "$tri_checkout/bin/$script"
+done
+user_link "$home/.local/bin/triphammer-status" "$tri_checkout/status/server.mjs"
+reload=""
+for unit in systemd/ticket-runner@.service systemd/ticket-runner@.timer systemd/merge-when-ready@.service \
+    systemd/merge-when-ready@.timer systemd/demo-gallery@.service systemd/triphammer-status.service; do
+  if [ "$(readlink -- "$home/.config/systemd/user/${unit##*/}" 2>/dev/null)" != "$tri_checkout/$unit" ]; then
+    change "link the user unit ${unit##*/} from $tri_checkout" systemctl --machine="$user@" --user link "$tri_checkout/$unit" \
+      || fail "systemctl could not link $tri_checkout/$unit for $user"
+    reload=1
+  fi
+done
+[ -z "$reload" ] || change "reload $user's systemd units" systemctl --machine="$user@" --user daemon-reload \
+  || fail "systemctl could not reload $user's units"
+
+for i in "${!proj_repo[@]}"; do
+  [ "${proj_checkout[$i]}" = "$tri_checkout" ] || clone "${proj_repo[$i]}" "${proj_checkout[$i]}"
+done
+
+# What the checkouts pin, read as the user: each project's name and the toolchain versions.
+proj_name=()
+for i in "${!proj_repo[@]}"; do
+  proj_name+=("")
+  if ! cloned "${proj_repo[$i]}" "${proj_checkout[$i]}" || ! cloned "$tri_repo" "$tri_checkout"; then continue; fi
+  name="$(as_user bash -c 'source "$1/bin/config.sh" && check_project provision "$2" && project_get "$2" name' \
+    _ "$tri_checkout" "${proj_checkout[$i]}")" || fail "${proj_checkout[$i]} has no valid .triphammer/project.json"
+  [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "${proj_checkout[$i]}: the project name $name may not start with a dot"
+  for j in "${!proj_name[@]}"; do
+    [ "$j" -lt "$i" ] || break
+    [ "${proj_name[$j]}" != "$name" ] || fail "${proj_repo[$j]} and ${proj_repo[$i]} are both named $name in their project files"
+  done
+  proj_name[i]="$name"
+done
+checkouts=("$tri_checkout") checkout_repos=("$tri_repo")
+for i in "${!proj_checkout[@]}"; do
+  [ "${proj_checkout[$i]}" = "$tri_checkout" ] || checkouts+=("${proj_checkout[$i]}") checkout_repos+=("${proj_repo[$i]}")
+done
+node_pins=() sdk_pins=() playwright_pins=() unread=""
+add_pin() {
+  local -n pins="$1"
+  [[ " ${pins[*]} " == *" $2 "* ]] || pins+=("$2")
+}
+for c in "${!checkouts[@]}"; do
+  checkout="${checkouts[$c]}"
+  if ! cloned "${checkout_repos[$c]}" "$checkout"; then
+    unread=1
+    continue
+  fi
+  if as_user test -f "$checkout/.node-version"; then
+    pin="$(as_user cat "$checkout/.node-version" | tr -d '[:space:]')" pin="${pin#v}"
+    [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "$checkout/.node-version pins no version major.minor.patch"
+    add_pin node_pins "$pin"
+  fi
+  if as_user test -f "$checkout/global.json"; then
+    pin="$(as_user jq -r '.sdk.version // empty' "$checkout/global.json")" || fail "$checkout/global.json is not JSON"
+    if [ -n "$pin" ]; then
+      [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "$checkout/global.json pins $pin, not an SDK version"
+      add_pin sdk_pins "$pin"
+    fi
+  fi
+  while IFS= read -r manifest; do
+    [ -n "$manifest" ] || continue
+    dir="$(dirname "$checkout/$manifest")"
+    pin="$(as_user jq -r '(.devDependencies // {}) + (.dependencies // {}) | .["@playwright/test"] // .playwright // empty' \
+      "$checkout/$manifest")" || fail "$checkout/$manifest is not JSON"
+    [ -n "$pin" ] || continue
+    if ! [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && as_user test -f "$dir/package-lock.json"; then
+      pin="$(as_user jq -r '.packages["node_modules/@playwright/test"].version // .packages["node_modules/playwright"].version // empty' \
+        "$dir/package-lock.json")"
+    fi
+    [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "$checkout/$manifest asks for Playwright $pin; pin one version or lock it"
+    add_pin playwright_pins "$pin"
+  done < <(as_user git -C "$checkout" ls-files -- '*package.json')
+done
+if [ -n "$unread" ]; then
+  note "the toolchain versions come from the checkouts, which are not cloned yet; a real run reads them after cloning"
+fi
+
+# Node from nodejs.org into /usr/local, where the units' PATH finds it. One Node serves every checkout.
+[ ${#node_pins[@]} -le 1 ] || fail "the checkouts pin different Node versions (${node_pins[*]}), and one Node is on the units' PATH"
+[ ${#node_pins[@]} -eq 1 ] || [ -n "$unread" ] || fail "no checkout pins a Node version in .node-version"
+node_bin="$root/usr/local/bin"
+install_node() {
+  local version="$1" tarball="node-v$1-linux-$node_arch.tar.xz" scratch
+  scratch="$(mktemp -d)"
+  if curl -fsSL --max-time 600 -o "$scratch/$tarball" "https://nodejs.org/dist/v$version/$tarball" \
+      && curl -fsSL --max-time 60 -o "$scratch/SHASUMS256.txt" "https://nodejs.org/dist/v$version/SHASUMS256.txt" \
+      && (cd "$scratch" && grep -E "^[0-9a-f]{64}  $tarball\$" SHASUMS256.txt | sha256sum -c --status -) \
+      && install -d -m 755 -- "$root/usr/local" \
+      && tar -xJf "$scratch/$tarball" -C "$root/usr/local" --strip-components=1 --no-same-owner \
+        --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md; then
+    rm -rf -- "$scratch"
+    return 0
+  fi
+  rm -rf -- "$scratch"
+  return 1
+}
+if [ ${#node_pins[@]} -eq 1 ]; then
+  if [ "$("$node_bin/node" --version 2>/dev/null)" = "v${node_pins[0]}" ]; then
+    note "Node: v${node_pins[0]} installed already"
+  else
+    change "install Node v${node_pins[0]} from nodejs.org into $root/usr/local" install_node "${node_pins[0]}" \
+      || fail "could not install Node v${node_pins[0]} (download, checksum or unpacking failed)"
+  fi
+fi
+
+# The .NET SDKs, through dotnet-install into the user's ~/.dotnet, as on the workstation.
+for pin in "${sdk_pins[@]}"; do
+  if as_user "$home/.dotnet/dotnet" --list-sdks 2>/dev/null | grep -q "^${pin//./\\.} "; then continue; fi
+  change "install the .NET SDK $pin into $home/.dotnet with dotnet-install" as_user bash -c \
+    'set -e; d="$(mktemp -d)"; trap "rm -rf \"\$d\"" EXIT
+     curl -fsSL --max-time 120 -o "$d/dotnet-install.sh" https://dot.net/v1/dotnet-install.sh
+     bash "$d/dotnet-install.sh" --version "$1" --install-dir "$HOME/.dotnet" --no-path' _ "$pin" \
+    || fail "dotnet-install could not install the .NET SDK $pin"
+done
+# The units put no project's toolchain on PATH; this drop-in adds the SDKs above for every project's sessions.
+if [ ${#sdk_pins[@]} -gt 0 ]; then
+  before="$changes"
+  user_file "$home/.config/systemd/user/ticket-runner@.service.d/dotnet.conf" 644 '[Service]
+Environment=PATH=%h/.local/bin:%h/.dotnet:%h/.dotnet/tools:/usr/local/bin:/usr/bin:/bin
+Environment=DOTNET_ROOT=%h/.dotnet
+'
+  [ "$changes" -eq "$before" ] || change "reload $user's systemd units" systemctl --machine="$user@" --user daemon-reload \
+    || fail "systemctl could not reload $user's units"
+fi
+
+# Claude Code, through its installer, as the user: it lands in ~/.local/bin.
+if ! as_user "$home/.local/bin/claude" --version >/dev/null 2>&1; then
+  change "install Claude Code for $user with its installer" as_user bash -c \
+    'set -e; d="$(mktemp -d)"; trap "rm -rf \"\$d\"" EXIT
+     curl -fsSL --max-time 120 -o "$d/install.sh" https://claude.ai/install.sh
+     bash "$d/install.sh"' || fail "the Claude Code installer failed"
+fi
+if any_module codex && ! as_user "$home/.local/bin/codex" --version >/dev/null 2>&1; then
+  change "install Codex for $user into $home/.local with npm" as_user npm install -g -q --prefix "$home/.local" @openai/codex \
+    || fail "npm could not install Codex"
+fi
+
+# Playwright's Chromium at each pinned version, then the libraries it needs: Playwright's own install-deps, or, on a
+# release it does not know, Chromium's libraries from Ubuntu's archive. Either way Chromium must then start headless.
+chromium_libraries=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64
+  libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1
+  libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 libfontconfig1 libfreetype6 fonts-liberation
+  fonts-noto-color-emoji)
+# browser_dirs <version>: the directories Playwright installs Chromium into, one per line.
+browser_dirs() {
+  as_user npx -y "playwright@$1" install --dry-run chromium 2>/dev/null | sed -n 's/^ *Install location: *//p'
+}
+browsers_complete() {
+  local dir dirs
+  dirs="$(browser_dirs "$1")" || return 1
+  [ -n "$dirs" ] || return 1
+  while IFS= read -r dir; do as_user test -f "$dir/INSTALLATION_COMPLETE" || return 1; done <<< "$dirs"
+}
+# chromium_starts <version>: every Chromium of that version prints a blank page headless, as Playwright runs it.
+chromium_starts() {
+  local dir browser found=""
+  while IFS= read -r dir; do
+    for browser in "$dir"/chrome-linux*/chrome "$dir"/chrome-headless-shell-linux*/chrome-headless-shell; do
+      [ -x "$browser" ] || continue
+      found=1
+      as_user timeout 60 "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>/dev/null \
+        | grep -q '<html' || return 1
+    done
+  done < <(browser_dirs "$1")
+  [ -n "$found" ]
+}
+install_deps() {
+  PATH="$node_bin:$PATH" "$node_bin/npx" -y "playwright@$1" install-deps chromium && return 0
+  note "Playwright's install-deps does not support this release; installing Chromium's libraries from Ubuntu's archive"
+  apt_run "${chromium_libraries[@]}"
+}
+for pin in "${playwright_pins[@]}"; do
+  if ! browsers_complete "$pin"; then
+    change "install Playwright $pin's Chromium for $user" as_user npx -y "playwright@$pin" install chromium \
+      || fail "Playwright $pin could not install Chromium"
+  fi
+  if ! chromium_starts "$pin"; then
+    change "install the system libraries Playwright $pin's Chromium needs" install_deps "$pin" \
+      || fail "could not install Chromium's libraries"
+    [ -n "$dry_run" ] || chromium_starts "$pin" \
+      || fail "Playwright $pin's Chromium still does not start headless; run ticket-runner --doctor as $user for the details"
+  fi
+done
+
+# The Triphammer plugin at user scope, from the marketplace file of Triphammer's checkout.
+if cloned "$tri_repo" "$tri_checkout"; then
+  marketplace="$(as_user jq -r .name "$tri_checkout/.claude-plugin/marketplace.json")" \
+    || fail "$tri_checkout/.claude-plugin/marketplace.json is not JSON"
+  plugin="$(as_user jq -r '.plugins[0].name' "$tri_checkout/.claude-plugin/marketplace.json")"
+  if ! as_user claude plugin marketplace list --json 2>/dev/null | jq -e --arg name "$marketplace" 'any(.[]; .name == $name)' >/dev/null; then
+    change "add the plugin marketplace $marketplace from $tri_checkout for $user" as_user claude plugin marketplace add "$tri_checkout" \
+      || fail "claude could not add the marketplace in $tri_checkout"
+  fi
+  if ! as_user claude plugin list --json 2>/dev/null \
+      | jq -e --arg id "$plugin@$marketplace" 'any(.[]; .id == $id and .scope == "user")' >/dev/null; then
+    change "install the plugin $plugin@$marketplace at user scope for $user" \
+      as_user claude plugin install "$plugin@$marketplace" --scope user || fail "claude could not install $plugin@$marketplace"
+  fi
+fi
+
+# Each project's config file.
+for i in "${!proj_repo[@]}"; do
+  if [ -z "${proj_name[$i]}" ]; then
+    change "write the config file of ${proj_repo[$i]}, named after its project file, once it is cloned" true
+    continue
+  fi
+  user_file "$home/.config/triphammer/${proj_name[$i]}.conf" 600 \
+    "$(config_text "$i" "$home/.local/state/triphammer/projects/${proj_name[$i]}")"$'\n'
+done
+
+# bwrap's user namespaces, for Codex's sandbox: Ubuntu restricts them with AppArmor, which this profile lifts for
+# /usr/bin/bwrap alone. A profile at that path that is not this script's is left alone.
+if any_module codex; then
+  profile="$root/etc/apparmor.d/bwrap"
+  marker="# Triphammer's provision: lets bwrap, Codex's sandbox, create user namespaces (bin/README.md)."
+  text="$marker
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+"
+  loaded=""
+  if [ -e "$profile" ] && ! grep -qxF -- "$marker" "$profile"; then
+    note "AppArmor: leaving $profile alone, as it is not provision's"
+  elif ! same_root_file "$profile" 644 "$text"; then
+    root_file "$profile" 644 "$text"
+    change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+    loaded=1
+  fi
+  userns() { as_user bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1; }
+  if [ -z "$dry_run" ] && ! userns; then
+    if [ -z "$loaded" ] && grep -qxF -- "$marker" "$profile" 2>/dev/null; then
+      change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+    fi
+    userns || fail "bwrap still cannot create a user namespace as $user, which Codex's sandbox needs; check $profile and the kernel's apparmor_restrict_unprivileged_userns"
+  fi
+fi
+
+echo
+if [ "$changes" -eq 0 ]; then
+  echo "Nothing to change: the machine is as asked."
+elif [ -n "$dry_run" ]; then
+  echo "$changes change(s) to make; nothing was changed."
+else
+  echo "$changes change(s) made."
+fi
+cat <<EOF
+
+Next, as the owner (provision never reads or writes a credential):
+  1. Put the App's files in $app_dir, each owned by $user and mode 600: app-id, owner and agents.pem.
+EOF
+step=2
+for i in "${!proj_repo[@]}"; do
+  if project_module "$i" qwen-audit; then
+    echo "  $step. Put the Qwen server's API key in $(project_setting "$i" QWEN_KEY_FILE), owned by $user and mode 600."
+    step=$((step + 1))
+  fi
+done
+echo "  $step. Log Claude Code in: sudo -iu $user claude auth login (or claude setup-token; bin/README.md)."
+step=$((step + 1))
+if any_module codex; then
+  echo "  $step. Log Codex in: sudo -iu $user codex login."
+  step=$((step + 1))
+fi
+# sudo -i leaves XDG_RUNTIME_DIR unset, and systemctl --user (the doctor's unit check) needs it to reach the user's
+# manager; lingering keeps /run/user/<uid> there.
+uid="$(id -u "$user" 2>/dev/null)" || uid='<uid>'
+for i in "${!proj_repo[@]}"; do
+  name="${proj_name[$i]:-<name>}"
+  units="ticket-runner@$name.timer merge-when-ready@$name.timer"
+  ! project_module "$i" demo || units+=" demo-gallery@$name.service"
+  echo "  $step. Check ${proj_repo[$i]}: sudo -iu $user env XDG_RUNTIME_DIR=/run/user/$uid TRIPHAMMER_PROJECT=$name ticket-runner --doctor"
+  echo "     then start it: sudo systemctl --machine=$user@ --user enable --now $units"
+  step=$((step + 1))
+done
+echo "  $step. Optionally the status page: sudo systemctl --machine=$user@ --user enable --now triphammer-status.service"

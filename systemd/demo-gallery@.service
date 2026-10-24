@@ -1,0 +1,22 @@
+# Serves the demo gallery of the project named by the instance (<project>.conf in ~/.config/triphammer/), the directory
+# demo-publish writes to, at the config's DEMO_GALLERY_HOST and DEMO_GALLERY_PORT. Only for a project with the demo
+# module on; install it (see README.md):
+#   systemctl --user link <main checkout>/systemd/demo-gallery@.service
+#   systemctl --user enable --now demo-gallery@<project>.service
+# It runs ~/.local/bin/demo-gallery, the symlink to the main checkout's copy the install creates, so the unit names no
+# checkout; the script reads the project's Triphammer config (README.md, "Configuration").
+[Unit]
+Description=Serve the demo gallery of %i
+
+[Service]
+UMask=0077
+Environment=TRIPHAMMER_PROJECT=%i
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/demo-gallery
+Restart=on-failure
+RestartSec=10
+# Exit 2 is a config the owner must fix (the module off, a setting missing or malformed); restarting cannot help.
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+# Starts merge-when-ready@<project>.service. Install from the main checkout (see README.md):
+#   systemctl --user link <main checkout>/systemd/merge-when-ready@.timer
+#   systemctl --user enable --now merge-when-ready@<project>.timer
+[Unit]
+Description=Run merge-when-ready for %i every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

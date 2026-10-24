@@ -1,0 +1,60 @@
+#!/usr/bin/env -S python3 -I
+"""Publishes the demos a ticket-runner session left in its worktree, so the demo agent never runs demo-publish itself.
+
+  publish-demos <worktree>
+
+Each folder directly under <worktree>/artifacts/web-demo/results/ that holds a demo.json,
+  {"pr": <pull request number>, "summary": "<one line on what changed, for a trader>"}
+is published with `demo-publish <pr> --summary <summary> <folder>` (the demo-publish next to this script). A folder
+without demo.json is skipped, a malformed one is reported, and no results directory means nothing to do. Every
+outcome is one printed line; a failed publish never makes this exit nonzero, so it never fails a runner tick.
+"""
+import json, subprocess, sys
+from pathlib import Path
+
+DEMO_PUBLISH = Path(__file__).resolve().parent / "demo-publish"
+
+
+def request(folder):
+    """The (pr, summary) in folder/demo.json, or a reason it cannot be published."""
+    try:
+        demo = json.loads((folder / "demo.json").read_text())
+    except (OSError, ValueError) as error:
+        return f"unreadable demo.json ({error})"
+    pr, summary = (demo.get("pr"), demo.get("summary")) if isinstance(demo, dict) else (None, None)
+    if type(pr) is not int or pr <= 0:
+        return "demo.json needs \"pr\": a pull request number"
+    if not isinstance(summary, str) or not summary.strip() or "\n" in summary:
+        return "demo.json needs \"summary\": one line of text"
+    return pr, summary.strip()
+
+
+def main(worktree):
+    results = Path(worktree) / "artifacts/web-demo/results"
+    if not results.is_dir():
+        return
+    for folder in sorted(p for p in results.iterdir() if p.is_dir()):
+        if not (folder / "demo.json").is_file():
+            print(f"demo {folder.name}: no demo.json; not published")
+            continue
+        found = request(folder)
+        if isinstance(found, str):
+            print(f"demo {folder.name}: {found}; not published")
+            continue
+        pr, summary = found
+        try:
+            result = subprocess.run([str(DEMO_PUBLISH), str(pr), "--summary", summary, str(folder)],
+                                    stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        except OSError as error:
+            print(f"demo {folder.name}: demo-publish for PR #{pr} could not start ({error})")
+            continue
+        for line in (result.stdout + result.stderr).splitlines():
+            print(f"demo {folder.name}: {line}")
+        if result.returncode != 0:
+            print(f"demo {folder.name}: demo-publish for PR #{pr} failed (exit {result.returncode})")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        sys.exit(__doc__)
+    main(sys.argv[1])

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Agents reach GitHub as the agents' GitHub App, never as the owner: this `gh`, linked into ~/.local/bin ahead of the
+# real one, runs the first other `gh` on PATH with GH_TOKEN from the github-app-token beside it (symlinks resolved).
+# The token is for the App's installation on the account that owns the repository: the owner of a -R/--repo argument
+# ([HOST/]OWNER/REPO) when there is one, otherwise $GITHUB_APP_OWNER or the owner file (github-app-token).
+# When no token can be had it stops with exit 1 and runs nothing, so gh never falls back to other credentials.
+set -euo pipefail
+
+self="$(readlink -f "$0")"
+here="$(dirname "$self")"
+
+# The first gh on PATH that is not this script. Empty and relative PATH entries are skipped, so a gh in the current
+# directory is never run.
+real=''
+IFS=: read -ra path_dirs <<<"$PATH"
+for dir in "${path_dirs[@]}"; do
+  [[ $dir == /* ]] || continue
+  candidate="$dir/gh"
+  { [ -f "$candidate" ] && [ -x "$candidate" ]; } || continue
+  [ "$(readlink -f "$candidate")" = "$self" ] && continue
+  real="$candidate"
+  break
+done
+[ -n "$real" ] || { echo "gh (bin/gh): no gh on PATH besides this wrapper; install GitHub's gh; nothing ran" >&2; exit 1; }
+
+# The repository a -R/--repo argument names, in any of the forms gh takes.
+repo=''
+for ((i = 1; i <= $#; i++)); do
+  case "${!i}" in
+    --) break ;;
+    -R | --repo) next=$((i + 1)); repo="${!next:-}"; break ;;
+    --repo=*) repo="${!i#--repo=}"; break ;;
+    -R?*) repo="${!i#-R}"; break ;;
+  esac
+done
+IFS=/ read -ra parts <<<"$repo"
+if [ "${#parts[@]}" = 2 ]; then
+  export GITHUB_APP_OWNER="${parts[0]}"
+elif [ "${#parts[@]}" = 3 ] && [ "${parts[0]}" = github.com ]; then
+  export GITHUB_APP_OWNER="${parts[1]}"
+fi
+
+token="$("$here/github-app-token")" \
+  || { echo "gh (bin/gh): no GitHub App token (see the message above); nothing ran" >&2; exit 1; }
+GH_TOKEN="$token" exec "$real" "$@"

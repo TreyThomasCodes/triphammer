@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Security review of Triphammer's own safety machinery by the Triphammer config's CODEX_SECURITY_MODEL through Codex
+# (bin/local-audit, read-only sandbox, medium effort), prompted with security-review-brief.md next to this script.
+# Advisory only: nothing reads its result to decide a merge. It is part of the config's codex module, and exits 2 when
+# that is off or gives no CODEX_SECURITY_MODEL. See bin/README.md.
+#
+#   security-review --pr <n> [--repo <path>]
+#   security-review --full-area --commit <rev> --output <file> [--repo <path>]
+#
+# The repository is the Triphammer config's REPO and <repo> defaults to its CHECKOUT (bin/config.sh). The trigger
+# paths and the area are the project's securityReviewPaths and securityReviewArea, from <repo>/.triphammer/project.json.
+#
+# --pr reviews pull request <n> when it is open and changes a path the securityReviewPaths regular expression matches;
+# a project that declares none has nothing reviewed. The file filter alone decides; labels are not read. It fetches the
+# head into <repo>, audits the changed files and what they call as one Codex run, and posts one comment headed
+# "Security review (<model>)", the model's name without a trailing "-latest", naming the head: the findings, or why the review was skipped or failed.
+# Once the comment is posted it appends "<REPO> <n> <head>" to security-reviewed in the Triphammer config's STATE_DIR, which
+# agent-guard.py keeps agents from writing. It does nothing for any other pull request, or for a head that file already
+# names; pull request comments are never read. Exit 0 unless it could not read the pull request or its files, post the
+# comment or record the head (1), or got bad arguments (2).
+#
+# --full-area audits the whole securityReviewArea at <rev> as one run weighing 4, writes local-audit's <file>, posts
+# nothing, and exits with local-audit's status (0 ran, 1 failed, 2 bad arguments, 3 unavailable, 4 skipped for budget).
+set -uo pipefail
+
+bin="$(dirname "$(readlink -f "$0")")"
+# shellcheck source=bin/config.sh
+source "$bin/config.sh"
+load_config security-review "$bin/.."
+repo_name="$cfg_repo"
+usage() { sed -n '6,7p' "$0" | sed 's/^# *//'; }
+fail() { echo "security-review: $1" >&2; exit "${2:-1}"; }
+
+pr='' full='' commit='' output=''
+repo="$cfg_checkout"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
+    --full-area) full=1; shift ;;
+    --pr|--repo|--commit|--output)
+      [ $# -ge 2 ] || { usage >&2; fail "$1 needs a value" 2; }
+      printf -v "${1#--}" '%s' "$2"
+      shift 2 ;;
+    *) usage >&2; fail "unexpected argument: $1" 2 ;;
+  esac
+done
+module_needs security-review codex CODEX_SECURITY_MODEL
+model="${cfg[CODEX_SECURITY_MODEL]}"
+heading="Security review (${model%-latest})"
+audit=("$bin/local-audit" --model codex --codex-model "$model" --brief "$bin/security-review-brief.md" --sandbox read-only)
+
+if [ -n "$full" ]; then
+  if [ -n "$pr" ] || [ -z "$commit" ] || [ -z "$output" ]; then
+    usage >&2; fail "--full-area needs --commit and --output, and no --pr" 2
+  fi
+  check_project security-review "$repo" || exit 2
+  full_area="$(project_get "$repo" securityReviewArea)"
+  [ -n "$full_area" ] || fail "$repo/.triphammer/project.json declares no securityReviewArea" 2
+  exec "${audit[@]}" --weight 4 --repo "$repo" --commit "$commit" --output "$output" --area "$full_area"
+fi
+if ! [[ "$pr" =~ ^[0-9]+$ ]] || [ -n "$commit$output" ]; then
+  usage >&2; fail "--pr needs a pull request number, and no --commit or --output" 2
+fi
+check_project security-review "$repo" || exit 2
+paths="$(project_get "$repo" securityReviewPaths)"
+[ -n "$paths" ] || exit 0
+
+view="$(gh pr view "$pr" -R "$repo_name" --json state,headRefOid)" \
+  || fail "cannot read pull request #$pr"
+state="$(jq -r .state <<< "$view")"
+head="$(jq -r .headRefOid <<< "$view")"
+[ "$state" = OPEN ] || exit 0
+# gh pr view's `files` stops at the first 100 in path order, which would drop bin/ behind 100 src/ files; the
+# paginated REST list has them all.
+files="$(gh api --paginate "repos/$repo_name/pulls/$pr/files" --jq '.[].filename')" \
+  || fail "cannot read the files of pull request #$pr"
+grep -qE -- "$paths" <<< "$files" || exit 0
+[[ "$head" =~ ^[0-9a-f]{40}$ ]] || fail "pull request #$pr has no head commit"
+# One comment per head: the record names each head this script reviewed, skipped or failed on.
+reviewed="$cfg_state_dir/security-reviewed"
+record="$repo_name $pr $head"
+grep -qsxF -- "$record" "$reviewed" && exit 0
+
+out="$(mktemp)"
+trap 'rm -f "$out"' EXIT
+area="the files pull request #$pr changes, and whatever they call: $(paste -sd, <<< "$files" | sed 's/,/, /g')"
+if ! fetched="$(git -C "$repo" fetch -q origin "pull/$pr/head" 2>&1)" \
+    || ! git -C "$repo" cat-file -e "$head^{commit}" 2>/dev/null; then
+  status=1 said="could not fetch the head into $repo: ${fetched:-the head is not on pull/$pr/head}"
+else
+  said="$("${audit[@]}" --weight 1 --repo "$repo" --commit "$head" --output "$out" --area "$area" 2>&1)"
+  status=$?
+fi
+# local-audit's last line says why it audited nothing; its output file holds a header, a blank line, then the result.
+reason="$(tail -n 1 <<< "$said" | sed 's/^local-audit: //' | cut -c1-300)"
+case "$status" in
+  0) result="$(sed '1,/^$/d' "$out")" ;;
+  3|4) result="Skipped: $reason" ;;
+  *) result="Failed (exit $status): $reason" ;;
+esac
+[ "$status" -eq 0 ] || result+="
+
+Nothing was reviewed for this head, so this comment says nothing about whether the change is safe."
+body="## $heading
+
+Head: $head
+
+$result
+
+Advisory only: merge-policy and merge-when-ready never read this comment, and it does not block or delay a merge."
+gh pr comment "$pr" -R "$repo_name" --body "$body" > /dev/null || fail "cannot comment on pull request #$pr"
+{ mkdir -p "$cfg_state_dir" && printf '%s\n' "$record" >> "$reviewed"; } \
+  || fail "commented on #$pr at $head but cannot record it in $reviewed, so the next run reviews it again"
+echo "commented on #$pr at $head (local-audit exit $status)"
