@@ -7,11 +7,13 @@
 #   triphammer start [<project>]
 #
 # add clones Triphammer's repository (from the machine file) into a temporary directory as the caller, runs that
-# clone's bin/provision-project as root through sudo with the arguments given, removes the clone, and then runs the
-# doctor for the project with --before-start, which leaves out the units start enables. Running a fresh clone keeps
-# root from running code in a checkout the service user can write. doctor and plan run ticket-runner --doctor or
-# --plan for a project as the service user; start enables and starts the project's timers, and its gallery with the
-# demo module. A <project> left out is the machine's only project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
+# clone's bin/provision-project as root through sudo with the arguments given, removes the clone, creates the labels
+# Triphammer reads and sets that the repository lacks (ticket-runner --labels, as the service user, whose gh acts as the
+# App; a failure is reported and undoes nothing), and then runs the doctor for the project with --before-start, which
+# leaves out the units start enables. Running a fresh clone keeps root from running code in a checkout the service user
+# can write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start enables and
+# starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's only
+# project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
 #
 # sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
@@ -118,6 +120,12 @@ relay() {
   [ -z "$child" ] || setsid -w kill -s TERM "$child" 2> /dev/null || true
 }
 
+# service_runner <project> <args...>: runs ticket-runner <args...> for a project as the service user, detached.
+service_runner() {
+  service_prefix
+  detached "${service[@]}" -- env TRIPHAMMER_PROJECT="$1" "$home/.local/bin/ticket-runner" "${@:2}"
+}
+
 # project <name or nothing>: sets `project` to the name given, or to the machine's only project.
 project() {
   local configs names=()
@@ -162,10 +170,12 @@ add() {
   [ -z "$dry_run" ] || return 0
   [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "provision-project named no project"
   echo
+  echo "The labels Triphammer uses:"
+  service_runner "$name" --labels \
+    || echo "triphammer: not every label Triphammer uses could be created; the doctor lists the missing ones" >&2
+  echo
   echo "The doctor's check of $name:"
-  service_prefix
-  detached "${service[@]}" -- env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor --before-start \
-    || true
+  service_runner "$name" --doctor --before-start || true
   echo
   echo "Start it, once the doctor finds nothing missing: triphammer start $name"
 }
@@ -176,8 +186,7 @@ runner() {
   [ $# -le 1 ] || usage_error "${flag#--} takes at most one project"
   read_machine
   project "${1:-}"
-  service_prefix
-  detached "${service[@]}" -- env TRIPHAMMER_PROJECT="$project" "$home/.local/bin/ticket-runner" "$flag"
+  service_runner "$project" "$flag"
 }
 
 start() {

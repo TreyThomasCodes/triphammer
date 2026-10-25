@@ -102,7 +102,7 @@ test('no command prints the usage and exits 2, --help exits 0, and an unknown co
   assert.deepEqual(s.calls(), []);
 });
 
-test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-project as root, then the doctor as the service user', t => {
+test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-project as root, then creates the labels and runs the doctor as the service user', t => {
   const s = setup(t);
   const result = s.run('add', 'example/example-project', '--modules', 'demo', '--set', 'DEMO_URL=http://x.invalid/');
   assert.equal(result.status, 0, result.stderr);
@@ -112,15 +112,18 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   const step = call => call.replace(/ bash -c .*setsid .* detached /, ' <session> ');
   assert.match(step(calls[1]), new RegExp(`^sudo <session> bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
   assert.equal(calls[2], 'provision-project sudo=yes example/example-project --modules demo --set DEMO_URL=http://x.invalid/');
-  assert.equal(step(calls[3]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor --before-start`);
-  assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor --before-start');
-  assert.equal(calls.length, 5);
+  assert.equal(step(calls[3]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --labels`);
+  assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --labels');
+  assert.equal(step(calls[5]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor --before-start`);
+  assert.equal(calls[6], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor --before-start');
+  assert.equal(calls.length, 7);
   assert.match(result.stdout, /sudo asks for your password once/);
   assert.match(result.stdout, /^setting it up$/m);
   assert.match(result.stdout, /Start it, once the doctor finds nothing missing: triphammer start example-project$/m);
   assert.deepEqual(readdir(s.tmp), [], 'the clone was left behind');
   // Run from a terminal, a command outside its foreground group that touches it is stopped, so these have none.
-  assert.deepEqual(s.sessions(), ['provision-project leader /dev/null', 'ticket-runner leader /dev/null']);
+  assert.deepEqual(s.sessions(), ['provision-project leader /dev/null', 'ticket-runner leader /dev/null',
+    'ticket-runner leader /dev/null']);
 });
 
 test('add as root runs provision-project without sudo', t => {
@@ -142,7 +145,7 @@ test('add exits with provision-project\'s status when it fails, runs no doctor a
   assert.deepEqual(readdir(s.tmp), []);
 });
 
-test('add --dry-run runs no doctor, and a doctor that finds problems does not fail add', t => {
+test('add --dry-run creates no label and runs no doctor, and labels or a doctor that fail do not fail add', t => {
   const s = setup(t);
   const dry = s.run('add', 'example/example-project', '--dry-run');
   assert.equal(dry.status, 0, dry.stderr);
@@ -150,7 +153,9 @@ test('add --dry-run runs no doctor, and a doctor that finds problems does not fa
   s.fail('runner', 1);
   const result = s.run('add', 'example/example-project');
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(s.calls().some(call => call.endsWith('--doctor --before-start')));
+  assert.deepEqual(s.calls().filter(call => call.startsWith('ticket-runner')).map(call => call.split(' ').slice(3).join(' ')),
+    ['--labels', '--doctor --before-start']);
+  assert.match(result.stderr, /not every label Triphammer uses could be created; the doctor lists the missing ones/);
 });
 
 test('without the machine file every command but usage exits 1 naming it', t => {

@@ -25,6 +25,8 @@ esac
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
+# shellcheck source=bin/labels.sh
+source "$bin/labels.sh"
 load_config "ticket-runner --doctor" "$bin/.."
 checkout="$cfg_checkout" project="$cfg_project"
 
@@ -244,6 +246,15 @@ if tool gh "GitHub's gh" "install gh (https://cli.github.com) $units_path; throu
   if ! gh api installation/repositories --jq .total_count >/dev/null 2>&1; then
     problem "gh does not act as the agents' GitHub App (gh api installation/repositories fails)" \
       "link bin/gh and github-app-token into ~/.local/bin ahead of GitHub's gh and check the App's files (bin/README.md, Install)"
+  # The labels Triphammer reads and sets (bin/labels.sh), checked only once gh acts as the App, whose view counts.
+  elif ! missing="$(missing_labels "$cfg_repo" 2>/dev/null)"; then
+    problem "gh label list fails for $cfg_repo, so the labels Triphammer uses were not checked" \
+      "install the agents' GitHub App on $cfg_repo, then run the doctor again (bin/README.md, Labels)"
+  else
+    while IFS= read -r name; do
+      [ -z "$name" ] || problem "$cfg_repo has no label $name, which Triphammer reads or sets" \
+        "run triphammer add $cfg_repo again, with the options it was added with (bin/README.md, Labels)"
+    done <<< "$missing"
   fi
 fi
 

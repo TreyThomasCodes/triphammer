@@ -217,7 +217,7 @@ export function checkoutSetup(t, files = {}, config = {}) {
   };
 }
 
-// A machine whose checkout holds this branch's ticket-runner, config.sh, ticket-decide.py and update-checkout, the
+// A machine whose checkout holds this branch's ticket-runner, config.sh, labels.sh, ticket-decide.py and update-checkout, the
 // example project's .triphammer/project.json (or `project`), plus `files`, and a runner that executes the checkout's
 // copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its Triphammer config is Triphammer's,
 // with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
@@ -228,6 +228,7 @@ export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'
   const r = checkoutSetup(t, {
     'bin/ticket-runner': runner,
     'bin/config.sh': readFileSync(join(here, 'config.sh'), 'utf8'),
+    'bin/labels.sh': readFileSync(join(here, 'labels.sh'), 'utf8'),
     'bin/ticket-decide.py': readFileSync(join(here, 'ticket-decide.py'), 'utf8'),
     'bin/update-checkout': readFileSync(join(here, 'update-checkout'), 'utf8'),
     'bin/demo-publish': '#!/bin/sh\nexit 0\n',

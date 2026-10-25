@@ -312,6 +312,24 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
 - Ready issues labelled `next` are taken before other ready issues, lowest number first. The label never makes an issue
   ready or outranks a parent to close or a repair; when a `next` issue waits, the reason is printed to standard error.
 
+## Labels
+
+Triphammer reads and sets these labels in each project's repository. `bin/labels.sh` defines them, with the color
+and description each gets, for both `ticket-runner --labels` and the doctor.
+
+| Label | What Triphammer does with it |
+| --- | --- |
+| `hold` | The owner's brake: the runner starts nothing on an issue or pull request that carries it and stops a run on it (Sessions), and `merge-when-ready` neither merges nor updates such a pull request. A pull request three repair runs could not move gets it. |
+| `needs-owner` | Waits for the owner: the runner starts no run on an issue that carries it, a session adds it when it stops for the owner, and a ticket that ends three runs without a pull request gets it. Added by anyone but the App, it stops a run on its issue. The `risk-tier` workflow adds it to a pull request that escalates. |
+| `stop-agents` | An open issue that carries it pauses the project and stops a run in progress. |
+| `next` | Ready issues that carry it are taken first (What a tick decides). |
+| `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
+
+`ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
+are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine
+of its own), and the doctor reports each one missing. `upkeep` is not among them: the runner makes sure it exists when
+it opens an upkeep issue (Weekly upkeep).
+
 ## Weekly upkeep
 
 When a tick has nothing else to do (no parent to close, no pull request to repair, no ready issue) and no issue
@@ -533,6 +551,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node` and Claude Code login checks are skipped, and only `jq` is reported. |
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
 | The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). |
+| Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next` and `agent-working` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | bwrap | With the `codex` module on, `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: Codex's sandbox needs unprivileged user namespaces, which Ubuntu restricts with AppArmor. |
 | Qwen | `QWEN_BASE_URL` answers an HTTP request within 10 seconds, with the `qwen-audit` module on (any status counts; no key is sent). |
@@ -710,9 +729,11 @@ triphammer add <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<o
 
 `triphammer add` asks sudo for the password once, clones Triphammer's repository (from the machine file) into a
 temporary directory as the caller, runs that clone's `provision-project` as root and removes the clone, so root never
-runs code from the checkout the service user can write. It then runs the doctor for the project with
-`--before-start`, which leaves out the units `start` enables and says so (Doctor), and prints the command that starts
-it.
+runs code from the checkout the service user can write. It then runs `ticket-runner --labels` as the service user, whose
+`gh` acts as the App, to create the labels Triphammer uses that the repository lacks (Labels; a failure is reported and
+undoes nothing, and the doctor lists what is still missing), runs the doctor for the project with `--before-start`,
+which leaves out the units `start` enables and says so (Doctor), and prints the command that starts it. With
+`--dry-run` it does neither.
 
 | `provision-project` argument | What it is |
 | --- | --- |
