@@ -41,7 +41,8 @@
 #
 # `ticket-runner --plan` prints what the next start would do; `ticket-runner --prune-dry-run` prints what the sweep
 # would remove. Neither changes anything. `ticket-runner --doctor` lists what is missing or wrong on the machine
-# (bin/doctor), and starts no tick.
+# (bin/doctor), and starts no tick. `ticket-runner --labels` creates the labels Triphammer reads and sets that the
+# repository lacks (bin/labels.sh), and starts no tick either.
 #
 # The owner only brakes:
 #   - a `hold` label on an issue or pull request skips it;
@@ -75,6 +76,13 @@ project="$cfg_project" shared="$cfg_shared_dir"
 # Every gh, git and Claude session this run starts gets its token from the App's installation on the account that owns
 # the served repository (bin/github-app-token).
 export GITHUB_APP_OWNER="${repo%%/*}"
+# --labels creates the labels Triphammer reads and sets that the repository lacks (bin/labels.sh) and does nothing else.
+if [ "${1:-}" = --labels ]; then
+  # shellcheck source=bin/labels.sh
+  source "$bin/labels.sh"
+  create_labels "$repo"
+  exit
+fi
 # The owner: the person whose issues the runner takes and whose change requests start a repair, the config's OWNER, by
 # default the account that owns REPO. That account is a different thing from GITHUB_APP_OWNER above.
 owner="${cfg[OWNER]:-${repo%%/*}}"
