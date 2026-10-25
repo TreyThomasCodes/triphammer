@@ -346,7 +346,7 @@ other ticket, and an open one stays a ready issue that later ticks retry.
 
 `ticket-decide.test.mjs` runs the script with `python3` on small made-up issue and pull request lists in the shapes
 `gh` returns, covering each decision. It runs with the other tooling tests (`npm run test:tooling`), which CI runs in
-the `pr-guardrails` workflow.
+the `test` workflow (`.github/workflows/test.yml`).
 
 ## Second-model audit
 
@@ -524,8 +524,7 @@ private repository its `git` clones only when git's credential helpers give gith
 
 The example project stands in for a project Triphammer serves: a project file, risk rules for the engine tests in
 `scripts/risk-tier.test.mjs`, and the teardown script the runner tests run. CI runs the node tests in three shards
-side by side (`TEST_SHARD=k/3 npm run test:node`). This repository's own merge rules are tested in
-`scripts/project-risk-tiers.test.mjs`.
+side by side (`TEST_SHARD=k/3 npm run test:node`).
 
 ## Doctor
 

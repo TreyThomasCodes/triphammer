@@ -11,7 +11,7 @@ Once a week the ticket runner opens an `Upkeep: week of <date>` issue labelled `
 
 You never edit tracked files, open a pull request, merge anything, or label anything except the issues you file. You never touch `~/.local/bin`, systemd units or the main checkout; drift in its install goes to the owner as an issue. The agents you start are read-only.
 
-The owner stops you the same way as any ticket: `hold` on the upkeep issue, closing it, or the global brakes (`~/.local/state/ticket-runner/stop`, an open issue labelled `stop-agents`). Check the issue is still open and has no `hold` before you file anything, and again before you close it.
+The owner stops you the same way as any ticket: `hold` on the upkeep issue, closing it, or the brakes (the `stop` file in the project's `STATE_DIR`, the shared `stop` file `${XDG_STATE_HOME:-~/.local/state}/triphammer/stop`, or `$TRIPHAMMER_SHARED_DIR/stop` when that is set, and an open issue labelled `stop-agents`). Check the issue is still open and has no `hold` before you file anything, and again before you close it.
 
 ## 1. The window
 
@@ -25,15 +25,17 @@ With no closed upkeep issue, the window is the last 7 days.
 
 ## 2. Gather the figures
 
-- Ticket and repair runs: `~/.local/state/ticket-runner/log` has one line per run start and finish (`ticket #N: run k of 3 starting; transcript <path>`, `repair #N (<reason>): run k of 3 starting`, `run k finished (exit c)`). The transcripts are `~/.local/state/ticket-runner/runs/<UTC stamp>-ticket-N.jsonl` and `-repair-N.jsonl`, stream-JSON with one `"type":"result"` line at the end.
+`STATE_DIR` is the runner's state directory, the `STATE_DIR` line of the project's Triphammer config `${XDG_CONFIG_HOME:-~/.config}/triphammer/<name>.conf`, where `<name>` is the `name` in `.triphammer/project.json` (`bin/README.md`, Configuration). The merge queue's log is `${XDG_STATE_HOME:-~/.local/state}/merge-when-ready-<name>.log` under the `merge-when-ready@<name>` unit, and `merge-when-ready.log` in the same directory under the plain `merge-when-ready` unit.
+
+- Ticket and repair runs: `$STATE_DIR/log` has one line per run start and finish (`ticket #N: run k of 3 starting; transcript <path>`, `repair #N (<reason>): run k of 3 starting`, `run k finished (exit c)`). The transcripts are `$STATE_DIR/runs/<UTC stamp>-ticket-N.jsonl` and `-repair-N.jsonl`, stream-JSON with one `"type":"result"` line at the end.
 - Repair runs that changed nothing: the pull request has no commit between the run's start and finish (`gh pr view <n> --json commits`).
-- Merges: `~/.local/state/merge-when-ready.log` (`<repo>#N: merged by merge-when-ready`) and `gh pr list --state merged --search "merged:>=<window start>"`.
+- Merges: the merge queue's log (`<repo>#N: merged by merge-when-ready`) and `gh pr list --state merged --search "merged:>=<window start>"`.
 - Reviewer blocking findings: each merged pull request's comment lists its review rounds (`gh pr view <n> --comments`); the `triphammer:reviewer` reports are also in the run transcripts. Count them by `triphammer:review-checklist` class, and put findings that fit no class under "unclassified".
 - Auto-mode classifier denials: the `permission_denials` array in each transcript's `result` line, with the tool and command.
 - Tool use: per run, the `LSP` calls and the Bash calls whose command runs `grep`, counted from the `tool_use` blocks of each transcript, subagents included (their assistant message lines carry a top-level `parent_tool_use_id`).
 - Approvals that stopped counting: a pull request whose `owner-approval` status was `success` on one head and, on a later head, `pending` with a description that starts `Escalate: waiting for`. List its heads with `gh pr view <n> --json commits,files`, and read each head's latest status with `gh api repos/{owner}/{repo}/commits/<sha>/statuses --jq '[.[] | select(.context == "owner-approval")][0] | .state + " " + .description'` (newest first). Note which of its `files` differ between the approved head and the later one (`git diff --name-only <approved> <later>`).
-- Conflict repairs: the `repair #N (conflicts): run k of 3 starting` lines in `~/.local/state/ticket-runner/log`, with the files the pull request changes.
-- Branch updates per merge: the `<repo>#N: armed but behind its base at <sha>; updating the branch` lines in `~/.local/state/merge-when-ready.log`, divided by its `merged by merge-when-ready` lines.
+- Conflict repairs: the `repair #N (conflicts): run k of 3 starting` lines in `$STATE_DIR/log`, with the files the pull request changes.
+- Branch updates per merge: the `<repo>#N: armed but behind its base at <sha>; updating the branch` lines in the merge queue's log, divided by its `merged by merge-when-ready` lines.
 - Hook overrides: search the transcripts in the window for `guard-override` and `text-lint-override`, and quote the reason given with each.
 
 Read these with `grep`, `jq` or short scripts. Keep counts and short excerpts in your context, never whole transcripts.

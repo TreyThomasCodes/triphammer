@@ -9,7 +9,6 @@ import {classify as classifyWith, compareVersions, minimumReleaseAgeDays, parseR
 import {gitEnv} from './test-git-repo.mjs';
 
 // The rules of Triphammer's example project (bin/test-fixtures/example-project), which the engine tests run on.
-// This repository's own rules are tested in project-risk-tiers.test.mjs.
 const rules = parseRules(readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8'));
 const classify = (changes, source) => classifyWith(changes, source, rules);
 
