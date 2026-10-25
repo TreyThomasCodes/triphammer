@@ -7,8 +7,9 @@
 // $FAKE_CLAUDE_LOGGED_OUT is set (then it exits 1); neither writes claude.json.
 // `claude plugin marketplace add <checkout>` (the marketplace named in its .claude-plugin/marketplace.json),
 // `claude plugin install <id> --scope <scope>` and their `list --json` keep their state in <dir>/plugins.json and
-// append each call to <dir>/plugin-calls; they write no claude.json either.
-import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
+// append each call to <dir>/plugin-calls, with whether it leads a session of its own and what its stdin is; they
+// write no claude.json either.
+import {appendFileSync, existsSync, readFileSync, readlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {gitSnapshot} from './fixture.mjs';
 
@@ -23,7 +24,10 @@ if (args[0] === 'auth' && args[1] === 'status') {
   process.exit(loggedIn ? 0 : 1);
 }
 if (args[0] === 'plugin') {
-  appendFileSync(join(dir, 'plugin-calls'), `${JSON.stringify(args.slice(1))}\n`);
+  // The session id is the sixth field of /proc/self/stat, after the command name in parentheses.
+  const session = Number(readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[3]);
+  appendFileSync(join(dir, 'plugin-calls'), `${JSON.stringify({args: args.slice(1), sessionLeader: session === process.pid,
+    stdin: readlinkSync('/proc/self/fd/0')})}\n`);
   const file = join(dir, 'plugins.json');
   const state = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {marketplaces: [], plugins: []};
   const [what, action, value] = args[1] === 'marketplace' ? args.slice(1) : [null, ...args.slice(1)];

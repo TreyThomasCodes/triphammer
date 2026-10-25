@@ -238,14 +238,14 @@ if cloned "$tri_repo" "$tri_checkout"; then
   marketplace="$(as_user jq -r .name "$tri_checkout/.claude-plugin/marketplace.json")" \
     || fail "$tri_checkout/.claude-plugin/marketplace.json is not JSON"
   plugin="$(as_user jq -r '.plugins[0].name' "$tri_checkout/.claude-plugin/marketplace.json")"
-  if ! as_user claude plugin marketplace list --json 2>/dev/null | jq -e --arg name "$marketplace" 'any(.[]; .name == $name)' >/dev/null; then
-    change "add the plugin marketplace $marketplace from $tri_checkout for $user" as_user claude plugin marketplace add "$tri_checkout" \
+  if ! as_user_claude plugin marketplace list --json 2>/dev/null | jq -e --arg name "$marketplace" 'any(.[]; .name == $name)' >/dev/null; then
+    change "add the plugin marketplace $marketplace from $tri_checkout for $user" as_user_claude plugin marketplace add "$tri_checkout" \
       || fail "claude could not add the marketplace in $tri_checkout"
   fi
-  if ! as_user claude plugin list --json 2>/dev/null \
+  if ! as_user_claude plugin list --json 2>/dev/null \
       | jq -e --arg id "$plugin@$marketplace" 'any(.[]; .id == $id and .scope == "user")' >/dev/null; then
     change "install the plugin $plugin@$marketplace at user scope for $user" \
-      as_user claude plugin install "$plugin@$marketplace" --scope user || fail "claude could not install $plugin@$marketplace"
+      as_user_claude plugin install "$plugin@$marketplace" --scope user || fail "claude could not install $plugin@$marketplace"
   fi
 fi
 

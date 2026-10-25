@@ -114,6 +114,10 @@ as_user() {
     PATH="$home/.local/bin:$home/.dotnet:$home/.dotnet/tools${root:+:$root/usr/local/bin}:/usr/local/bin:/usr/bin:/bin" \
     DOTNET_ROOT="$home/.dotnet" DOTNET_CLI_TELEMETRY_OPTOUT=1 "$@")
 }
+# as_user_claude <args...>: runs the user's claude in a session of its own, with nothing on stdin. Run from a terminal,
+# claude can touch the terminal after its work is done, and a process outside the terminal's foreground group that
+# does is stopped, so the step would never return.
+as_user_claude() { as_user setsid -w claude "$@" < /dev/null; }
 
 # A checkout is absent, an empty directory, or already a clone of its repository; anything else is the owner's to sort
 # out, so it stops there before anything changes.

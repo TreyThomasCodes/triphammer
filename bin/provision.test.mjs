@@ -66,6 +66,14 @@ test('on a fresh machine it installs everything but a project, and a second run 
   assert.deepEqual(lines(join(m.state, 'claude-install-calls')), ['installed']);
   assert.deepEqual(JSON.parse(readFileSync(join(m.state, 'claude/plugins.json'), 'utf8')),
     {marketplaces: [{name: 'triphammer'}], plugins: [{id: 'triphammer@triphammer', scope: 'user'}]});
+  // Run from a terminal, a claude outside the terminal's foreground group that touches it is stopped, so each one runs
+  // in a session of its own with nothing on stdin.
+  const pluginCalls = lines(join(m.state, 'claude/plugin-calls')).map(line => JSON.parse(line));
+  assert.ok(pluginCalls.length >= 4, `expected the list and change calls, got ${pluginCalls.length}`);
+  for (const call of pluginCalls) {
+    assert.deepEqual({sessionLeader: call.sessionLeader, stdin: call.stdin}, {sessionLeader: true, stdin: '/dev/null'},
+      `claude plugin ${call.args.join(' ')} ran attached`);
+  }
   assert.ok(!existsSync(join(m.state, 'dotnet-install-calls')), 'provision installed a project toolchain');
 
   const machineFile = join(m.sys, 'etc/triphammer.conf');
