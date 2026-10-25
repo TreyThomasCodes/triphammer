@@ -11,7 +11,8 @@ import {readdir} from './provision-fixture.mjs';
 // whose bin/provision-project records its arguments and whether sudo ran it, then prints `project: example-project`
 // (or exits with the code in <root>/provision-fails), the service user's ticket-runner, which records its project,
 // XDG_RUNTIME_DIR and arguments (and exits with the code in <root>/runner-fails), a config per name in `projects`
-// (name -> its text), and fakes of sudo, id and systemctl. `uid` and `login` are the caller's.
+// (name -> its text), and fakes of sudo, id and systemctl. provision-project and ticket-runner also record, in
+// `sessions()`, whether each leads a session of its own and what its stdin is. `uid` and `login` are the caller's.
 function setup(t, {projects = {'example-project': 'REPO=example/example-project\n'}, uid = '1000', login = 'owner'} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'triphammer-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -20,6 +21,8 @@ function setup(t, {projects = {'example-project': 'REPO=example/example-project\
   const bin = join(root, 'bin');
   const tmp = join(root, 'tmp');
   const record = join(root, 'record');
+  const session = name => `[ "$(ps -o sid= -p $$ | tr -d ' ')" = $$ ] && s=leader || s=attached
+echo "${name} $s $(readlink /proc/$$/fd/0)" >> '${record}.session'`;
   for (const dir of [join(sys, 'etc'), bin, tmp, join(home, '.local/bin'), join(home, '.config/triphammer')]) {
     mkdirSync(dir, {recursive: true});
   }
@@ -31,6 +34,7 @@ function setup(t, {projects = {'example-project': 'REPO=example/example-project\
   mkdirSync(join(work, 'bin'), {recursive: true});
   writeFileSync(join(work, 'bin/provision-project'), `#!/usr/bin/env bash
 echo "provision-project sudo=\${UNDER_SUDO:-no} $*" >> '${record}'
+${session('provision-project')}
 echo "setting it up"
 [ ! -e '${root}/provision-fails' ] || exit "$(cat '${root}/provision-fails')"
 echo "project: example-project"
@@ -42,6 +46,7 @@ echo "project: example-project"
 
   writeFileSync(join(home, '.local/bin/ticket-runner'), `#!/bin/sh
 echo "ticket-runner project=$TRIPHAMMER_PROJECT runtime=$XDG_RUNTIME_DIR $*" >> '${record}'
+${session('ticket-runner')}
 [ ! -e '${root}/runner-fails' ] || exit "$(cat '${root}/runner-fails')"
 `, {mode: 0o755});
   writeFileSync(join(bin, 'sudo'), `#!/bin/sh
@@ -65,6 +70,7 @@ esac
   return {
     root, home, tmp,
     calls: () => lines(record),
+    sessions: () => lines(`${record}.session`),
     fail: (what, code) => writeFileSync(join(root, `${what}-fails`), `${code}\n`),
     run: (...args) => spawnSync(join(here, 'triphammer'), args, {env, encoding: 'utf8'}),
   };
@@ -86,15 +92,17 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   assert.equal(result.status, 0, result.stderr);
   const calls = s.calls();
   assert.equal(calls[0], 'sudo -v');
-  assert.match(calls[1], new RegExp(`^sudo bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
+  assert.match(calls[1], new RegExp(`^sudo setsid -w bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
   assert.equal(calls[2], 'provision-project sudo=yes example/example-project --modules demo --set DEMO_URL=http://x.invalid/');
-  assert.equal(calls[3], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
+  assert.equal(calls[3], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 setsid -w env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
   assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor');
   assert.equal(calls.length, 5);
   assert.match(result.stdout, /sudo asks for your password once/);
   assert.match(result.stdout, /^setting it up$/m);
   assert.match(result.stdout, /Start it, once the doctor finds nothing missing: triphammer start example-project$/m);
   assert.deepEqual(readdir(s.tmp), [], 'the clone was left behind');
+  // Run from a terminal, a command outside its foreground group that touches it is stopped, so these have none.
+  assert.deepEqual(s.sessions(), ['provision-project leader /dev/null', 'ticket-runner leader /dev/null']);
 });
 
 test('add as root runs provision-project without sudo', t => {
@@ -145,6 +153,7 @@ test('doctor and plan run ticket-runner for the only project, or the one named, 
   s.fail('runner', 4);
   assert.equal(s.run('plan', 'other').status, 4);
   assert.equal(s.calls().at(-1), 'ticket-runner project=other runtime=/run/user/1001 --plan');
+  assert.deepEqual(s.sessions(), ['ticket-runner leader /dev/null', 'ticket-runner leader /dev/null']);
 });
 
 test('doctor with several projects and none named lists them and exits 2; with none it says how to add one', t => {

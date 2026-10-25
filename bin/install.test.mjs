@@ -9,9 +9,10 @@ import {readdir} from './provision-fixture.mjs';
 
 const script = join(here, '..', 'install.sh');
 
-// A repository at <base>/example-owner/triphammer.git whose bin/provision records its arguments, whether sudo ran it
-// and the directory it ran from, one line each, on `main`; on a branch `other` it records `other` first, and on `fails`
-// it exits 3. A fake `id` answers `uid`, and a fake `sudo` records its arguments and runs the rest.
+// A repository at <base>/example-owner/triphammer.git whose bin/provision records its arguments, whether sudo ran it,
+// the directory it ran from, and whether it leads a session of its own and what its stdin is, one line each, on `main`;
+// on a branch `other` it records `other` first, and on `fails` it exits 3. A fake `id` answers `uid`, and a fake `sudo`
+// records its arguments and runs the rest.
 function setup(t, uid = '1000') {
   const dir = mkdtempSync(join(tmpdir(), 'install-'));
   t.after(() => rmSync(dir, {recursive: true, force: true}));
@@ -21,6 +22,7 @@ function setup(t, uid = '1000') {
   mkdirSync(join(source, 'bin'), {recursive: true});
   const provision = extra => `#!/usr/bin/env bash\n${extra}printf '%s\\n' "$@" >> '${record}'\n`
     + `echo "\${UNDER_SUDO:-no}" >> '${record}.sudo'\n`
+    + `{ [ "$(ps -o sid= -p $$ | tr -d ' ')" = $$ ] && echo leader || echo attached; readlink /proc/$$/fd/0; } >> '${record}.session'\n`
     + `dirname "$(dirname "$(readlink -f "$0")")" >> '${record}.dir'\n`;
   writeFileSync(join(source, 'bin/provision'), provision(''), {mode: 0o755});
   git(source, 'init', '-q', '-b', 'main');
@@ -59,10 +61,12 @@ test("an ordinary user's run asks sudo once, then runs provision as root with Tr
   assert.match(result.stdout, /sudo asks for your password once/);
   const sudo = lines(sudoLog);
   assert.equal(sudo[0], '-v');
-  assert.match(sudo[1], /^bash .*\/triphammer\/bin\/provision --triphammer example-owner\/triphammer \/srv\/triphammer --user triphammer$/);
+  assert.match(sudo[1], /^setsid -w bash .*\/triphammer\/bin\/provision --triphammer example-owner\/triphammer \/srv\/triphammer --user triphammer$/);
   assert.equal(sudo.length, 2);
   assert.deepEqual(lines(record), ['--triphammer', 'example-owner/triphammer', '/srv/triphammer', '--user', 'triphammer']);
   assert.deepEqual(lines(`${record}.sudo`), ['yes']);
+  // Run from a terminal, a command outside its foreground group that touches it is stopped, so provision has none.
+  assert.deepEqual(lines(`${record}.session`), ['leader', '/dev/null']);
 });
 
 test('root runs provision without sudo', t => {
@@ -71,6 +75,7 @@ test('root runs provision without sudo', t => {
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(lines(sudoLog), []);
   assert.deepEqual(lines(`${record}.sudo`), ['no']);
+  assert.deepEqual(lines(`${record}.session`), ['leader', '/dev/null']);
   assert.doesNotMatch(result.stdout, /sudo asks/);
 });
 

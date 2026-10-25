@@ -290,7 +290,8 @@ chromium_starts() {
   [ -n "$found" ]
 }
 install_deps() {
-  PATH="$node_bin:$PATH" "$node_bin/npx" -y "playwright@$1" install-deps chromium && return 0
+  # The apt-get that install-deps runs asks nothing, as apt_run's does.
+  PATH="$node_bin:$PATH" DEBIAN_FRONTEND=noninteractive "$node_bin/npx" -y "playwright@$1" install-deps chromium && return 0
   note "Playwright's install-deps does not support this release; installing Chromium's libraries from Ubuntu's archive"
   apt_run "${chromium_libraries[@]}"
 }
