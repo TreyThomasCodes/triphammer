@@ -65,11 +65,15 @@ test('on a fresh machine it installs everything but a project, and a second run 
   assert.equal(run(join(m.sys, 'usr/local/bin/node'), ['--version']), 'v24.19.0\n');
   assert.deepEqual(lines(join(m.state, 'claude-install-calls')), ['installed']);
   assert.deepEqual(JSON.parse(readFileSync(join(m.state, 'claude/plugins.json'), 'utf8')),
-    {marketplaces: [{name: 'triphammer'}], plugins: [{id: 'triphammer@triphammer', scope: 'user'}]});
+    {marketplaces: [{name: 'triphammer'}, {name: 'humanizer'}],
+      plugins: [{id: 'triphammer@triphammer', scope: 'user'}, {id: 'humanizer@humanizer', scope: 'user'}]});
   // Run from a terminal, a claude outside the terminal's foreground group that touches it is stopped, so each one runs
   // in a session of its own with nothing on stdin.
   const pluginCalls = lines(join(m.state, 'claude/plugin-calls')).map(line => JSON.parse(line));
-  assert.ok(pluginCalls.length >= 4, `expected the list and change calls, got ${pluginCalls.length}`);
+  const pluginChanges = calls => calls.filter(call => call.args.includes('add') || call.args[0] === 'install')
+    .map(call => call.args.join(' '));
+  assert.deepEqual(pluginChanges(pluginCalls), [`marketplace add ${checkout}`, 'install triphammer@triphammer --scope user',
+    'marketplace add blader/humanizer', 'install humanizer@humanizer --scope user']);
   for (const call of pluginCalls) {
     assert.deepEqual({sessionLeader: call.sessionLeader, stdin: call.stdin}, {sessionLeader: true, stdin: '/dev/null'},
       `claude plugin ${call.args.join(' ')} ran attached`);
@@ -99,6 +103,9 @@ test('on a fresh machine it installs everything but a project, and a second run 
   assert.match(second.stdout, /^Nothing to change: the machine is as asked\.$/m);
   assert.doesNotMatch(second.stdout, /^\+ /m);
   assert.deepEqual(changingCalls(second.calls), []);
+  const secondPluginCalls = lines(join(m.state, 'claude/plugin-calls')).map(line => JSON.parse(line)).slice(pluginCalls.length);
+  assert.ok(secondPluginCalls.length >= 4, `expected the second run's list calls, got ${secondPluginCalls.length}`);
+  assert.deepEqual(pluginChanges(secondPluginCalls), []);
 
   // A triphammer command that is not this script's copy is put back.
   writeFileSync(command, '#!/bin/sh\necho changed\n');
@@ -152,6 +159,8 @@ test('--dry-run on a fresh machine lists the changes and makes none', t => {
   assert.match(result.stdout, /^would: create the user triphammer with the home /m);
   assert.match(result.stdout, /^would: clone example\/triphammer into /m);
   assert.match(result.stdout, /^would: write .*\/etc\/triphammer\.conf$/m);
+  assert.match(result.stdout, /^would: add the plugin marketplace humanizer from blader\/humanizer for triphammer$/m);
+  assert.match(result.stdout, /^would: install the plugin humanizer@humanizer at user scope for triphammer$/m);
   assert.match(result.stdout, /^Node: the version comes from Triphammer's checkout, which is not cloned yet/m);
   assert.match(result.stdout, /change\(s\) to make; nothing was changed\./);
   assert.doesNotMatch(result.stdout, /^\+ /m);

@@ -79,10 +79,10 @@ else
 fi
 units_path="where the units' PATH finds it"
 
-# jq first: the .NET SDK, Node engines and Claude Code login checks read JSON with it and are skipped without it, so
-# a missing jq is reported once rather than as their false problems.
+# jq first: the .NET SDK, Node engines, Claude Code login and plugin checks read JSON with it and are skipped without
+# it, so a missing jq is reported once rather than as their false problems.
 jq_ok=""
-if tool jq jq "install jq $units_path; the .NET SDK, Node engines and Claude Code login checks are skipped until it runs"; then jq_ok=1; fi
+if tool jq jq "install jq $units_path; the .NET SDK, Node engines, Claude Code login and plugin checks are skipped until it runs"; then jq_ok=1; fi
 
 # The .NET SDK: one SDK the checkout's global.json accepts. rollForward disable takes the pinned version only; patch
 # and latestPatch (and no rollForward) the same feature band (the hundreds of the patch number) at or after it;
@@ -261,6 +261,28 @@ fi
 if tool claude "Claude Code" "install Claude Code (https://docs.anthropic.com/en/docs/claude-code) $units_path"; then
   if [ -n "$jq_ok" ] && ! claude auth status --json 2>/dev/null | jq -e '.loggedIn == true' >/dev/null 2>&1; then
     problem "Claude Code is not logged in" "run claude auth login as this user"
+  fi
+  # The plugins provision installs at user scope: Triphammer's, named by the marketplace file of Triphammer's checkout,
+  # and humanizer@humanizer. A list that fails or is not a JSON array is a problem of its own, never a pass.
+  if [ -n "$jq_ok" ]; then
+    installer="run the installer again, which installs it (bin/README.md, On a machine of its own)"
+    marketplace_file="$triphammer/.claude-plugin/marketplace.json"
+    plugins=(humanizer@humanizer)
+    if tri_plugin="$(jq -er '(.plugins[0].name | strings) + "@" + (.name | strings)' "$marketplace_file" 2>/dev/null)"; then
+      plugins=("$tri_plugin" "${plugins[@]}")
+    else
+      problem "$marketplace_file is missing or names no plugin, so the Triphammer plugin was not checked" \
+        "restore it from origin/main in Triphammer's checkout (git -C $triphammer checkout origin/main -- .claude-plugin/marketplace.json)"
+    fi
+    if ! installed="$(claude plugin list --json < /dev/null 2>/dev/null)" \
+        || ! jq -e 'type == "array"' <<< "$installed" >/dev/null 2>&1; then
+      problem "claude plugin list fails, so the plugins ${plugins[*]} were not checked" "$installer"
+    else
+      for id in "${plugins[@]}"; do
+        jq -e --arg id "$id" 'any(.[]; .id == $id and .scope == "user")' <<< "$installed" >/dev/null 2>&1 \
+          || problem "the Claude Code plugin $id is not installed at user scope for this user" "$installer"
+      done
+    fi
   fi
 fi
 
