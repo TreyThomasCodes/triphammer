@@ -206,6 +206,19 @@ test('Chromium\'s libraries come from Ubuntu\'s archive when Playwright cannot i
   assert.match(m.project('example/example-project', join(m.root, 'example-project')).stdout, /^Nothing to change/m);
 });
 
+test('run from a directory holding a Playwright and an .npmrc the service user could plant, every npx runs from /', t => {
+  const m = ready(t, {'example/example-project': projectFiles('example-project')});
+  const planted = join(m.root, 'planted');
+  mkdirSync(join(planted, 'node_modules/.bin'), {recursive: true});
+  writeFileSync(join(planted, 'node_modules/.bin/playwright'), `#!/bin/sh\ntouch '${planted}/ran'\n`, {mode: 0o755});
+  writeFileSync(join(planted, '.npmrc'), 'prefix=/nonexistent\n');
+  const result = m.projectFrom(planted, 'example/example-project', join(m.root, 'example-project'));
+  assert.equal(result.status, 0, result.output);
+  const cwds = lines(join(m.state, 'npx-cwds'));
+  assert.ok(cwds.includes('/ -y playwright@1.63.0 install-deps chromium'), cwds.join('\n'));
+  assert.deepEqual(cwds.filter(line => !line.startsWith('/ ')), []);
+});
+
 test('a Chromium that still does not start headless stops provision-project with exit 1', t => {
   const m = ready(t, {'example/example-project': projectFiles('example-project')});
   writeFileSync(join(m.root, 'downloads/chrome'), '#!/bin/sh\nexit 1\n', {mode: 0o755});

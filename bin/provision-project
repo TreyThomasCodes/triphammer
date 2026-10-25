@@ -20,7 +20,9 @@
 # .node-version must pin the Node the machine has, as one Node is on the units' PATH. It enables no timer, and its last
 # line is `project: <name>`, for triphammer add.
 #
-# It never reads or writes a credential's value. Every argument is checked before anything changes; an unknown flag or
+# It runs from / whatever the caller's directory, so no command root runs picks up files the service user can write
+# there (npx, for one, prefers a local node_modules/.bin and reads a project's .npmrc). It never reads or writes a
+# credential's value. Every argument is checked before anything changes; an unknown flag or
 # a bad value exits 2 with the usage. A step that fails exits 1 naming it. --dry-run prints each change it would make
 # (`would: ...`) and makes none.
 #
@@ -32,6 +34,7 @@ umask 022
 
 prog=provision-project
 here="$(dirname "$(readlink -f "$0")")"
+cd /  # nothing root runs starts in the caller's directory, which may be a checkout the service user can write
 usage() {
   cat >&2 <<'EOF'
 usage: provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>]

@@ -34,6 +34,7 @@ echo "${name} $s $(readlink /proc/$$/fd/0)" >> '${record}.session'`;
   mkdirSync(join(work, 'bin'), {recursive: true});
   writeFileSync(join(work, 'bin/provision-project'), `#!/usr/bin/env bash
 echo "provision-project sudo=\${UNDER_SUDO:-no} $*" >> '${record}'
+pwd >> '${record}.cwd'
 ${session('provision-project')}
 echo "setting it up"
 [ ! -e '${root}/provision-fails' ] || exit "$(cat '${root}/provision-fails')"
@@ -71,8 +72,10 @@ esac
     root, home, tmp,
     calls: () => lines(record),
     sessions: () => lines(`${record}.session`),
+    cwds: () => lines(`${record}.cwd`),
     fail: (what, code) => writeFileSync(join(root, `${what}-fails`), `${code}\n`),
     run: (...args) => spawnSync(join(here, 'triphammer'), args, {env, encoding: 'utf8'}),
+    runFrom: (cwd, ...args) => spawnSync(join(here, 'triphammer'), args, {env, cwd, encoding: 'utf8'}),
   };
 }
 
@@ -106,6 +109,17 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   // Run from a terminal, a command outside its foreground group that touches it is stopped, so these have none.
   assert.deepEqual(s.sessions(), ['provision-project leader /dev/null', 'ticket-runner leader /dev/null',
     'ticket-runner leader /dev/null']);
+});
+
+test('add run from a directory holding a planted Playwright runs provision-project, as root, from /', t => {
+  const s = setup(t);
+  const planted = join(s.root, 'planted');
+  mkdirSync(join(planted, 'node_modules/.bin'), {recursive: true});
+  writeFileSync(join(planted, 'node_modules/.bin/playwright'), '#!/bin/sh\nexit 0\n', {mode: 0o755});
+  const result = s.runFrom(planted, 'add', 'example/example-project');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(s.calls()[2], 'provision-project sudo=yes example/example-project');
+  assert.deepEqual(s.cwds(), ['/']);
 });
 
 test('add as root runs provision-project without sudo', t => {
