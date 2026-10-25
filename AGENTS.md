@@ -18,7 +18,7 @@ that hold the rest.
 - `systemd/`: the user units, linked from Triphammer's checkout.
 - `status/`: the read-only status page.
 - `scripts/`: the risk classifier (`risk-tier.mjs`, run as the base branch's copy by `risk-tier-base.sh`),
-  `land-pr.sh`, the commit-msg hook and the copy test.
+  `land-pr.sh` and the commit-msg hook.
 - `.github/`: the `risk-tier` workflow and the pull request contract check. The agents' App cannot change it.
 - `.triphammer/`: this repository's own project data. Every change escalates to the owner.
 

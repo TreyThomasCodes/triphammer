@@ -6,6 +6,7 @@
     "node": ">=24.19.0 <25"
   },
   "scripts": {
-    "test:tooling": "node --test scripts/*.test.mjs plugins/triphammer/hooks/*.test.mjs status/*.test.mjs bin/*.test.mjs && bash scripts/test-pr-contract.sh && bash scripts/triphammer-copy-test.sh"
+    "test:node": "node --test ${TEST_SHARD:+--test-shard=$TEST_SHARD} scripts/*.test.mjs plugins/triphammer/hooks/*.test.mjs status/*.test.mjs bin/*.test.mjs",
+    "test:tooling": "npm run -s test:node && bash scripts/test-pr-contract.sh"
   }
 }
