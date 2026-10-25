@@ -16,29 +16,30 @@
 # sudo asks for the password once, from the terminal, before anything is cloned; as root, sudo is not used. provision
 # runs in a session of its own with nothing on stdin: its output still reaches the terminal, but no command under it
 # can be stopped for touching a terminal it is not in the foreground of, or wait there for an answer. So Ctrl-C at the
-# terminal reaches the script and not provision, and the script relays it: on an INT or TERM it sends TERM to the bash
-# that sudo runs (from a session of its own, since some sudo versions do not relay a signal sent from the process group
-# the command runs in), that bash sends TERM to provision's whole process group, and once provision has ended the
-# script ends by the signal it got. The script defines functions and calls one on its last line, so a download cut
-# short runs nothing.
+# terminal reaches the script and the bash that runs provision (directly or through sudo), but not provision. On an
+# INT, TERM or HUP the script sends TERM to that bash (from a session of its own, since some sudo versions do not relay
+# a signal sent from the process group the command runs in); on any of the three that bash sends TERM to provision's
+# whole process group and waits for provision to end; and only then does the script end, by the signal it got, and
+# remove the clone. The script defines functions and calls one on its last line, so a download cut short runs nothing.
 set -euo pipefail
 
 # A bash script that runs its arguments in a session of its own with nothing on stdin, waits for it, exits with its
-# status, and sends TERM to the session's process group on a TERM. bin/triphammer holds the same script, and passes it
-# through `sudo -i`, which hands the login shell every character escaped but `$`: so it is one line, and every expansion
-# is braced, as `$\{` is literal to that shell.
+# status, and on an INT, TERM or HUP sends TERM to the session's process group and goes on waiting. bin/triphammer
+# holds the same script, and passes it through `sudo -i`, which hands the login shell every character escaped but `$`:
+# so it is one line, and every expansion is braced, as `$\{` is literal to that shell.
 # shellcheck disable=SC2016  # expanded by the bash that runs it
-own_session='stop() { [ -z "${p}" ] || kill -TERM -- "-${p}" 2> /dev/null || kill -TERM "${p}"; }; p=; trap "t=1; stop" TERM; (trap - INT QUIT; exec setsid "${@}") < /dev/null & p=${!}; [ -z "${t-}" ] || stop; while :; do wait "${p}" && exit 0 || s=${?}; kill -0 "${p}" 2> /dev/null || exit "${s}"; done'
+own_session='stop() { [ -z "${p}" ] || kill -TERM -- "-${p}" 2> /dev/null || kill -TERM "${p}"; }; p=; trap "t=1; stop" INT TERM HUP; (trap - INT QUIT; exec setsid "${@}") < /dev/null & p=${!}; [ -z "${t-}" ] || stop; while :; do wait "${p}" && exit 0 || s=${?}; kill -0 "${p}" 2> /dev/null || exit "${s}"; done'
 
 # detached <prefix...> -- <command...>: runs the command, through the prefix (sudo, or nothing), in a session of its own
-# with nothing on stdin, and waits for it; returns its status. An INT or TERM meanwhile stops it, and then this script
-# ends by that signal.
+# with nothing on stdin, and waits for it; returns its status. An INT, TERM or HUP meanwhile stops it, and once it has
+# ended this script ends by that signal.
 detached() {
   local prefix=() child="" caught="" woke status
   while [ "$1" != -- ]; do prefix+=("$1"); shift; done
   shift
   trap 'caught=INT woke=1; relay' INT
   trap 'caught=TERM woke=1; relay' TERM
+  trap 'caught=HUP woke=1; relay' HUP
   (trap - INT QUIT; exec "${prefix[@]}" bash -c "$own_session" detached "$@") < /dev/null &
   child=$!
   [ -z "$caught" ] || relay
@@ -47,7 +48,7 @@ detached() {
     wait "$child" && status=0 || status=$?
     [ -n "$woke" ] || break
   done
-  trap - INT TERM
+  trap - INT TERM HUP
   [ -z "$caught" ] || kill -s "$caught" "$$"
   return "$status"
 }

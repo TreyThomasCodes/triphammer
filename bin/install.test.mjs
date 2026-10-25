@@ -120,15 +120,17 @@ test('a download cut short before the last line runs nothing', t => {
   assert.deepEqual(lines(sudoLog), []);
 });
 
-for (const signal of ['SIGINT', 'SIGTERM']) {
-  test(`${signal} to the script stops provision and the child it started, and the script ends by that signal`, async t => {
+// `group` sends the signal as a terminal's Ctrl-C does, to the whole foreground process group the script leads.
+for (const [signal, group] of [['SIGINT', false], ['SIGTERM', false], ['SIGINT', true]]) {
+  test(`${signal} to the script${group ? "'s process group" : ''} stops provision and the child it started, and the script ends by that signal`, async t => {
     const {record, env, tmp} = setup(t);
-    const child = spawn('bash', ['-s', '--', '--dry-run'], {env: {...env, TRIPHAMMER_REF: 'slow'}, stdio: ['pipe', 'ignore', 'ignore']});
+    const child = spawn('bash', ['-s', '--', '--dry-run'], {env: {...env, TRIPHAMMER_REF: 'slow'}, stdio: ['pipe', 'ignore', 'ignore'], detached: group});
     const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
     child.stdin.end(readFileSync(script, 'utf8'));
     for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
     const sent = Date.now();
-    child.kill(signal);
+    if (group) process.kill(-child.pid, signal);
+    else child.kill(signal);
     const {status, by, at} = await exited;
     assert.equal(by, signal, `exited ${status}`);
     assert.ok(at - sent < 1500, `${at - sent} ms after the signal`);

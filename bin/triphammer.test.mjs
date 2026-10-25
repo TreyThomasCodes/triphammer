@@ -86,14 +86,16 @@ esac
     fail: (what, code) => writeFileSync(join(root, `${what}-fails`), `${code}\n`),
     run: (...args) => spawnSync(join(here, 'triphammer'), args, {env, encoding: 'utf8'}),
     slow: what => writeFileSync(join(root, `${what}-slow`), ''),
-    // Runs the command, sends it `signal` once the slow step has started, and returns how the command exited, how
-    // many milliseconds after the signal, and what the step recorded by the time it would have finished.
-    async interrupted(signal, ...args) {
-      const child = spawn(join(here, 'triphammer'), args, {env, stdio: 'ignore'});
+    // Runs the command, sends it `signal` once the slow step has started (with `group`, to the whole process group
+    // it leads, as a terminal's Ctrl-C does), and returns how the command exited, how many milliseconds after the
+    // signal, and what the step recorded by the time it would have finished.
+    async interrupted(signal, group, ...args) {
+      const child = spawn(join(here, 'triphammer'), args, {env, stdio: 'ignore', detached: group});
       const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
       for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
       const sent = Date.now();
-      child.kill(signal);
+      if (group) process.kill(-child.pid, signal);
+      else child.kill(signal);
       const {status, by, at} = await exited;
       await sleep(2500);
       return {status, signal: by, after: at - sent, steps: lines(`${record}.slow`)};
@@ -221,16 +223,18 @@ test('the service user starts its own timers through its user manager, and a pro
   assert.match(missing.stderr, /nope has no config/);
 });
 
-for (const [signal, args, slow, as] of [
-  ['SIGINT', ['add', 'example/example-project'], 'provision', {}],
-  ['SIGTERM', ['add', 'example/example-project'], 'provision', {}],
-  ['SIGINT', ['plan'], 'runner', {}],
-  ['SIGTERM', ['doctor'], 'runner', {login: 'triphammer', uid: '1001'}],
+for (const [signal, group, args, slow, as] of [
+  ['SIGINT', false, ['add', 'example/example-project'], 'provision', {}],
+  ['SIGTERM', false, ['add', 'example/example-project'], 'provision', {}],
+  ['SIGINT', true, ['add', 'example/example-project'], 'provision', {}],
+  ['SIGINT', false, ['plan'], 'runner', {}],
+  ['SIGINT', true, ['plan'], 'runner', {}],
+  ['SIGTERM', false, ['doctor'], 'runner', {login: 'triphammer', uid: '1001'}],
 ]) {
-  test(`${signal} to ${args[0]}${as.login ? ' as the service user' : ''} stops its step and the child the step started, and it ends by that signal`, async t => {
+  test(`${signal} to ${args[0]}${group ? "'s process group" : ''}${as.login ? ' as the service user' : ''} stops its step and the child the step started, and it ends by that signal`, async t => {
     const s = setup(t, as);
     s.slow(slow);
-    const result = await s.interrupted(signal, ...args);
+    const result = await s.interrupted(signal, group, ...args);
     assert.equal(result.signal, signal, `exited ${result.status}`);
     assert.ok(result.after < 1500, `${result.after} ms after the signal`);
     assert.deepEqual(result.steps, ['started']);
