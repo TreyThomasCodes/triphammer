@@ -13,8 +13,9 @@ const dotNetDropIn = '[Service]\nEnvironment=PATH=%h/.local/bin:%h/.dotnet:%h/.d
 const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rollForward, allowPrerelease: false}});
 
 // A machine whose checkout has this branch's doctor and ticket-runner@.service, a global.json pinning 10.0.400
-// (`rollForward`) and a package.json asking for Node >=24.19.0 <25, on a machine where everything the doctor checks is
-// right: HOME and XDG_CONFIG_HOME (HOME's .config) in the temporary directory, with the drop-in that
+// (`rollForward`) and a package.json asking for Node >=24.19.0 <25 and pinning Playwright 1.63.0, on a machine where
+// everything the doctor checks is right: HOME and XDG_CONFIG_HOME (HOME's .config) in the temporary directory, with
+// the drop-in that
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
 // `bin`) and ~/.dotnet (a fake dotnet), fake node, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
 // in), codex, curl (QWEN_BASE_URL answers), gh (acting as the App) and docker (Compose v2) in `bin`, the App's files and
@@ -28,7 +29,7 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
       'bin/doctor': readFileSync(join(here, 'doctor'), 'utf8'),
       'systemd/ticket-runner@.service': readFileSync(join(here, '../systemd/ticket-runner@.service'), 'utf8'),
       'global.json': globalJson(rollForward),
-      'package.json': JSON.stringify({engines: {node: '>=24.19.0 <25'}}),
+      'package.json': JSON.stringify({engines: {node: '>=24.19.0 <25'}, devDependencies: {'@playwright/test': '1.63.0'}}),
     },
   });
   const bin = r.gh.bin;
@@ -75,8 +76,8 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     `#!/bin/sh\n[ "$1" = --version ] && exit 127\n${real ? `exec '${real}' "$@"` : 'exit 127'}\n`, {mode: 0o755});
   return {
     ...r, bin, home, userUnits, app, qwenKey, browsers, chromium, answers, curlRoutes, broken,
-    doctor(extraEnv = {}) {
-      const result = spawnSync(join(r.checkout, 'bin/ticket-runner'), ['--doctor'],
+    doctor(extraEnv = {}, args = []) {
+      const result = spawnSync(join(r.checkout, 'bin/ticket-runner'), ['--doctor', ...args],
         {env: {...env, ...extraEnv}, encoding: 'utf8'});
       const output = result.stdout + result.stderr;
       assert.doesNotMatch(output, new RegExp(sentinel), 'a credential file\'s contents reached the output');
@@ -212,6 +213,19 @@ test('missing Playwright browsers are reported', t => {
   assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in .*Fix: run npx playwright install chromium/);
 });
 
+test('Chromium is checked only for a checkout whose tracked package.json, at any depth, pins Playwright', t => {
+  const r = doctorSetup(t);
+  rmSync(join(r.browsers, 'chromium-1243'), {recursive: true});
+  r.publish('package.json', JSON.stringify({engines: {node: '>=24.19.0 <25'}, devDependencies: {typescript: '5.9.3'}}));
+  git(r.checkout, 'pull', '-q', '--ff-only');
+  const none = r.doctor();
+  assert.equal(none.status, 0, none.output);
+  assert.equal(none.output, 'all good\n');
+  r.publish('web/package.json', JSON.stringify({dependencies: {playwright: '^1.63.0'}}));
+  git(r.checkout, 'pull', '-q', '--ff-only');
+  assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in /);
+});
+
 for (const name of ['git', 'jq', 'python3', 'gh', 'claude', 'node']) {
   test(`a missing ${name} is reported`, t => {
     const r = doctorSetup(t);
@@ -341,6 +355,20 @@ test('a unit that is not enabled is reported, the gallery unit only with the dem
   const result = r.doctor();
   assert.equal(result.problems.length, 2, result.output);
   assert.match(result.problems[1], /^the unit demo-gallery@triphammer\.service is not-found\. Fix: /);
+});
+
+test('before start, the doctor leaves the units out and says so, naming them', t => {
+  const r = doctorSetup(t, {config: {MODULES: 'demo', DEMO_URL: 'http://gallery.example.invalid/', DEMO_GALLERY_DIR: '/nonexistent/gallery'}});
+  r.answers('systemctl', {'--user is-enabled': {stdout: 'disabled\n', exit: 1}});
+  const result = r.doctor({}, ['--before-start']);
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.output, 'left out the units ticket-runner@triphammer.timer merge-when-ready@triphammer.timer '
+    + 'demo-gallery@triphammer.service, which triphammer start triphammer enables\nall good\n');
+  assert.equal(existsSync(join(r.root, 'systemctl/calls')), false, 'the doctor asked systemctl about a unit');
+  assert.equal(r.doctor().problems.length, 3);
+  const wrong = r.doctor({}, ['--after-start']);
+  assert.equal(wrong.status, 2, wrong.output);
+  assert.match(wrong.output, /^usage: ticket-runner --doctor \[--before-start\]$/m);
 });
 
 test('a user without a git commit identity is reported, name and email each, and one with it passes', t => {

@@ -112,8 +112,8 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   const step = call => call.replace(/ bash -c .*setsid .* detached /, ' <session> ');
   assert.match(step(calls[1]), new RegExp(`^sudo <session> bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
   assert.equal(calls[2], 'provision-project sudo=yes example/example-project --modules demo --set DEMO_URL=http://x.invalid/');
-  assert.equal(step(calls[3]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
-  assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor');
+  assert.equal(step(calls[3]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor --before-start`);
+  assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor --before-start');
   assert.equal(calls.length, 5);
   assert.match(result.stdout, /sudo asks for your password once/);
   assert.match(result.stdout, /^setting it up$/m);
@@ -150,7 +150,7 @@ test('add --dry-run runs no doctor, and a doctor that finds problems does not fa
   s.fail('runner', 1);
   const result = s.run('add', 'example/example-project');
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(s.calls().some(call => call.endsWith('--doctor')));
+  assert.ok(s.calls().some(call => call.endsWith('--doctor --before-start')));
 });
 
 test('without the machine file every command but usage exits 1 naming it', t => {
