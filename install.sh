@@ -13,8 +13,10 @@
 #   TRIPHAMMER_REPO  the repository to clone, <owner>/<name> (default TreyThomasDotCodes/triphammer)
 #   TRIPHAMMER_REF   the branch or tag to run provision from (default main)
 #
-# sudo asks for the password once, from the terminal, before anything is cloned; as root, sudo is not used. The script
-# is one function called on its last line, so a download cut short runs nothing.
+# sudo asks for the password once, from the terminal, before anything is cloned; as root, sudo is not used. provision
+# runs in a session of its own with nothing on stdin: its output still reaches the terminal, but no command under it
+# can be stopped for touching a terminal it is not in the foreground of, or wait there for an answer. The script is one
+# function called on its last line, so a download cut short runs nothing.
 set -euo pipefail
 
 main() {
@@ -39,7 +41,7 @@ main() {
   work="$(mktemp -d)"  # global: the EXIT trap runs after main has returned
   trap 'rm -rf "$work"' EXIT
   git clone -q --depth 1 --branch "$ref" "$base/$repo.git" "$work/triphammer"
-  $sudo bash "$work/triphammer/bin/provision" "${args[@]}"
+  $sudo setsid -w bash "$work/triphammer/bin/provision" "${args[@]}" < /dev/null
 }
 
 main "$@"

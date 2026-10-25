@@ -15,8 +15,10 @@
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
 #
 # sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
-# (add, start) or the service user (doctor, plan, start). Exit status: the step's own, 2 for a usage error, 1 when the
-# machine file is missing or malformed.
+# (add, start) or the service user (doctor, plan, start). provision-project and ticket-runner run in a session of their
+# own with nothing on stdin, as install.sh runs provision: their output still reaches the terminal, but no command under
+# them can be stopped for touching it. Exit status: the step's own, 2 for a usage error, 1 when the machine file is
+# missing or malformed.
 #
 # Tests (triphammer.test.mjs) use TRIPHAMMER_PROVISION_ROOT for where /etc lies and TRIPHAMMER_PROVISION_GIT_BASE for
 # where repositories are cloned from, as provision does.
@@ -108,14 +110,15 @@ add() {
   git clone -q --depth 1 -- "$git_base$tri_repo.git" "$work/triphammer" \
     || fail "could not clone $tri_repo, whose bin/provision-project sets the project up"
   status=0
-  $sudo bash "$work/triphammer/bin/provision-project" "$@" | tee "$work/output" || status="${PIPESTATUS[0]}"
+  $sudo setsid -w bash "$work/triphammer/bin/provision-project" "$@" < /dev/null | tee "$work/output" \
+    || status="${PIPESTATUS[0]}"
   [ "$status" -eq 0 ] || exit "$status"
   name="$(sed -n 's/^project: //p' "$work/output" | tail -n 1)"
   [ -z "$dry_run" ] || return 0
   [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "provision-project named no project"
   echo
   echo "The doctor's check of $name:"
-  as_service env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor || true
+  as_service setsid -w env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor < /dev/null || true
   echo
   echo "Start it, once the doctor finds nothing missing: triphammer start $name"
 }
@@ -126,7 +129,7 @@ runner() {
   [ $# -le 1 ] || usage_error "${flag#--} takes at most one project"
   read_machine
   project "${1:-}"
-  as_service env TRIPHAMMER_PROJECT="$project" "$home/.local/bin/ticket-runner" "$flag"
+  as_service setsid -w env TRIPHAMMER_PROJECT="$project" "$home/.local/bin/ticket-runner" "$flag" < /dev/null
 }
 
 start() {
