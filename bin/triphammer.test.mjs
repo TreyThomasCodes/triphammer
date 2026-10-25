@@ -4,8 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {setTimeout as sleep} from 'node:timers/promises';
-import {git, here, lines, toolingEnv} from './fixture.mjs';
+import {git, here, interrupt, lines, toolingEnv} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
 // A machine provision has set up, in a temporary directory: the machine file, Triphammer's repository under origins/
@@ -26,6 +25,7 @@ function setup(t, {projects = {'example-project': 'REPO=example/example-project\
   const record = join(root, 'record');
   const session = name => `[ "$(ps -o sid= -p $$ | tr -d ' ')" = $$ ] && s=leader || s=attached
 echo "${name} $s $(readlink /proc/$$/fd/0)" >> '${record}.session'`;
+  const slowStep = what => `[ ! -e '${root}/${what}-slow' ] || { echo started >> '${record}.slow'; sh -c "sleep 2; echo finished >> '${record}.slow'"; }`;
   for (const dir of [join(sys, 'etc'), bin, tmp, join(home, '.local/bin'), join(home, '.config/triphammer')]) {
     mkdirSync(dir, {recursive: true});
   }
@@ -38,7 +38,7 @@ echo "${name} $s $(readlink /proc/$$/fd/0)" >> '${record}.session'`;
   writeFileSync(join(work, 'bin/provision-project'), `#!/usr/bin/env bash
 echo "provision-project sudo=\${UNDER_SUDO:-no} $*" >> '${record}'
 ${session('provision-project')}
-[ ! -e '${root}/provision-slow' ] || { echo started >> '${record}.slow'; sh -c "sleep 2; echo finished >> '${record}.slow'"; }
+${slowStep('provision')}
 echo "setting it up"
 [ ! -e '${root}/provision-fails' ] || exit "$(cat '${root}/provision-fails')"
 echo "project: example-project"
@@ -51,7 +51,7 @@ echo "project: example-project"
   writeFileSync(join(home, '.local/bin/ticket-runner'), `#!/bin/sh
 echo "ticket-runner project=$TRIPHAMMER_PROJECT runtime=$XDG_RUNTIME_DIR $*" >> '${record}'
 ${session('ticket-runner')}
-[ ! -e '${root}/runner-slow' ] || { echo started >> '${record}.slow'; sh -c "sleep 2; echo finished >> '${record}.slow'"; }
+${slowStep('runner')}
 [ ! -e '${root}/runner-fails' ] || exit "$(cat '${root}/runner-fails')"
 `, {mode: 0o755});
   // sudo -iu hands its command to the login shell as sudo does: each character escaped but alphanumerics, _, - and $.
@@ -86,20 +86,9 @@ esac
     fail: (what, code) => writeFileSync(join(root, `${what}-fails`), `${code}\n`),
     run: (...args) => spawnSync(join(here, 'triphammer'), args, {env, encoding: 'utf8'}),
     slow: what => writeFileSync(join(root, `${what}-slow`), ''),
-    // Runs the command, sends it `signal` once the slow step has started (with `group`, to the whole process group
-    // it leads, as a terminal's Ctrl-C does), and returns how the command exited, how many milliseconds after the
-    // signal, and what the step recorded by the time it would have finished.
-    async interrupted(signal, group, ...args) {
-      const child = spawn(join(here, 'triphammer'), args, {env, stdio: 'ignore', detached: group});
-      const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
-      for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
-      const sent = Date.now();
-      if (group) process.kill(-child.pid, signal);
-      else child.kill(signal);
-      const {status, by, at} = await exited;
-      await sleep(2500);
-      return {status, signal: by, after: at - sent, steps: lines(`${record}.slow`)};
-    },
+    // Runs the command and interrupts it once the slow step has started (interrupt in fixture.mjs).
+    interrupted: (signal, group, ...args) => interrupt(
+      spawn(join(here, 'triphammer'), args, {env, stdio: 'ignore', detached: group}), signal, group, `${record}.slow`),
   };
 }
 

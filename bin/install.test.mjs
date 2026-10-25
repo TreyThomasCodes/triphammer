@@ -4,8 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {setTimeout as sleep} from 'node:timers/promises';
-import {git, here, lines} from './fixture.mjs';
+import {git, here, interrupt, lines} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
 const script = join(here, '..', 'install.sh');
@@ -125,17 +124,11 @@ for (const [signal, group] of [['SIGINT', false], ['SIGTERM', false], ['SIGINT',
   test(`${signal} to the script${group ? "'s process group" : ''} stops provision and the child it started, and the script ends by that signal`, async t => {
     const {record, env, tmp} = setup(t);
     const child = spawn('bash', ['-s', '--', '--dry-run'], {env: {...env, TRIPHAMMER_REF: 'slow'}, stdio: ['pipe', 'ignore', 'ignore'], detached: group});
-    const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
     child.stdin.end(readFileSync(script, 'utf8'));
-    for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
-    const sent = Date.now();
-    if (group) process.kill(-child.pid, signal);
-    else child.kill(signal);
-    const {status, by, at} = await exited;
-    assert.equal(by, signal, `exited ${status}`);
-    assert.ok(at - sent < 1500, `${at - sent} ms after the signal`);
-    await sleep(2500);  // past the moment provision's child would have recorded `finished`
-    assert.deepEqual(lines(`${record}.slow`), ['started']);
+    const result = await interrupt(child, signal, group, `${record}.slow`);
+    assert.equal(result.signal, signal, `exited ${result.status}`);
+    assert.ok(result.after < 1500, `${result.after} ms after the signal`);
+    assert.deepEqual(result.steps, ['started']);
     assert.deepEqual(readdir(tmp), []);
   });
 }

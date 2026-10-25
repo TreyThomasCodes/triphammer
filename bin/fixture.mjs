@@ -5,6 +5,7 @@ import {chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSyn
 import {tmpdir} from 'node:os';
 import net from 'node:net';
 import {join} from 'node:path';
+import {setTimeout as sleep} from 'node:timers/promises';
 import {gitEnv, toolingEnv} from '../scripts/test-git-repo.mjs';
 
 export const here = import.meta.dirname;
@@ -13,6 +14,19 @@ export const run = (file, args, options) => execFileSync(file, args, {stdio: ['i
 export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim();
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
+// Sends `signal` to a spawned script once its slow fake step has recorded `started` in `slowLog` (with `group`, to the
+// whole process group the script leads, as a terminal's Ctrl-C does), and returns how the script exited, how many
+// milliseconds after the signal, and what the step recorded by the time its child would have recorded `finished`.
+export async function interrupt(child, signal, group, slowLog) {
+  const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
+  for (let i = 0; i < 500 && !lines(slowLog).includes('started'); i++) await sleep(20);
+  const sent = Date.now();
+  if (group) process.kill(-child.pid, signal);
+  else child.kill(signal);
+  const {status, by, at} = await exited;
+  await sleep(2500);
+  return {status, signal: by, after: at - sent, steps: lines(slowLog)};
+}
 // A free port on 127.0.0.1, as the kernel hands one out: bound once, then released.
 export function freePort() {
   return new Promise((done, fail) => {
