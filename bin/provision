@@ -14,7 +14,8 @@
 # a vendor's repository does not serve this release (it says which); the service user (default `triphammer`) in the
 # docker group with lingering on; Triphammer's checkout, cloned as that user; Node from nodejs.org at the version the
 # checkout's .node-version pins; Claude Code through its installer. It links the units and scripts as the README's
-# Install section does, installs the Triphammer plugin at user scope, points git's github.com credentials at
+# Install section does, installs the Triphammer plugin and the humanizer plugin (from the blader/humanizer
+# marketplace on GitHub) at user scope, points git's github.com credentials at
 # github-app-token, writes the machine file /etc/triphammer.conf (bin/provision-lib.sh) and installs the triphammer
 # command as /usr/local/bin/triphammer, a copy root owns, so the service user cannot change what the owner runs. It
 # enables no timer.
@@ -233,21 +234,28 @@ if ! as_user "$home/.local/bin/claude" --version >/dev/null 2>&1; then
      bash "$d/install.sh"' || fail "the Claude Code installer failed"
 fi
 
-# The Triphammer plugin at user scope, from the marketplace file of Triphammer's checkout.
+# user_plugin <marketplace> <source> <plugin>: adds the marketplace from its source (a directory, or a GitHub
+# owner/repo) and installs <plugin>@<marketplace> at user scope for the user, each only when it is missing.
+user_plugin() {
+  local marketplace="$1" source="$2" id="$3@$1"
+  if ! as_user_claude plugin marketplace list --json 2>/dev/null | jq -e --arg name "$marketplace" 'any(.[]; .name == $name)' >/dev/null; then
+    change "add the plugin marketplace $marketplace from $source for $user" as_user_claude plugin marketplace add "$source" \
+      || fail "claude could not add the marketplace $marketplace from $source"
+  fi
+  if ! as_user_claude plugin list --json 2>/dev/null \
+      | jq -e --arg id "$id" 'any(.[]; .id == $id and .scope == "user")' >/dev/null; then
+    change "install the plugin $id at user scope for $user" \
+      as_user_claude plugin install "$id" --scope user || fail "claude could not install $id"
+  fi
+}
+# The Triphammer plugin at user scope, from the marketplace file of Triphammer's checkout, and the humanizer plugin,
+# whose skill the pull request hook requires, from the blader/humanizer marketplace on GitHub.
 if cloned "$tri_repo" "$tri_checkout"; then
   marketplace="$(as_user jq -r .name "$tri_checkout/.claude-plugin/marketplace.json")" \
     || fail "$tri_checkout/.claude-plugin/marketplace.json is not JSON"
-  plugin="$(as_user jq -r '.plugins[0].name' "$tri_checkout/.claude-plugin/marketplace.json")"
-  if ! as_user_claude plugin marketplace list --json 2>/dev/null | jq -e --arg name "$marketplace" 'any(.[]; .name == $name)' >/dev/null; then
-    change "add the plugin marketplace $marketplace from $tri_checkout for $user" as_user_claude plugin marketplace add "$tri_checkout" \
-      || fail "claude could not add the marketplace in $tri_checkout"
-  fi
-  if ! as_user_claude plugin list --json 2>/dev/null \
-      | jq -e --arg id "$plugin@$marketplace" 'any(.[]; .id == $id and .scope == "user")' >/dev/null; then
-    change "install the plugin $plugin@$marketplace at user scope for $user" \
-      as_user_claude plugin install "$plugin@$marketplace" --scope user || fail "claude could not install $plugin@$marketplace"
-  fi
+  user_plugin "$marketplace" "$tri_checkout" "$(as_user jq -r '.plugins[0].name' "$tri_checkout/.claude-plugin/marketplace.json")"
 fi
+user_plugin humanizer blader/humanizer humanizer
 
 # The machine file, for provision-project and the triphammer command, and the command itself: a copy of this script's
 # own bin/triphammer that root owns, never a link into the checkout the service user may write.

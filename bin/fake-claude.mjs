@@ -5,7 +5,8 @@
 // $FAKE_CLAUDE_LEAK is set, and exits with $FAKE_CLAUDE_EXIT (default 0).
 // `claude --version` prints a version and `claude auth status` the login state, an account included, logged in unless
 // $FAKE_CLAUDE_LOGGED_OUT is set (then it exits 1); neither writes claude.json.
-// `claude plugin marketplace add <checkout>` (the marketplace named in its .claude-plugin/marketplace.json),
+// `claude plugin marketplace add <checkout>` (the marketplace named in its .claude-plugin/marketplace.json, or, for a
+// GitHub <owner>/<repo>, the one named <repo>),
 // `claude plugin install <id> --scope <scope>` and their `list --json` keep their state in <dir>/plugins.json and
 // append each call to <dir>/plugin-calls, with whether it leads a session of its own and what its stdin is; they
 // write no claude.json either.
@@ -34,7 +35,8 @@ if (args[0] === 'plugin') {
   if (action === 'list') {
     process.stdout.write(JSON.stringify(what ? state.marketplaces : state.plugins));
   } else if (what) {
-    state.marketplaces.push({name: JSON.parse(readFileSync(join(value, '.claude-plugin/marketplace.json'), 'utf8')).name});
+    state.marketplaces.push({name: /^[\w.-]+\/[\w.-]+$/.test(value) ? value.split('/')[1]
+      : JSON.parse(readFileSync(join(value, '.claude-plugin/marketplace.json'), 'utf8')).name});
   } else {
     state.plugins.push({id: value, scope: args[args.indexOf('--scope') + 1]});
   }

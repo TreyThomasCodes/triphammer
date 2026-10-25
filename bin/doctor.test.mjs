@@ -19,8 +19,8 @@ const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rol
 // the drop-in that
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
 // `bin`) and ~/.dotnet (a fake dotnet), fake node, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
-// in), codex, curl (QWEN_BASE_URL answers), gh (acting as the App) and docker (Compose v2) in `bin`, the App's files and
-// a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
+// in, with the Triphammer and humanizer plugins at user scope), codex, curl (QWEN_BASE_URL answers), gh (acting as
+// the App) and docker (Compose v2) in `bin`, the App's files and a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
 // that starts headless, and a repository that has every label Triphammer uses (`repoLabels`, as gh label list prints
 // them). `doctor` runs `ticket-runner --doctor` and returns its status
 // and output.
@@ -30,6 +30,7 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     files: {
       'bin/doctor': readFileSync(join(here, 'doctor'), 'utf8'),
       'systemd/ticket-runner@.service': readFileSync(join(here, '../systemd/ticket-runner@.service'), 'utf8'),
+      '.claude-plugin/marketplace.json': readFileSync(join(here, '../.claude-plugin/marketplace.json'), 'utf8'),
       'global.json': globalJson(rollForward),
       'package.json': JSON.stringify({engines: {node: '>=24.19.0 <25'}, devDependencies: {'@playwright/test': '1.63.0'}}),
     },
@@ -51,6 +52,8 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
   const sessions = join(r.root, 'sessions');
   mkdirSync(sessions);
   fakeCommand(bin, 'claude', sessions);
+  writeFileSync(join(sessions, 'plugins.json'), JSON.stringify({marketplaces: [],
+    plugins: [{id: 'triphammer@triphammer', scope: 'user'}, {id: 'humanizer@humanizer', scope: 'user'}]}));
   fakeCommand(bin, 'codex', sessions);
   const curl = join(r.root, 'curl');
   mkdirSync(curl);
@@ -342,6 +345,27 @@ test('labels that cannot be listed are reported, not passed', t => {
 test('Claude Code that is not logged in is reported', t => {
   const r = doctorSetup(t);
   assertOneProblem(r.doctor({FAKE_CLAUDE_LOGGED_OUT: '1'}), /^Claude Code is not logged in\. Fix: run claude auth login/);
+});
+
+for (const [missing, present] of [['triphammer@triphammer', 'humanizer@humanizer'], ['humanizer@humanizer', 'triphammer@triphammer']]) {
+  test(`a missing ${missing} plugin is reported, with the installer as its fix`, t => {
+    const r = doctorSetup(t);
+    // At project scope it does not count: provision installs at user scope.
+    writeFileSync(join(r.root, 'sessions/plugins.json'), JSON.stringify({marketplaces: [],
+      plugins: [{id: present, scope: 'user'}, {id: missing, scope: 'project'}]}));
+    assertOneProblem(r.doctor(), new RegExp(`^the Claude Code plugin ${missing} is not installed at user scope for this user\\. `
+      + 'Fix: run the installer again'));
+  });
+}
+
+test('both plugins present pass, and a plugin list that fails is reported, not passed', t => {
+  const r = doctorSetup(t);
+  const both = r.doctor();
+  assert.equal(both.status, 0, both.output);
+  const calls = lines(join(r.root, 'sessions/plugin-calls')).map(line => JSON.parse(line).args.join(' '));
+  assert.deepEqual(calls, ['list --json']);
+  writeFileSync(join(r.root, 'sessions/plugins.json'), 'not json');
+  assertOneProblem(r.doctor(), /^claude plugin list fails, so the plugins triphammer@triphammer humanizer@humanizer were not checked\. Fix: run the installer again/);
 });
 
 test('a missing App file, one of the wrong mode and one that is a directory are reported by path, never by content', t => {
