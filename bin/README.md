@@ -346,7 +346,7 @@ other ticket, and an open one stays a ready issue that later ticks retry.
 
 `ticket-decide.test.mjs` runs the script with `python3` on small made-up issue and pull request lists in the shapes
 `gh` returns, covering each decision. It runs with the other tooling tests (`npm run test:tooling`), which CI runs in
-the `pr-guardrails` workflow.
+the `test` workflow (`.github/workflows/test.yml`).
 
 ## Second-model audit
 
@@ -524,8 +524,7 @@ private repository its `git` clones only when git's credential helpers give gith
 
 The example project stands in for a project Triphammer serves: a project file, risk rules for the engine tests in
 `scripts/risk-tier.test.mjs`, and the teardown script the runner tests run. CI runs the node tests in three shards
-side by side (`TEST_SHARD=k/3 npm run test:node`). This repository's own merge rules are tested in
-`scripts/project-risk-tiers.test.mjs`.
+side by side (`TEST_SHARD=k/3 npm run test:node`).
 
 ## Doctor
 
@@ -548,11 +547,12 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Docker | `docker info` answers the user running the doctor, and `docker compose version` is 2 or later. |
 | Playwright | Checked only when the checkout pins Playwright as `provision-project` reads it: a `package.json` that `git ls-files` lists names `@playwright/test` or `playwright` in `dependencies` or `devDependencies`. When the doctor cannot tell (no `jq`, no git checkout, a `package.json` that is not JSON), it checks. `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
-| Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node` and Claude Code login checks are skipped, and only `jq` is reported. |
+| Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node`, Claude Code login and plugin checks are skipped, and only `jq` is reported. |
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
 | The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). |
 | Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next` and `agent-working` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
+| Plugins | `claude plugin list --json` lists at user scope the Triphammer plugin (named by `.claude-plugin/marketplace.json` in Triphammer's checkout) and `humanizer@humanizer`, as `provision` checks them. Each missing one is a problem whose fix is running the installer again; a list that fails is a problem of its own, never a pass. Skipped without `jq`. |
 | bwrap | With the `codex` module on, `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: Codex's sandbox needs unprivileged user namespaces, which Ubuntu restricts with AppArmor. |
 | Qwen | `QWEN_BASE_URL` answers an HTTP request within 10 seconds, with the `qwen-audit` module on (any status counts; no key is sent). |
 | Units | `systemctl --user is-enabled` says `enabled` for `ticket-runner@<project>.timer` and `merge-when-ready@<project>.timer`, and for `demo-gallery@<project>.service` with the `demo` module on. Left out with `--before-start`. |
@@ -713,7 +713,8 @@ Compose v2, `gh`, the service user in the `docker` group with lingering on (so i
 Triphammer's checkout cloned as that user, Node at the version its `.node-version` pins (one Node for every project,
 into `/usr/local`) and Claude Code. It links the scripts, `triphammer-status` and the units as Install does, including
 `demo-gallery@.service` and `triphammer-status.service`, installs the Triphammer plugin at user scope from Triphammer's
-checkout, points git's github.com credentials at `github-app-token` with `useHttpPath` on and creates
+checkout and the humanizer plugin (`humanizer@humanizer`) at user scope from the `blader/humanizer` marketplace on
+GitHub, each only when it is missing, points git's github.com credentials at `github-app-token` with `useHttpPath` on and creates
 `~/.config/github-app` (mode 700, empty). It writes the machine file `/etc/triphammer.conf` (Triphammer's repository
 and checkout, the service user and its home), and installs `bin/triphammer` as `/usr/local/bin/triphammer`, a copy root
 owns rather than a link into the checkout the service user can write. It enables no timer.
