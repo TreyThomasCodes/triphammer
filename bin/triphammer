@@ -78,6 +78,11 @@ as_service() {
   fi
 }
 
+# service_runner <project> <flag>: runs ticket-runner <flag> for a project as the service user, in a session of its own.
+service_runner() {
+  as_service setsid -w env TRIPHAMMER_PROJECT="$1" "$home/.local/bin/ticket-runner" "$2" < /dev/null
+}
+
 # project <name or nothing>: sets `project` to the name given, or to the machine's only project.
 project() {
   local configs names=()
@@ -119,11 +124,11 @@ add() {
   [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "provision-project named no project"
   echo
   echo "The labels Triphammer uses:"
-  as_service setsid -w env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --labels < /dev/null \
+  service_runner "$name" --labels \
     || echo "triphammer: not every label Triphammer uses could be created; the doctor lists the missing ones" >&2
   echo
   echo "The doctor's check of $name:"
-  as_service setsid -w env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor < /dev/null || true
+  service_runner "$name" --doctor || true
   echo
   echo "Start it, once the doctor finds nothing missing: triphammer start $name"
 }
@@ -134,7 +139,7 @@ runner() {
   [ $# -le 1 ] || usage_error "${flag#--} takes at most one project"
   read_machine
   project "${1:-}"
-  as_service setsid -w env TRIPHAMMER_PROJECT="$project" "$home/.local/bin/ticket-runner" "$flag" < /dev/null
+  service_runner "$project" "$flag"
 }
 
 start() {
