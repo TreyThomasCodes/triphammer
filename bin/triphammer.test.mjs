@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {setTimeout as sleep} from 'node:timers/promises';
 import {git, here, lines, toolingEnv} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
@@ -12,7 +13,9 @@ import {readdir} from './provision-fixture.mjs';
 // (or exits with the code in <root>/provision-fails), the service user's ticket-runner, which records its project,
 // XDG_RUNTIME_DIR and arguments (and exits with the code in <root>/runner-fails), a config per name in `projects`
 // (name -> its text), and fakes of sudo, id and systemctl. provision-project and ticket-runner also record, in
-// `sessions()`, whether each leads a session of its own and what its stdin is. `uid` and `login` are the caller's.
+// `sessions()`, whether each leads a session of its own and what its stdin is, and with <root>/<what>-slow
+// (`slow(what)`) each records `started` and then, from a child of its own, `finished` two seconds later, which
+// `interrupted` reads. `uid` and `login` are the caller's.
 function setup(t, {projects = {'example-project': 'REPO=example/example-project\n'}, uid = '1000', login = 'owner'} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'triphammer-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -35,6 +38,7 @@ echo "${name} $s $(readlink /proc/$$/fd/0)" >> '${record}.session'`;
   writeFileSync(join(work, 'bin/provision-project'), `#!/usr/bin/env bash
 echo "provision-project sudo=\${UNDER_SUDO:-no} $*" >> '${record}'
 ${session('provision-project')}
+[ ! -e '${root}/provision-slow' ] || { echo started >> '${record}.slow'; sh -c "sleep 2; echo finished >> '${record}.slow'"; }
 echo "setting it up"
 [ ! -e '${root}/provision-fails' ] || exit "$(cat '${root}/provision-fails')"
 echo "project: example-project"
@@ -47,12 +51,20 @@ echo "project: example-project"
   writeFileSync(join(home, '.local/bin/ticket-runner'), `#!/bin/sh
 echo "ticket-runner project=$TRIPHAMMER_PROJECT runtime=$XDG_RUNTIME_DIR $*" >> '${record}'
 ${session('ticket-runner')}
+[ ! -e '${root}/runner-slow' ] || { echo started >> '${record}.slow'; sh -c "sleep 2; echo finished >> '${record}.slow'"; }
 [ ! -e '${root}/runner-fails' ] || exit "$(cat '${root}/runner-fails')"
 `, {mode: 0o755});
+  // sudo -iu hands its command to the login shell as sudo does: each character escaped but alphanumerics, _, - and $.
   writeFileSync(join(bin, 'sudo'), `#!/bin/sh
 echo "sudo $*" >> '${record}'
 [ "$1" = -v ] && exit 0
-if [ "$1" = -iu ] || [ "$1" = -u ]; then shift 2; fi
+if [ "$1" = -iu ]; then
+  shift 2
+  command=""
+  for arg; do command="$command $(printf '%s' "$arg" | sed 's/[^A-Za-z0-9_$-]/\\\\&/g')"; done
+  UNDER_SUDO=yes exec bash -c "$command"
+fi
+[ "$1" != -u ] || shift 2
 UNDER_SUDO=yes exec "$@"
 `, {mode: 0o755});
   writeFileSync(join(bin, 'id'), `#!/bin/sh
@@ -73,6 +85,19 @@ esac
     sessions: () => lines(`${record}.session`),
     fail: (what, code) => writeFileSync(join(root, `${what}-fails`), `${code}\n`),
     run: (...args) => spawnSync(join(here, 'triphammer'), args, {env, encoding: 'utf8'}),
+    slow: what => writeFileSync(join(root, `${what}-slow`), ''),
+    // Runs the command, sends it `signal` once the slow step has started, and returns how the command exited, how
+    // many milliseconds after the signal, and what the step recorded by the time it would have finished.
+    async interrupted(signal, ...args) {
+      const child = spawn(join(here, 'triphammer'), args, {env, stdio: 'ignore'});
+      const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
+      for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
+      const sent = Date.now();
+      child.kill(signal);
+      const {status, by, at} = await exited;
+      await sleep(2500);
+      return {status, signal: by, after: at - sent, steps: lines(`${record}.slow`)};
+    },
   };
 }
 
@@ -92,9 +117,11 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   assert.equal(result.status, 0, result.stderr);
   const calls = s.calls();
   assert.equal(calls[0], 'sudo -v');
-  assert.match(calls[1], new RegExp(`^sudo setsid -w bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
+  // Each step runs under the script (bash -c '<script>' detached <step...>) that gives it a session of its own.
+  const step = call => call.replace(/ bash -c .*setsid .* detached /, ' <session> ');
+  assert.match(step(calls[1]), new RegExp(`^sudo <session> bash ${s.tmp}/tmp\\.\\w+/triphammer/bin/provision-project example/example-project --modules demo --set DEMO_URL=http://x\\.invalid/$`));
   assert.equal(calls[2], 'provision-project sudo=yes example/example-project --modules demo --set DEMO_URL=http://x.invalid/');
-  assert.equal(calls[3], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 setsid -w env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
+  assert.equal(step(calls[3]), `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 <session> env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
   assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor');
   assert.equal(calls.length, 5);
   assert.match(result.stdout, /sudo asks for your password once/);
@@ -193,3 +220,21 @@ test('the service user starts its own timers through its user manager, and a pro
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /nope has no config/);
 });
+
+for (const [signal, args, slow, as] of [
+  ['SIGINT', ['add', 'example/example-project'], 'provision', {}],
+  ['SIGTERM', ['add', 'example/example-project'], 'provision', {}],
+  ['SIGINT', ['plan'], 'runner', {}],
+  ['SIGTERM', ['doctor'], 'runner', {login: 'triphammer', uid: '1001'}],
+]) {
+  test(`${signal} to ${args[0]}${as.login ? ' as the service user' : ''} stops its step and the child the step started, and it ends by that signal`, async t => {
+    const s = setup(t, as);
+    s.slow(slow);
+    const result = await s.interrupted(signal, ...args);
+    assert.equal(result.signal, signal, `exited ${result.status}`);
+    assert.ok(result.after < 1500, `${result.after} ms after the signal`);
+    assert.deepEqual(result.steps, ['started']);
+    if (args[0] === 'add') assert.ok(!s.calls().some(call => call.startsWith('ticket-runner')), 'add went on to the doctor');
+    assert.deepEqual(readdir(s.tmp), []);
+  });
+}

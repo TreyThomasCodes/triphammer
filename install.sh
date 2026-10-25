@@ -15,9 +15,46 @@
 #
 # sudo asks for the password once, from the terminal, before anything is cloned; as root, sudo is not used. provision
 # runs in a session of its own with nothing on stdin: its output still reaches the terminal, but no command under it
-# can be stopped for touching a terminal it is not in the foreground of, or wait there for an answer. The script is one
-# function called on its last line, so a download cut short runs nothing.
+# can be stopped for touching a terminal it is not in the foreground of, or wait there for an answer. So Ctrl-C at the
+# terminal reaches the script and not provision, and the script relays it: on an INT or TERM it sends TERM to the bash
+# that sudo runs (from a session of its own, since some sudo versions do not relay a signal sent from the process group
+# the command runs in), that bash sends TERM to provision's whole process group, and once provision has ended the
+# script ends by the signal it got. The script defines functions and calls one on its last line, so a download cut
+# short runs nothing.
 set -euo pipefail
+
+# A bash script that runs its arguments in a session of its own with nothing on stdin, waits for it, exits with its
+# status, and sends TERM to the session's process group on a TERM. bin/triphammer holds the same script, and passes it
+# through `sudo -i`, which hands the login shell every character escaped but `$`: so it is one line, and every expansion
+# is braced, as `$\{` is literal to that shell.
+# shellcheck disable=SC2016  # expanded by the bash that runs it
+own_session='stop() { [ -z "${p}" ] || kill -TERM -- "-${p}" 2> /dev/null || kill -TERM "${p}"; }; p=; trap "t=1; stop" TERM; (trap - INT QUIT; exec setsid "${@}") < /dev/null & p=${!}; [ -z "${t-}" ] || stop; while :; do wait "${p}" && exit 0 || s=${?}; kill -0 "${p}" 2> /dev/null || exit "${s}"; done'
+
+# detached <prefix...> -- <command...>: runs the command, through the prefix (sudo, or nothing), in a session of its own
+# with nothing on stdin, and waits for it; returns its status. An INT or TERM meanwhile stops it, and then this script
+# ends by that signal.
+detached() {
+  local prefix=() child="" caught="" woke status
+  while [ "$1" != -- ]; do prefix+=("$1"); shift; done
+  shift
+  trap 'caught=INT woke=1; relay' INT
+  trap 'caught=TERM woke=1; relay' TERM
+  (trap - INT QUIT; exec "${prefix[@]}" bash -c "$own_session" detached "$@") < /dev/null &
+  child=$!
+  [ -z "$caught" ] || relay
+  while :; do
+    woke=""
+    wait "$child" && status=0 || status=$?
+    [ -n "$woke" ] || break
+  done
+  trap - INT TERM
+  [ -z "$caught" ] || kill -s "$caught" "$$"
+  return "$status"
+}
+# relay: sends TERM to detached's child, if it has started.
+relay() {
+  [ -z "$child" ] || setsid -w kill -s TERM "$child" 2> /dev/null || true
+}
 
 main() {
   local repo="${TRIPHAMMER_REPO:-TreyThomasDotCodes/triphammer}" ref="${TRIPHAMMER_REF:-main}"
@@ -41,7 +78,7 @@ main() {
   work="$(mktemp -d)"  # global: the EXIT trap runs after main has returned
   trap 'rm -rf "$work"' EXIT
   git clone -q --depth 1 --branch "$ref" "$base/$repo.git" "$work/triphammer"
-  $sudo setsid -w bash "$work/triphammer/bin/provision" "${args[@]}" < /dev/null
+  detached $sudo -- bash "$work/triphammer/bin/provision" "${args[@]}"
 }
 
 main "$@"

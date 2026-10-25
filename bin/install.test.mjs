@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {setTimeout as sleep} from 'node:timers/promises';
 import {git, here, lines} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
@@ -11,8 +12,9 @@ const script = join(here, '..', 'install.sh');
 
 // A repository at <base>/example-owner/triphammer.git whose bin/provision records its arguments, whether sudo ran it,
 // the directory it ran from, and whether it leads a session of its own and what its stdin is, one line each, on `main`;
-// on a branch `other` it records `other` first, and on `fails` it exits 3. A fake `id` answers `uid`, and a fake `sudo`
-// records its arguments and runs the rest.
+// on a branch `other` it records `other` first, on `fails` it exits 3, and on `slow` it records `started` in <record>.slow
+// and then, from a child of its own, `finished` two seconds later. A fake `id` answers `uid`, and a fake `sudo` records
+// its arguments and runs the rest.
 function setup(t, uid = '1000') {
   const dir = mkdtempSync(join(tmpdir(), 'install-'));
   t.after(() => rmSync(dir, {recursive: true, force: true}));
@@ -34,6 +36,10 @@ function setup(t, uid = '1000') {
   git(source, 'switch', '-q', '-c', 'fails', 'main');
   writeFileSync(join(source, 'bin/provision'), '#!/usr/bin/env bash\nexit 3\n', {mode: 0o755});
   git(source, 'commit', '-q', '-am', 'fails');
+  git(source, 'switch', '-q', '-c', 'slow', 'main');
+  writeFileSync(join(source, 'bin/provision'), `#!/usr/bin/env bash\necho started >> '${record}.slow'\n`
+    + `sh -c "sleep 2; echo finished >> '${record}.slow'"\n`, {mode: 0o755});
+  git(source, 'commit', '-q', '-am', 'slow');
   git(source, 'switch', '-q', 'main');
   const base = join(dir, 'base');
   mkdirSync(join(base, 'example-owner'), {recursive: true});
@@ -61,7 +67,7 @@ test("an ordinary user's run asks sudo once, then runs provision as root with Tr
   assert.match(result.stdout, /sudo asks for your password once/);
   const sudo = lines(sudoLog);
   assert.equal(sudo[0], '-v');
-  assert.match(sudo[1], /^setsid -w bash .*\/triphammer\/bin\/provision --triphammer example-owner\/triphammer \/srv\/triphammer --user triphammer$/);
+  assert.match(sudo[1], /^bash -c .*setsid .* detached bash .*\/triphammer\/bin\/provision --triphammer example-owner\/triphammer \/srv\/triphammer --user triphammer$/);
   assert.equal(sudo.length, 2);
   assert.deepEqual(lines(record), ['--triphammer', 'example-owner/triphammer', '/srv/triphammer', '--user', 'triphammer']);
   assert.deepEqual(lines(`${record}.sudo`), ['yes']);
@@ -113,3 +119,21 @@ test('a download cut short before the last line runs nothing', t => {
   assert.deepEqual(lines(record), []);
   assert.deepEqual(lines(sudoLog), []);
 });
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  test(`${signal} to the script stops provision and the child it started, and the script ends by that signal`, async t => {
+    const {record, env, tmp} = setup(t);
+    const child = spawn('bash', ['-s', '--', '--dry-run'], {env: {...env, TRIPHAMMER_REF: 'slow'}, stdio: ['pipe', 'ignore', 'ignore']});
+    const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
+    child.stdin.end(readFileSync(script, 'utf8'));
+    for (let i = 0; i < 500 && !lines(`${record}.slow`).includes('started'); i++) await sleep(20);
+    const sent = Date.now();
+    child.kill(signal);
+    const {status, by, at} = await exited;
+    assert.equal(by, signal, `exited ${status}`);
+    assert.ok(at - sent < 1500, `${at - sent} ms after the signal`);
+    await sleep(2500);  // past the moment provision's child would have recorded `finished`
+    assert.deepEqual(lines(`${record}.slow`), ['started']);
+    assert.deepEqual(readdir(tmp), []);
+  });
+}
