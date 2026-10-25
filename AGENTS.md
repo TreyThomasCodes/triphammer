@@ -10,7 +10,9 @@ that hold the rest.
   modules.
 - `plugins/triphammer/`: the Claude Code plugin, the workflow skills, agents and guard hooks (`triphammer:<name>`).
   `.claude-plugin/marketplace.json` lists it.
-- `bin/`: the ticket runner, `merge-when-ready`, `land-pr`, `doctor`, `provision` and the optional modules' scripts,
+- `install.sh`: sets a machine up without a clone, through `bin/provision`.
+- `bin/`: the `triphammer` command, the ticket runner, `merge-when-ready`, `land-pr`, `doctor`, `provision`,
+  `provision-project` and the optional modules' scripts,
   with their tests and fakes; its README covers configuration, the project file, install, provisioning and
   self-update.
 - `systemd/`: the user units, linked from Triphammer's checkout.

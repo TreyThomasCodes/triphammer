@@ -5,6 +5,8 @@
 #   github-app-token                       print the token
 #   github-app-token git-credential [get]  act as a git credential helper: print username and password
 #   github-app-token git-credential <any other action, such as store or erase>   do nothing, exit 0
+#   github-app-token app-slug              print the App's slug, the name in app/<slug> (GET /app; not a secret),
+#                                          reading app-id and agents.pem only
 #
 # It reads the files the owner fills in (bin/README.md, Install) from $GITHUB_APP_CONFIG_DIR, by default
 # ~/.config/github-app: app-id (the App's numeric id), owner (the default account the App is installed on) and
@@ -42,7 +44,8 @@ case "${1:-}" in
         path=*) git_path="${line#path=}" ;;
       esac
     done ;;
-  *) printf 'usage: github-app-token [git-credential [get|store|erase]]\n' >&2; exit 2 ;;
+  app-slug) mode=slug ;;
+  *) printf 'usage: github-app-token [git-credential [get|store|erase] | app-slug]\n' >&2; exit 2 ;;
 esac
 
 config_dir="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
@@ -58,11 +61,43 @@ config_file() {
 }
 
 app_id_file="$(config_file app-id)"
-owner_file="$(config_file owner)"
+[ "$mode" = slug ] || owner_file="$(config_file owner)"
 key="$(config_file agents.pem)"
 app_id="$(cat "$app_id_file")"
-owner="$(cat "$owner_file")"
 [[ $app_id =~ ^[0-9]+$ ]] || fail "$app_id_file must hold the App's numeric id; $install_hint"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+# Runs curl with the JWT in a config on stdin, so it never appears in a process's arguments.
+github() {
+  local jwt="$1"; shift
+  printf 'header = "Authorization: Bearer %s"\n' "$jwt" \
+    | curl -fsS -K - -H 'Accept: application/vnd.github+json' "$@"
+}
+
+# A JWT the App's key signs, valid for nine minutes, issued by the App's id.
+app_jwt() {
+  local now header payload signature
+  now="$(date +%s)"
+  header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+  payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$app_id" | b64url)"
+  signature="$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary 2>/dev/null | b64url)" \
+    || signature=''
+  [ -n "$signature" ] || fail "openssl could not sign with $key; it must be the App's private key in PEM form; $install_hint"
+  printf '%s.%s.%s' "$header" "$payload" "$signature"
+}
+
+if [ "$mode" = slug ]; then
+  jwt="$(app_jwt)"
+  app="$(github "$jwt" https://api.github.com/app)" \
+    || fail "reading the App failed (GET https://api.github.com/app); check app-id and agents.pem in $config_dir and the network"
+  slug="$(jq -er '.slug | select(type == "string" and test("^[a-z0-9][a-z0-9-]*$"))' <<<"$app" 2>/dev/null)" \
+    || fail "GitHub's answer for the App had no slug"
+  printf '%s\n' "$slug"
+  exit 0
+fi
+
+owner="$(cat "$owner_file")"
 login='^[A-Za-z0-9-]+$'
 [[ $owner =~ $login ]] || fail "$owner_file must hold the login of the account the App is installed on; $install_hint"
 # Where the account came from, for the message when the App is not installed on it.
@@ -82,24 +117,9 @@ cache="$cache_dir/token-${owner,,}.json"
 valid='select((.token | type) == "string" and (.token | test("^[!-~]+$"))
   and (.expires_at | type) == "string" and (.expires_at | test("^[!-~]+$")))'
 
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-
-# Runs curl with the JWT in a config on stdin, so it never appears in a process's arguments.
-github() {
-  local jwt="$1"; shift
-  printf 'header = "Authorization: Bearer %s"\n' "$jwt" \
-    | curl -fsS -K - -H 'Accept: application/vnd.github+json' "$@"
-}
-
 mint() {
-  local now header payload signature jwt installations installation response tmp
-  now="$(date +%s)"
-  header="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
-  payload="$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$app_id" | b64url)"
-  signature="$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" -binary 2>/dev/null | b64url)" \
-    || signature=''
-  [ -n "$signature" ] || fail "openssl could not sign with $key; it must be the App's private key in PEM form; $install_hint"
-  jwt="$header.$payload.$signature"
+  local jwt installations installation response tmp
+  jwt="$(app_jwt)"
 
   installations="$(github "$jwt" https://api.github.com/app/installations)" \
     || fail "listing the App's installations failed (GET https://api.github.com/app/installations); check app-id and agents.pem in $config_dir and the network"

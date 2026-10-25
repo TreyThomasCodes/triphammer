@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Sets one project up on a machine bin/provision prepared: `triphammer add` runs it as root, from a fresh clone of
+# Triphammer, and it may run again whenever the owner likes, since a second run changes nothing that is already right.
+# See bin/README.md ("On a machine of its own").
+#
+#   provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>]
+#                     [--dry-run]
+#
+# The machine file /etc/triphammer.conf (bin/provision-lib.sh) names the service user and Triphammer's checkout. The
+# project's checkout defaults to /srv/<name>, or Triphammer's own checkout when the project is Triphammer's repository.
+# The config's APP_AUTHOR is --app-author, or else app/<slug> with the App's slug, which github-app-token app-slug reads
+# once the owner has placed the App's files.
+#
+# It installs, each only when it is not there already: the project's checkout, cloned as the service user; the .NET SDK
+# its global.json pins, through dotnet-install into ~/.dotnet, with the drop-in that puts it on ticket-runner@.service's
+# PATH (the README's Install section, A project's toolchain); Playwright's Chromium at the version each package.json
+# pins, with its system libraries from Playwright or else from Ubuntu's archive; Codex, bubblewrap and the AppArmor
+# profile that lets bwrap create user namespaces with the codex module, and ffmpeg with the demo module. It gives git a
+# commit identity from APP_AUTHOR unless the user has one, and writes the project's config file. The project's
+# .node-version must pin the Node the machine has, as one Node is on the units' PATH. It enables no timer, and its last
+# line is `project: <name>`, for triphammer add.
+#
+# It never reads or writes a credential's value. Every argument is checked before anything changes; an unknown flag or
+# a bad value exits 2 with the usage. A step that fails exits 1 naming it. --dry-run prints each change it would make
+# (`would: ...`) and makes none.
+#
+# Tests (provision-project.test.mjs) run it with fakes of the package and account tools first on PATH
+# (bin/provision-lib.sh).
+# shellcheck disable=SC2016  # the sh -c and bash -c scripts expand their own arguments, not this shell's
+set -euo pipefail
+umask 022
+
+prog=provision-project
+here="$(dirname "$(readlink -f "$0")")"
+usage() {
+  cat >&2 <<'EOF'
+usage: provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>]
+                         [--dry-run]
+EOF
+}
+# shellcheck source=bin/provision-lib.sh
+source "$here/provision-lib.sh"
+# shellcheck source=bin/config.sh
+source "$here/config.sh"
+
+# The settings --set may give: config.sh's optional ones but MODULES (--modules gives it), and STATE_DIR.
+settable=(STATE_DIR)
+for key in "${optional_settings[@]}"; do [ "$key" = MODULES ] || settable+=("$key"); done
+# The settings each module needs; a project that turns it on without them is refused before anything changes.
+declare -A module_needs=([demo]="DEMO_GALLERY_DIR DEMO_URL" [qwen-audit]="QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL"
+  [codex]="CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL")
+
+repo="" checkout="" modules="" modules_given="" sets="" app_author="" dry_run=""
+need_value() { [ "$1" -gt "$2" ] || usage_error "$3 needs $4"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --modules)
+      need_value $# 1 "$1" "a value"
+      [ -z "$modules_given" ] || usage_error "--modules is given twice"
+      [ -n "$2" ] || usage_error "--modules needs a value"
+      modules="$2" modules_given=1
+      shift 2 ;;
+    --set)
+      need_value $# 1 "$1" "a value"
+      [[ "$2" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || usage_error "--set takes KEY=VALUE, not $2"
+      key="${BASH_REMATCH[1]}"
+      case "$key" in
+        REPO|CHECKOUT) usage_error "--set cannot give $key; the arguments before the options give it" ;;
+        APP_AUTHOR) usage_error "--set cannot give APP_AUTHOR; --app-author gives it" ;;
+        MODULES) usage_error "--set cannot give MODULES; --modules gives it" ;;
+      esac
+      [[ " ${settable[*]} " == *" $key "* ]] || usage_error "--set names $key, which is not a setting --set may give (${settable[*]})"
+      [[ "$2" != *$'\n'* ]] || usage_error "--set $key: the value may not hold a line break"
+      [[ $'\n'"$sets" != *$'\n'"$key="* ]] || usage_error "--set gives $key twice"
+      sets="${sets:+$sets$'\n'}$2"
+      shift 2 ;;
+    --app-author)
+      need_value $# 1 "$1" "a value"
+      app_author="$2"
+      shift 2 ;;
+    --dry-run) dry_run=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) usage_error "unknown argument $1" ;;
+    *)
+      if [ -z "$repo" ]; then repo="$1"
+      elif [ -z "$checkout" ]; then checkout="$1"
+      else usage_error "unexpected argument $1; give one repository and at most one checkout"
+      fi
+      shift ;;
+  esac
+done
+[ -n "$repo" ] || usage_error "no repository is given"
+[[ "$repo" =~ $repo_pattern ]] || usage_error "the repository must be owner/name, not $repo"
+[ -z "$app_author" ] || [[ "$app_author" =~ ^(app/)?[A-Za-z0-9][A-Za-z0-9-]*$ ]] \
+  || usage_error "--app-author must be a login or app/<slug>, not $app_author"
+
+# setting <key>: the value --set gave, or nothing.
+setting() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" != "$1="* ]] || { printf '%s' "${line#*=}"; return 0; }
+  done <<< "$sets"
+}
+module() { [[ ",$modules," == *",$1,"* ]]; }
+# config_text <app author> <state dir>: the project's config file.
+config_text() {
+  printf '# Written by bin/provision-project; bin/README.md (Configuration) describes each setting.\n'
+  printf 'REPO=%s\nCHECKOUT=%s\nAPP_AUTHOR=%s\n' "$repo" "$checkout" "$1"
+  [ -n "$(setting STATE_DIR)" ] || printf 'STATE_DIR=%s\n' "$2"
+  [ -z "$modules" ] || printf 'MODULES=%s\n' "$modules"
+  [ -z "$sets" ] || printf '%s\n' "$sets"
+}
+# The settings go through config.sh's own reader before anything changes, so a config this writes is one the scripts
+# accept. An APP_AUTHOR not given yet is checked once it is read from GitHub.
+[ -z "$checkout" ] || check_place "triphammer add" "$repo" "$checkout"
+scratch="$(mktemp)"
+checkout_given="$checkout"
+checkout="${checkout:-/srv/checked-later}"
+config_text "${app_author:-app/example}" /nonexistent/state > "$scratch"
+checkout="$checkout_given"
+if ! problem="$( (
+    export TRIPHAMMER_CONFIG="$scratch"
+    unset TRIPHAMMER_PROJECT
+    load_config "$prog" /
+    # shellcheck disable=SC2154  # set by load_config
+    for name in $cfg_modules; do
+      # shellcheck disable=SC2086  # the settings are words
+      module_needs "$prog" "$name" ${module_needs[$name]}
+    done
+  ) 2>&1)"; then
+  rm -f "$scratch"
+  usage_error "$repo: ${problem//"$prog: $scratch"/its settings}"
+fi
+rm -f "$scratch"
+
+read_machine
+if [ -z "$checkout" ]; then
+  if [ "${repo,,}" = "${tri_repo,,}" ]; then checkout="$tri_checkout"; else checkout="/srv/${repo#*/}"; fi
+fi
+check_place "triphammer add" "$repo" "$checkout"
+if [ "$checkout" = "$tri_checkout" ] && [ "${repo,,}" != "${tri_repo,,}" ]; then
+  usage_error "$repo would use Triphammer's checkout $tri_checkout, which holds $tri_repo"
+fi
+
+check_ubuntu
+user_exists || fail "the user $user that $machine_file names does not exist; run bin/provision again"
+home="$(getent passwd "$user" | cut -d: -f6)"
+app_dir="$home/.config/github-app"
+
+# Another config on this machine for the same checkout but another repository is the owner's to sort out.
+configs="$home/.config/triphammer"
+for other in "$configs"/*.conf; do
+  [ -f "$other" ] || continue
+  if grep -qxF "CHECKOUT=$checkout" "$other" && ! grep -qixF "REPO=$repo" "$other"; then
+    fail "$other already uses the checkout $checkout for another repository; give another checkout"
+  fi
+done
+[ "$checkout" = "$tri_checkout" ] || checkout_state "$repo" "$checkout" >/dev/null
+
+# APP_AUTHOR: as given, or the App's slug, read with a copy of the github-app-token beside this script, as the user,
+# from the App's files.
+if [ -z "$app_author" ]; then
+  slug=""
+  if bootstrap_helper && slug="$(as_user "$bootstrap/github-app-token" app-slug 2> "$bootstrap/error")"; then
+    app_author="app/$slug"
+    note "APP_AUTHOR: app/$slug, the App's slug"
+  else
+    why="$(tail -n 1 "$bootstrap/error" 2>/dev/null || true)"
+    fail "no --app-author is given, and the App's slug could not be read${why:+ (${why#github-app-token: })}; place app-id and agents.pem in $app_dir, or give --app-author app/<slug>"
+  fi
+fi
+
+extras=()
+! module codex || extras+=(bubblewrap apparmor)
+! module demo || extras+=(ffmpeg)
+[ ${#extras[@]} -eq 0 ] || apt_install "${extras[@]}"
+
+# The identity the user's commits carry, from APP_AUTHOR, unless one is set already: an App's bot account
+# (app/<slug> commits as <slug>[bot]) or the account itself, each at its GitHub noreply address.
+git_name="${app_author#app/}"
+[ "$git_name" = "$app_author" ] || git_name="${git_name}[bot]"
+for key in user.name user.email; do
+  value="$git_name"
+  [ "$key" = user.name ] || value="$git_name@users.noreply.github.com"
+  if [ -z "$(as_user git config --global --get "$key" 2>/dev/null || true)" ]; then
+    change "set git's $key for $user to $value" as_user git config --global "$key" "$value" \
+      || fail "could not set git's $key"
+  fi
+done
+
+[ "$checkout" = "$tri_checkout" ] || clone "$repo" "$checkout"
+
+# What the checkout pins, read as the user: the project's name and the toolchain versions.
+name=""
+sdk_pins=() playwright_pins=()
+add_pin() {
+  local -n pins="$1"
+  [[ " ${pins[*]} " == *" $2 "* ]] || pins+=("$2")
+}
+if cloned "$repo" "$checkout"; then
+  name="$(as_user bash -c 'source "$1/bin/config.sh" && check_project provision-project "$2" && project_get "$2" name' \
+    _ "$tri_checkout" "$checkout")" || fail "$checkout has no valid .triphammer/project.json"
+  [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "$checkout: the project name $name may not start with a dot"
+  config="$configs/$name.conf"
+  if [ -f "$config" ] && ! grep -qixF "REPO=$repo" "$config"; then
+    fail "$config is the config of another repository named $name; remove it, or rename one of the projects"
+  fi
+
+  if as_user test -f "$checkout/.node-version"; then
+    pin="$(as_user cat "$checkout/.node-version" | tr -d '[:space:]')" pin="${pin#v}"
+    [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "$checkout/.node-version pins no version major.minor.patch"
+    have="$("$node_bin/node" --version 2>/dev/null || true)"
+    [ "$have" = "v$pin" ] || fail "$checkout pins Node $pin, and the machine's Node is ${have:-missing}; one Node is on the units' PATH, the version Triphammer's checkout pins"
+  fi
+  if as_user test -f "$checkout/global.json"; then
+    pin="$(as_user jq -r '.sdk.version // empty' "$checkout/global.json")" || fail "$checkout/global.json is not JSON"
+    if [ -n "$pin" ]; then
+      [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || fail "$checkout/global.json pins $pin, not an SDK version"
+      add_pin sdk_pins "$pin"
+    fi
+  fi
+  while IFS= read -r manifest; do
+    [ -n "$manifest" ] || continue
+    dir="$(dirname "$checkout/$manifest")"
+    pin="$(as_user jq -r '(.devDependencies // {}) + (.dependencies // {}) | .["@playwright/test"] // .playwright // empty' \
+      "$checkout/$manifest")" || fail "$checkout/$manifest is not JSON"
+    [ -n "$pin" ] || continue
+    if ! [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && as_user test -f "$dir/package-lock.json"; then
+      pin="$(as_user jq -r '.packages["node_modules/@playwright/test"].version // .packages["node_modules/playwright"].version // empty' \
+        "$dir/package-lock.json")"
+    fi
+    [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "$checkout/$manifest asks for Playwright $pin; pin one version or lock it"
+    add_pin playwright_pins "$pin"
+  done < <(as_user git -C "$checkout" ls-files -- '*package.json')
+else
+  note "the project's name and toolchain versions come from its checkout, which is not cloned yet; a real run reads them after cloning"
+fi
+
+# The .NET SDKs, through dotnet-install into the user's ~/.dotnet.
+for pin in "${sdk_pins[@]}"; do
+  if as_user "$home/.dotnet/dotnet" --list-sdks 2>/dev/null | grep -q "^${pin//./\\.} "; then continue; fi
+  change "install the .NET SDK $pin into $home/.dotnet with dotnet-install" as_user bash -c \
+    'set -e; d="$(mktemp -d)"; trap "rm -rf \"\$d\"" EXIT
+     curl -fsSL --max-time 120 -o "$d/dotnet-install.sh" https://dot.net/v1/dotnet-install.sh
+     bash "$d/dotnet-install.sh" --version "$1" --install-dir "$HOME/.dotnet" --no-path' _ "$pin" \
+    || fail "dotnet-install could not install the .NET SDK $pin"
+done
+# The units put no project's toolchain on PATH; this drop-in adds the SDKs above for every project's sessions.
+if [ ${#sdk_pins[@]} -gt 0 ]; then
+  before="$changes"
+  user_file "$home/.config/systemd/user/ticket-runner@.service.d/dotnet.conf" 644 '[Service]
+Environment=PATH=%h/.local/bin:%h/.dotnet:%h/.dotnet/tools:/usr/local/bin:/usr/bin:/bin
+Environment=DOTNET_ROOT=%h/.dotnet
+'
+  [ "$changes" -eq "$before" ] || reload_units
+fi
+
+if module codex && ! as_user "$home/.local/bin/codex" --version >/dev/null 2>&1; then
+  change "install Codex for $user into $home/.local with npm" as_user npm install -g -q --prefix "$home/.local" @openai/codex \
+    || fail "npm could not install Codex"
+fi
+
+# Playwright's Chromium at each pinned version, then the libraries it needs: Playwright's own install-deps, or, on a
+# release it does not know, Chromium's libraries from Ubuntu's archive. Either way Chromium must then start headless.
+chromium_libraries=(libasound2t64 libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64
+  libdbus-1-3 libdrm2 libgbm1 libglib2.0-0t64 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 libxcomposite1
+  libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 libfontconfig1 libfreetype6 fonts-liberation
+  fonts-noto-color-emoji)
+# browser_dirs <version>: the directories Playwright installs Chromium into, one per line.
+browser_dirs() {
+  as_user npx -y "playwright@$1" install --dry-run chromium 2>/dev/null | sed -n 's/^ *Install location: *//p'
+}
+browsers_complete() {
+  local dir dirs
+  dirs="$(browser_dirs "$1")" || return 1
+  [ -n "$dirs" ] || return 1
+  while IFS= read -r dir; do as_user test -f "$dir/INSTALLATION_COMPLETE" || return 1; done <<< "$dirs"
+}
+# chromium_starts <version>: every Chromium of that version prints a blank page headless, as Playwright runs it.
+chromium_starts() {
+  local dir browser found=""
+  while IFS= read -r dir; do
+    for browser in "$dir"/chrome-linux*/chrome "$dir"/chrome-headless-shell-linux*/chrome-headless-shell; do
+      [ -x "$browser" ] || continue
+      found=1
+      as_user timeout 60 "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>/dev/null \
+        | grep -q '<html' || return 1
+    done
+  done < <(browser_dirs "$1")
+  [ -n "$found" ]
+}
+install_deps() {
+  PATH="$node_bin:$PATH" "$node_bin/npx" -y "playwright@$1" install-deps chromium && return 0
+  note "Playwright's install-deps does not support this release; installing Chromium's libraries from Ubuntu's archive"
+  apt_run "${chromium_libraries[@]}"
+}
+for pin in "${playwright_pins[@]}"; do
+  if ! browsers_complete "$pin"; then
+    change "install Playwright $pin's Chromium for $user" as_user npx -y "playwright@$pin" install chromium \
+      || fail "Playwright $pin could not install Chromium"
+  fi
+  if ! chromium_starts "$pin"; then
+    change "install the system libraries Playwright $pin's Chromium needs" install_deps "$pin" \
+      || fail "could not install Chromium's libraries"
+    [ -n "$dry_run" ] || chromium_starts "$pin" \
+      || fail "Playwright $pin's Chromium still does not start headless; run triphammer doctor for the details"
+  fi
+done
+
+# The project's config file.
+if [ -n "$name" ]; then
+  user_file "$config" 600 "$(config_text "$app_author" "$home/.local/state/triphammer/projects/$name")"$'\n'
+else
+  change "write the config file of $repo, named after its project file, once it is cloned" true
+fi
+
+# bwrap's user namespaces, for Codex's sandbox: Ubuntu restricts them with AppArmor, which this profile lifts for
+# /usr/bin/bwrap alone. A profile at that path that is not this script's is left alone.
+if module codex; then
+  profile="$root/etc/apparmor.d/bwrap"
+  marker="# Triphammer's provision: lets bwrap, Codex's sandbox, create user namespaces (bin/README.md)."
+  text="$marker
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+"
+  loaded=""
+  if [ -e "$profile" ] && ! grep -qxF -- "$marker" "$profile"; then
+    note "AppArmor: leaving $profile alone, as it is not provision's"
+  elif ! same_root_file "$profile" 644 "$text"; then
+    root_file "$profile" 644 "$text"
+    change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+    loaded=1
+  fi
+  userns() { as_user bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1; }
+  if [ -z "$dry_run" ] && ! userns; then
+    if [ -z "$loaded" ] && grep -qxF -- "$marker" "$profile" 2>/dev/null; then
+      change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+    fi
+    userns || fail "bwrap still cannot create a user namespace as $user, which Codex's sandbox needs; check $profile and the kernel's apparmor_restrict_unprivileged_userns"
+  fi
+fi
+
+summary
+steps=()
+! module qwen-audit || steps+=("Put the Qwen server's API key in $(setting QWEN_KEY_FILE), owned by $user and mode 600.")
+! module codex || steps+=("Log Codex in: sudo -iu $user codex login.")
+if [ ${#steps[@]} -gt 0 ]; then
+  echo
+  echo "Next, as the owner (provision-project never reads or writes a credential):"
+  for i in "${!steps[@]}"; do echo "  $((i + 1)). ${steps[$i]}"; done
+fi
+echo "project: ${name:-<named once cloned>}"

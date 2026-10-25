@@ -1,84 +1,135 @@
 # Triphammer
 
-Triphammer runs Claude Code agents unattended against a GitHub repository's issues. A timer takes the next ready
-issue, starts a fresh headless session in a worktree of its own, and the session builds the change, reviews it with
-independent agents, opens a pull request and lands it by the project's rules. Changes the rules allow merge when the
-checks pass. The rest wait for the owner's approval. The owner steers with issues and labels and stops it with
-brakes.
+Triphammer works through a GitHub repository's issues with Claude Code, unattended. Every ten minutes it picks the
+next ready issue and starts a headless session in a fresh worktree. The session writes the change, has other agents
+review it, opens a pull request and merges it if the project's rules allow. Anything the rules don't allow waits for
+your approval.
 
-It is a Claude Code plugin (the skills, agents and guard hooks), a set of bash scripts and systemd user units, and a
-small read-only status page.
+You steer it with issues and labels, and it keeps going until you stop it.
 
-## How it works
+## Requirements
 
-- **Work comes from issues.** The runner takes every open issue opened by the owner or the agents' GitHub App whose
-  dependencies are closed. An issue says what it waits for at the start of a line: `Depends on #N.` or
-  `Slice k of #N.` (slice k waits for slice k-1). The `next` label puts a ready issue first.
-- **One session per tick.** Every ten minutes `ticket-runner` updates its own checkout, then does one thing: close a
-  finished parent issue, repair an agent pull request the owner asked changes on, start a session on the next ready
-  issue, or run the weekly upkeep issue. `ticket-runner --plan` prints what the next tick would do.
-- **Review before a pull request.** The session runs the project's checks, has independent reviewer agents check the
-  diff against the issue and a checklist of defect classes, and iterates. After three rounds that each find a blocking
-  problem, it stops and labels the issue `needs-owner`.
-- **Merging is data.** `.triphammer/risk-tier.json` in the project decides, by the paths a change touches, whether it
-  merges automatically, escalates to the owner or is blocked. CI runs the base branch's classifier with the base
-  branch's rules, so a pull request cannot loosen its own tier. `merge-when-ready` is a serial merge queue that brings
-  armed pull requests up to date and merges them one at a time.
-- **Brakes, not go.** The pipeline runs by default. The owner stops it with `hold` or `needs-owner` on an issue or
-  pull request, a `stop-agents` issue, or a stop file on the machine, and the brakes also stop a session that is already
-  running.
-- **Guard hooks.** `agent-guard.py` refuses shell commands and file writes that could escape a run or install
-  persistence on the machine. In the sessions Triphammer starts, writes are allowed only inside the run's worktree and the
-  temporary directories. `text-lint.py` checks pull request, issue and commit text. Each hook's header lists its rules
-  and what it does not cover.
+- An Ubuntu server for Triphammer alone, such as a VM. A project with a full build, a database per worktree and
+  browser tests needs 4 to 8 vCPUs, 16 GB of memory and 100 GB of disk. A lighter project needs less.
+- A GitHub App for the agents, installed on each account that owns one of your repositories. Give it read and write
+  access to contents, issues and pull requests, and nothing else. Without the workflows or administration
+  permissions, the agents can't change your CI or your branch rules.
+- A Claude account for Claude Code.
 
-## What a project provides
+## Install
 
-A project that Triphammer serves keeps its own data in `.triphammer/`:
+Setting up takes three steps on the server, as a user who can run `sudo`.
 
-- `project.json`: its name, its check commands (`build`, `focused`, `suite`, `gate`), its own review checklist and
-  review skills, the skill that verifies UI changes, the command that tears down a worktree's resources, and the paths
-  that get a security review. See `bin/README.md`, The project file.
-- `risk-tier.json`: the ordered rules that decide each path's tier. See `plugins/triphammer/skills/merge-policy/`.
+First, set up the machine:
 
-Its `AGENTS.md` names the project's own rules. The generic skills read the project's data, so nothing in Triphammer
-names a project.
+```sh
+curl -fsSL https://raw.githubusercontent.com/TreyThomasDotCodes/triphammer/main/install.sh | bash
+```
 
-## What the machine configures
+This installs git, Docker, Node, the GitHub CLI and Claude Code, creates a `triphammer` user and clones Triphammer to
+`/srv/triphammer`. It asks for your password once. You can run it again at any time, since it only changes what isn't
+right yet. To see what it would do without doing it, end the line with `bash -s -- --dry-run` instead.
 
-Run Triphammer on a machine of its own, such as a VM that holds only Triphammer's credentials: the agents can then
-reach nothing of yours. `bin/provision` sets one up from a fresh Ubuntu server. Each project gets a config file,
-`~/.config/triphammer/<project>.conf`, with `REPO`, `CHECKOUT`, `APP_AUTHOR` and `STATE_DIR`, and its own pair of
-template timers, `ticket-runner@<project>.timer` and `merge-when-ready@<project>.timer`. Several projects on one
-machine take turns. Credentials stay in files the config names, never in the config. `bin/README.md` covers
-configuration, install, provisioning and self-update.
+Second, place the credentials. The installer never reads or writes one, so you put each in place by hand:
 
-The agents reach GitHub as a GitHub App with contents, pull requests and issues write and no workflows or
-administration permission, so they cannot change CI or the repository's rules. The required checks (`closing-issue`,
-`owner-approval` and the project's tests) come from workflows only the owner changes.
+1. The App's ID, account and private key go in `/home/triphammer/.config/github-app/` as `app-id`, `owner` and
+   `agents.pem`, each owned by `triphammer` with mode 600.
+2. Log Claude Code in with `sudo -iu triphammer claude auth login`.
+
+Third, add each repository you want served, then start it:
+
+```sh
+triphammer add <owner>/<repo>
+triphammer start <project>
+```
+
+`triphammer add` clones the repository to `/srv/<repo>`, installs the toolchains it pins, writes its config and runs the
+doctor, which lists anything still missing and how to fix it. `triphammer start` turns on its timers.
+
+[`bin/README.md`](bin/README.md) covers every option, the configuration, and running Triphammer on a machine you also
+use for other things.
+
+## Set up a project
+
+A project describes itself in two files in its own repository:
+
+- `.triphammer/project.json` names the project and the commands that build and test it. It can also name a review
+  checklist, extra review skills and a skill that checks UI changes.
+- `.triphammer/risk-tier.json` decides, from the paths a change touches, whether the change merges by itself, waits
+  for your approval or is refused. CI reads these rules from the base branch, so a pull request can't loosen its own.
+
+Then protect the default branch with three required checks: `closing-issue`, `owner-approval` and your tests. Copy
+[`.github/workflows/risk-tier.yml`](.github/workflows/risk-tier.yml) into the project for the first two. If an
+organization owns the repository, set the variable `TRIPHAMMER_OWNER` to your own login, on the repository or the
+organization.
+
+The Configuration section of [`bin/README.md`](bin/README.md#configuration) lists every field.
+
+## Day to day
+
+Write an issue. Triphammer takes any open issue that you or the App opened, once the issues it depends on are closed.
+Say what an issue waits for on a line of its own:
+
+```text
+Depends on #12.
+Slice 2 of #10.
+```
+
+A slice waits for the slice before it. The `next` label moves a ready issue to the front of the queue.
+
+To stop work:
+
+- Label an issue or pull request `hold` or `needs-owner`. A session already working on it stops as well.
+- Open an issue labelled `stop-agents` to stop that project.
+- Create a file named `stop` in `~/.local/state/triphammer/` as the `triphammer` user to stop every project on the
+  machine.
+
+A session that has been through three review rounds, each with a blocking problem, labels its issue `needs-owner` and
+explains what it needs from you.
+
+To see what it's doing:
+
+```sh
+triphammer plan     # what the next tick would do
+triphammer doctor   # what's missing or wrong on the machine
+```
+
+With more than one project, name the one you mean, as in `triphammer plan <project>`.
+
+The status page lists what's waiting on you, then the current run, log, recent runs and queue of each project. It
+listens on `127.0.0.1:8787`. [`status/README.md`](status/README.md) explains how to reach it safely from another
+machine.
 
 ## Optional modules
 
-Off unless a project's config names them in `MODULES`:
+These are off unless a project's config lists them in `MODULES`, which `triphammer add --modules` sets:
 
-- `demo`: sessions that change a web UI record a paced walkthrough, which the runner publishes to a static gallery.
-- `qwen-audit`: the weekly upkeep audit also runs with a local model behind an Anthropic Messages API server, as a
-  second model family.
-- `codex`: upkeep's Codex audit, a monthly security audit, and an advisory security review of each pull request that
-  touches Triphammer's own machinery, with a weekly cap.
+- `demo` records a walkthrough of each web UI change and publishes it to a small gallery.
+- `qwen-audit` repeats the weekly audit with a local model behind an Anthropic Messages API server, for a second
+  opinion.
+- `codex` adds Codex to the weekly audit, runs a monthly security audit, and posts an advisory security review on pull
+  requests that touch Triphammer's own code.
 
-## Install the plugin
+## Use only the plugin
+
+The skills, agents and guard hooks are a Claude Code plugin, and they work in an interactive session too:
 
 ```sh
-claude plugin marketplace add <owner>/triphammer
+claude plugin marketplace add TreyThomasDotCodes/triphammer
 claude plugin install triphammer@triphammer --scope user
 ```
 
-## Tests
+The guard hooks refuse commands that would install anything lasting on the machine. In sessions Triphammer starts,
+they also allow writes only inside the session's worktree and the temporary directories.
+
+## Development
 
 ```sh
 npm run test:tooling
 ```
+
+The tests use fakes for `gh`, `claude`, `docker`, `curl` and the package tools, so they need no network and no
+credentials. [`AGENTS.md`](AGENTS.md) has the rules for changes, including the ones Triphammer makes to itself.
 
 ## License
 

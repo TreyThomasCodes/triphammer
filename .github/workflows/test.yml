@@ -25,5 +25,5 @@ jobs:
         run: npm run test:tooling
       - name: shellcheck
         run: |
-          mapfile -t scripts < <(grep -lE '^#!.*\b(bash|sh)\b' bin/* scripts/* scripts/git-hooks/* .github/scripts/* 2>/dev/null)
+          mapfile -t scripts < <(grep -lE '^#!.*\b(bash|sh)\b' install.sh bin/* scripts/* scripts/git-hooks/* .github/scripts/* 2>/dev/null)
           shellcheck -x -S warning "${scripts[@]}"

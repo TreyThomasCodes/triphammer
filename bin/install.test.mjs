@@ -1,0 +1,110 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {git, here, lines} from './fixture.mjs';
+import {readdir} from './provision-fixture.mjs';
+
+const script = join(here, '..', 'install.sh');
+
+// A repository at <base>/example-owner/triphammer.git whose bin/provision records its arguments, whether sudo ran it
+// and the directory it ran from, one line each, on `main`; on a branch `other` it records `other` first, and on `fails`
+// it exits 3. A fake `id` answers `uid`, and a fake `sudo` records its arguments and runs the rest.
+function setup(t, uid = '1000') {
+  const dir = mkdtempSync(join(tmpdir(), 'install-'));
+  t.after(() => rmSync(dir, {recursive: true, force: true}));
+  const record = join(dir, 'provision.log');
+  const sudoLog = join(dir, 'sudo.log');
+  const source = join(dir, 'source');
+  mkdirSync(join(source, 'bin'), {recursive: true});
+  const provision = extra => `#!/usr/bin/env bash\n${extra}printf '%s\\n' "$@" >> '${record}'\n`
+    + `echo "\${UNDER_SUDO:-no}" >> '${record}.sudo'\n`
+    + `dirname "$(dirname "$(readlink -f "$0")")" >> '${record}.dir'\n`;
+  writeFileSync(join(source, 'bin/provision'), provision(''), {mode: 0o755});
+  git(source, 'init', '-q', '-b', 'main');
+  git(source, 'add', '-A');
+  git(source, 'commit', '-q', '-m', 'main');
+  git(source, 'switch', '-q', '-c', 'other');
+  writeFileSync(join(source, 'bin/provision'), provision(`echo other >> '${record}'\n`), {mode: 0o755});
+  git(source, 'commit', '-q', '-am', 'other');
+  git(source, 'switch', '-q', '-c', 'fails', 'main');
+  writeFileSync(join(source, 'bin/provision'), '#!/usr/bin/env bash\nexit 3\n', {mode: 0o755});
+  git(source, 'commit', '-q', '-am', 'fails');
+  git(source, 'switch', '-q', 'main');
+  const base = join(dir, 'base');
+  mkdirSync(join(base, 'example-owner'), {recursive: true});
+  git(dir, 'clone', '-q', '--bare', source, join(base, 'example-owner/triphammer.git'));
+  const bin = join(dir, 'fakes');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'id'), `#!/bin/sh\necho ${uid}\n`, {mode: 0o755});
+  writeFileSync(join(bin, 'sudo'), `#!/bin/sh\necho "$*" >> '${sudoLog}'\n[ "$1" = -v ] && exit 0\nUNDER_SUDO=yes exec "$@"\n`,
+    {mode: 0o755});
+  const tmp = join(dir, 'tmp');
+  mkdirSync(tmp);
+  const env = {PATH: `${bin}:${process.env.PATH}`, HOME: dir, TMPDIR: tmp, TRIPHAMMER_REPO: 'example-owner/triphammer',
+    TRIPHAMMER_INSTALL_GIT_BASE: `file://${base}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1'};
+  return {record, sudoLog, env, tmp};
+}
+
+// Runs the script as `curl ... | bash -s -- <args>` does, from standard input.
+const piped = (env, args, input = readFileSync(script, 'utf8')) =>
+  spawnSync('bash', ['-s', '--', ...args], {input, env, encoding: 'utf8'});
+
+test("an ordinary user's run asks sudo once, then runs provision as root with Triphammer's repository at /srv/triphammer first", t => {
+  const {record, sudoLog, env} = setup(t);
+  const result = piped(env, ['--user', 'triphammer']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /sudo asks for your password once/);
+  const sudo = lines(sudoLog);
+  assert.equal(sudo[0], '-v');
+  assert.match(sudo[1], /^bash .*\/triphammer\/bin\/provision --triphammer example-owner\/triphammer \/srv\/triphammer --user triphammer$/);
+  assert.equal(sudo.length, 2);
+  assert.deepEqual(lines(record), ['--triphammer', 'example-owner/triphammer', '/srv/triphammer', '--user', 'triphammer']);
+  assert.deepEqual(lines(`${record}.sudo`), ['yes']);
+});
+
+test('root runs provision without sudo', t => {
+  const {record, sudoLog, env} = setup(t, '0');
+  const result = piped(env, []);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(lines(sudoLog), []);
+  assert.deepEqual(lines(`${record}.sudo`), ['no']);
+  assert.doesNotMatch(result.stdout, /sudo asks/);
+});
+
+test('a --triphammer given is passed on as it is, and nothing is added', t => {
+  const {record, env} = setup(t);
+  const args = ['--triphammer', 'example-owner/fork', '/opt/t', '--dry-run'];
+  const result = piped(env, args);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(lines(record), args);
+});
+
+test('provision runs from a clone of TRIPHAMMER_REF, which is gone once it ends', t => {
+  const {record, env, tmp} = setup(t);
+  const result = piped({...env, TRIPHAMMER_REF: 'other'}, ['--dry-run']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(lines(record)[0], 'other');
+  const [ran] = lines(`${record}.dir`);
+  assert.ok(ran.startsWith(tmp), ran);
+  assert.deepEqual(readdir(tmp), []);
+});
+
+test("provision's exit status is the script's, and the clone is removed all the same", t => {
+  const {env, tmp} = setup(t);
+  const result = piped({...env, TRIPHAMMER_REF: 'fails'}, ['--dry-run']);
+  assert.equal(result.status, 3);
+  assert.deepEqual(readdir(tmp), []);
+});
+
+test('a download cut short before the last line runs nothing', t => {
+  const {record, sudoLog, env} = setup(t);
+  const cut = readFileSync(script, 'utf8').replace(/\nmain "\$@"\n$/, '\n');
+  assert.notEqual(cut, readFileSync(script, 'utf8'));
+  const result = piped(env, ['--dry-run'], cut);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(lines(record), []);
+  assert.deepEqual(lines(sudoLog), []);
+});

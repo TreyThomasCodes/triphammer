@@ -384,3 +384,39 @@ test('an account that is not a login fails closed before any request', t => {
     assert.deepEqual(r.calls(), []);
   }
 });
+
+test("app-slug prints the App's slug from GET /app, signed with the App's JWT, and needs no owner file or cache", t => {
+  const r = appSetup(t, {[`GET ${api}`]: {stdout: JSON.stringify({id: 12345, slug: 'example-agents', name: 'Example agents'})}});
+  rmSync(join(r.config, 'owner'));
+  const result = r.token(['app-slug']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'example-agents\n');
+  const calls = r.calls();
+  assert.deepEqual(calls.map(call => `${call.method} ${call.url}`), [`GET ${api}`]);
+  assert.ok(calls[0].headers.some(header => /^Authorization: Bearer [\w-]+\.[\w-]+\.[\w-]+$/.test(header)));
+  assert.ok(!calls[0].args.some(arg => arg.includes('Bearer')), "the JWT reached curl's arguments");
+  assert.equal(existsSync(join(r.cache, '..')), false);
+});
+
+for (const [what, response, message] of [
+  ['a failed request', {stderr: 'curl: (22) 401\n', exit: 22}, /reading the App failed \(GET https:\/\/api\.github\.com\/app\)/],
+  ['an answer without a slug', {stdout: JSON.stringify({id: 12345})}, /GitHub's answer for the App had no slug/],
+  ['a slug that is not a login', {stdout: JSON.stringify({slug: 'two words'})}, /GitHub's answer for the App had no slug/],
+]) {
+  test(`app-slug with ${what} exits 1 and prints nothing`, t => {
+    const r = appSetup(t, {[`GET ${api}`]: response});
+    const result = r.token(['app-slug']);
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, message);
+  });
+}
+
+test("app-slug without the App's key names the missing file and calls nothing", t => {
+  const r = appSetup(t);
+  rmSync(r.key);
+  const result = r.token(['app-slug']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /agents\.pem is missing/);
+  assert.deepEqual(r.calls(), []);
+});
