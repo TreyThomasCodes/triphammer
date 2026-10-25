@@ -10,6 +10,7 @@ const sentinel = 'SENTINEL-CREDENTIAL-CONTENT-4c1f';
 const qwenUrl = 'http://model.example.invalid:8080';
 const dotNetDropIn = '[Service]\nEnvironment=PATH=%h/.local/bin:%h/.dotnet:%h/.dotnet/tools:/usr/local/bin:/usr/bin:/bin\n'
   + 'Environment=DOTNET_ROOT=%h/.dotnet\n';
+const repoLabels = ['agent-working', 'bug', 'Hold', 'needs-owner', 'next', 'stop-agents', 'upkeep'];
 const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rollForward, allowPrerelease: false}});
 
 // A machine whose checkout has this branch's doctor and ticket-runner@.service, a global.json pinning 10.0.400
@@ -19,8 +20,9 @@ const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rol
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
 // `bin`) and ~/.dotnet (a fake dotnet), fake node, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
 // in), codex, curl (QWEN_BASE_URL answers), gh (acting as the App) and docker (Compose v2) in `bin`, the App's files and
-// a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, and a Playwright Chromium
-// that starts headless. `doctor` runs `ticket-runner --doctor` and returns its status
+// a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
+// that starts headless, and a repository that has every label Triphammer uses (`repoLabels`, as gh label list prints
+// them). `doctor` runs `ticket-runner --doctor` and returns its status
 // and output.
 function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
   const r = runnerSetup(t, {
@@ -33,6 +35,7 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     },
   });
   const bin = r.gh.bin;
+  r.gh.respond({'label list': {stdout: `${repoLabels.join('\n')}\n`}});
   const home = join(r.root, 'home');
   for (const dir of ['.dotnet', '.local']) mkdirSync(join(home, dir), {recursive: true});
   symlinkSync(bin, join(home, '.local/bin'));
@@ -105,7 +108,8 @@ test('a healthy machine passes, and the doctor starts no tick', t => {
   assert.equal(result.status, 0, result.output);
   assert.equal(result.output, 'all good\n');
   assert.equal(existsSync(join(r.root, 'state/ticket-runner')), false, 'the doctor created the runner state');
-  assert.deepEqual(r.gh.calls(), [['--version'], ['api', 'installation/repositories', '--jq', '.total_count']]);
+  assert.deepEqual(r.gh.calls(), [['--version'], ['api', 'installation/repositories', '--jq', '.total_count'],
+    ['label', 'list', '-R', 'Example-Owner/example-project', '--limit', '1000', '--json', 'name', '--jq', '.[].name']]);
   const units = lines(join(r.root, 'systemctl/calls')).map(line => JSON.parse(line).at(-1));
   assert.deepEqual(units, ['ticket-runner@triphammer.timer', 'merge-when-ready@triphammer.timer']);
 });
@@ -312,6 +316,27 @@ test('gh that does not act as the App is reported', t => {
   const r = doctorSetup(t);
   r.gh.respond({'api installation/repositories': {exit: 1, stderr: 'HTTP 403\n'}});
   assertOneProblem(r.doctor(), /^gh does not act as the agents' GitHub App.*Fix: link bin\/gh and github-app-token/);
+  assert.ok(!r.gh.calls().some(call => call[0] === 'label'), 'the labels were looked up without the App');
+});
+
+test('each label Triphammer uses that the repository lacks is reported, with triphammer add as the fix', t => {
+  const r = doctorSetup(t);
+  r.gh.respond({'label list': {stdout: 'bug\nnext\nAgent-Working\n'}});
+  const result = r.doctor();
+  assert.equal(result.status, 1, result.output);
+  assert.deepEqual(result.problems, ['hold', 'needs-owner', 'stop-agents'].map(name =>
+    `Example-Owner/example-project has no label ${name}, which Triphammer reads or sets. Fix: run triphammer add `
+    + 'Example-Owner/example-project again, with the options it was added with (bin/README.md, Labels)'));
+  assert.match(result.output, /^3 problem\(s\) found$/m);
+  r.gh.respond({'label list': {stdout: ''}});
+  assert.equal(r.doctor().problems.length, 5);
+});
+
+test('labels that cannot be listed are reported, not passed', t => {
+  const r = doctorSetup(t);
+  r.gh.respond({'label list': {exit: 1, stderr: 'HTTP 404\n'}});
+  assertOneProblem(r.doctor(),
+    /^gh label list fails for Example-Owner\/example-project, so the labels Triphammer uses were not checked\. Fix: install the agents' GitHub App/);
 });
 
 test('Claude Code that is not logged in is reported', t => {

@@ -43,9 +43,9 @@ triphammer add <owner>/<repo>
 triphammer start <project>
 ```
 
-`triphammer add` clones the repository to `/srv/<repo>`, installs the toolchains it pins, writes its config and runs the
-doctor, which lists anything still missing and how to fix it, but for the timers. `triphammer start` turns on its
-timers.
+`triphammer add` clones the repository to `/srv/<repo>`, installs the toolchains it pins, writes its config, creates the
+labels Triphammer uses that the repository lacks and runs the doctor, which lists anything still missing and how to fix
+it, but for the timers. `triphammer start` turns on its timers.
 
 [`bin/README.md`](bin/README.md) covers every option, the configuration, and running Triphammer on a machine you also
 use for other things.
