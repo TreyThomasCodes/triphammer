@@ -45,8 +45,7 @@ export const readdir = path => run('ls', ['-A', path]).split('\n').filter(Boolea
 // With `privateOrigins`, a fake git clones only when git's credential helpers give github.com credentials, and GitHub's
 // App API answers github-app-token for the installation on `example`. `provision` and `project` run the branch's
 // bin/provision and bin/provision-project on it (`projectFrom` from a working directory given; the fake npx records its
-// own in npx-cwds); `placeApp` puts App files with a fresh key in the user's
-// ~/.config/github-app.
+// own in npx-cwds); `placeApp` puts App files with a fresh key in the user's ~/.config/github-app.
 export function machine(t, origins, {dockerRepo = true, ghRepo = true, privateOrigins = false} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'provision-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));

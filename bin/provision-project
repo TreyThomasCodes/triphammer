@@ -22,9 +22,8 @@
 #
 # It runs from / whatever the caller's directory, so no command root runs picks up files the service user can write
 # there (npx, for one, prefers a local node_modules/.bin and reads a project's .npmrc). It never reads or writes a
-# credential's value. Every argument is checked before anything changes; an unknown flag or
-# a bad value exits 2 with the usage. A step that fails exits 1 naming it. --dry-run prints each change it would make
-# (`would: ...`) and makes none.
+# credential's value. Every argument is checked before anything changes; an unknown flag or a bad value exits 2 with the
+# usage. A step that fails exits 1 naming it. --dry-run prints each change it would make (`would: ...`) and makes none.
 #
 # Tests (provision-project.test.mjs) run it with fakes of the package and account tools first on PATH
 # (bin/provision-lib.sh).
