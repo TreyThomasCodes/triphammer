@@ -710,8 +710,9 @@ triphammer add <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<o
 
 `triphammer add` asks sudo for the password once, clones Triphammer's repository (from the machine file) into a
 temporary directory as the caller, runs that clone's `provision-project` as root and removes the clone, so root never
-runs code from the checkout the service user can write. It then runs the doctor for the project with `--before-start`, which leaves out
-the units `start` enables and says so (Doctor), and prints the command that starts it.
+runs code from the checkout the service user can write. It then runs the doctor for the project with
+`--before-start`, which leaves out the units `start` enables and says so (Doctor), and prints the command that starts
+it.
 
 | `provision-project` argument | What it is |
 | --- | --- |

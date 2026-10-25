@@ -13,8 +13,9 @@ const dotNetDropIn = '[Service]\nEnvironment=PATH=%h/.local/bin:%h/.dotnet:%h/.d
 const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rollForward, allowPrerelease: false}});
 
 // A machine whose checkout has this branch's doctor and ticket-runner@.service, a global.json pinning 10.0.400
-// (`rollForward`) and a package.json asking for Node >=24.19.0 <25 and pinning Playwright 1.63.0, on a machine where everything the doctor checks is
-// right: HOME and XDG_CONFIG_HOME (HOME's .config) in the temporary directory, with the drop-in that
+// (`rollForward`) and a package.json asking for Node >=24.19.0 <25 and pinning Playwright 1.63.0, on a machine where
+// everything the doctor checks is right: HOME and XDG_CONFIG_HOME (HOME's .config) in the temporary directory, with
+// the drop-in that
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
 // `bin`) and ~/.dotnet (a fake dotnet), fake node, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
 // in), codex, curl (QWEN_BASE_URL answers), gh (acting as the App) and docker (Compose v2) in `bin`, the App's files and
