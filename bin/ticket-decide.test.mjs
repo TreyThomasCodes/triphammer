@@ -40,7 +40,7 @@ const issue = (number, body = '', {state = 'OPEN', labels = [], author = theApp}
 const closed = (number, body = '') => issue(number, body, {state: 'CLOSED'});
 const upkeep = (number, createdAt, state = 'OPEN') => ({...issue(number, '', {state, labels: ['upkeep']}), createdAt});
 
-const checkRun = (name, conclusion, startedAt, {workflowName = 'pr-guardrails', status = 'COMPLETED'} = {}) => ({
+const checkRun = (name, conclusion, startedAt, {workflowName = 'test', status = 'COMPLETED'} = {}) => ({
   __typename: 'CheckRun', name, workflowName, status, conclusion, startedAt,
   completedAt: status === 'COMPLETED' ? startedAt.replace('T10', 'T11') : '0001-01-01T00:00:00Z',
   detailsUrl: `https://github.com/Example-Owner/example-project/actions/runs/${name}`,
@@ -278,7 +278,7 @@ test('a check whose latest run failed, timed out or was cancelled is repaired fo
 
 test('checks with the same name in different workflows count separately', t => {
   const checks = [checkRun('build', 'FAILURE', '2026-10-16T10:00:00Z', {workflowName: 'risk-tier'}),
-    checkRun('build', 'SUCCESS', '2026-10-16T10:05:00Z', {workflowName: 'pr-guardrails'})];
+    checkRun('build', 'SUCCESS', '2026-10-16T10:05:00Z', {workflowName: 'test'})];
   assert.equal(decide(t, [issue(30)], [pr(40, 30, {checks})]).action, 'repair 40 30 failing-checks');
 });
 
