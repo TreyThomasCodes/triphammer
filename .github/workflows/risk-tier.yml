@@ -4,8 +4,10 @@ name: risk-tier
 # needs: auto succeeds; blocked fails; escalate stays pending until the owner approves the current head commit after
 # its latest base change. An approval of an earlier commit still counts while the pull request's own changes against
 # the base are identical (same patch id), so updating the branch from main does not need a new approval. While it
-# waits, the owner's review is (re)requested. The owner merges their own escalate pull requests through the ruleset's
-# admin bypass. A hold label or the owner's latest review requesting changes keeps any tier pending.
+# waits, the owner's review is (re)requested. A pull request the owner opened counts as approved at each commit the
+# owner pushed to it, since GitHub lets no one approve their own pull request; a commit anyone else pushed to it, such
+# as an agent's, still needs the owner, by the same rules as an approval. A hold label or the owner's latest review
+# requesting changes keeps any tier pending.
 # The same job posts the required `closing-issue` status from the default branch's validate-pr-contract.sh, here
 # because this workflow already runs on every event that can change it (a push, an edited description, a retarget).
 # Agents cannot edit this file (their GitHub App has no workflows permission) or post statuses (no statuses permission).
@@ -88,6 +90,8 @@ jobs:
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PULL_REQUEST_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -171,19 +175,48 @@ jobs:
           fi
           # An approval of an earlier commit counts while the pull request's own changes are byte-identical: the
           # same patch id for base...approved and base...head. Any change to them, even inside a merge, differs.
+          head_patch="$(git diff "$BASE...$HEAD_SHA" | git patch-id --verbatim | cut -d' ' -f1)"
+          same_changes() {
+            local patch
+            git cat-file -e "$1^{commit}" 2>/dev/null || return 1
+            patch="$(git diff "$BASE...$1" | git patch-id --verbatim | cut -d' ' -f1)"
+            [ -n "$patch" ] && [ "$patch" = "$head_patch" ]
+          }
           approved="${state#APPROVED }"
-          if [ "${state%% *}" = APPROVED ] && git cat-file -e "$approved^{commit}" 2>/dev/null; then
-            approved_patch="$(git diff "$BASE...$approved" | git patch-id --verbatim | cut -d' ' -f1)"
-            head_patch="$(git diff "$BASE...$HEAD_SHA" | git patch-id --verbatim | cut -d' ' -f1)"
-            if [ -n "$approved_patch" ] && [ "$approved_patch" = "$head_patch" ]; then
-              status success "Escalate: approved by @$OWNER at ${approved:0:7}; changes unchanged since"
-            fi
+          if [ "${state%% *}" = APPROVED ] && same_changes "$approved"; then
+            status success "Escalate: approved by @$OWNER at ${approved:0:7}; changes unchanged since"
           fi
           echo "Latest owner review since the last base change: ${state:-none}."
-          # Put the pull request back in the owner's review queue. GitHub refuses a review request on the owner's own
-          # pull request, and a failed request must not hide the status.
-          if [ "$PULL_REQUEST_AUTHOR" != "$OWNER" ]; then
-            gh api -X POST "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/requested_reviewers" -f "reviewers[]=$OWNER" > /dev/null \
-              || echo "Could not request the owner's review."
+          # The owner's own pull request counts as approved at each commit the owner pushed to its branch in this
+          # repository after the latest base change, by the same rules as an approval: the repository's activity names
+          # who pushed each commit, so an agent's push to the branch still waits, unless it leaves the changes identical
+          # (a branch update from main). The push that started this run can reach the activity a little after the event,
+          # so the lookup is repeated for up to a minute until the head commit is in it. A failed lookup leaves the pull
+          # request waiting.
+          if [ "$PULL_REQUEST_AUTHOR" = "$OWNER" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+            activity='[]'
+            for attempt in 1 2 3 4 5 6; do
+              activity="$(gh api -X GET --paginate --slurp "repos/$REPOSITORY/activity" -f "ref=refs/heads/$HEAD_REF" \
+                -F per_page=100)" || { echo "Could not read who pushed to the branch."; activity='[]'; break; }
+              jq -e --arg head "$HEAD_SHA" 'any(.[][]; .after == $head)' <<< "$activity" > /dev/null && break
+              [ "$attempt" = 6 ] || sleep 10
+            done
+            pushed="$(jq -r --arg owner "$OWNER" --arg since "$since" \
+              '.[][] | select(.actor.login == $owner and .activity_type != "branch_deletion" and .timestamp > $since)
+               | .after' <<< "$activity")"
+            for commit in $pushed; do
+              if [ "$commit" = "$HEAD_SHA" ]; then
+                status success "Escalate: opened and pushed by @$OWNER at ${HEAD_SHA:0:7}"
+              fi
+            done
+            for commit in $pushed; do
+              if same_changes "$commit"; then
+                status success "Escalate: opened and pushed by @$OWNER at ${commit:0:7}; changes unchanged since"
+              fi
+            done
+            status pending "Escalate: waiting for @$OWNER to push to the branch; someone else pushed ${HEAD_SHA:0:7}"
           fi
+          # Put the pull request back in the owner's review queue; a failed request must not hide the status.
+          gh api -X POST "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/requested_reviewers" -f "reviewers[]=$OWNER" > /dev/null \
+            || echo "Could not request the owner's review."
           status pending "Escalate: waiting for @$OWNER to approve ${HEAD_SHA:0:7} (Files changed, Review changes, Approve)"
