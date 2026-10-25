@@ -1,5 +1,8 @@
 name: test
 
+# The node tests run in three shards side by side (node deals the sorted test files out in turn), and the pull request
+# contract tests and shellcheck in a job of their own. The branch rules require a check named `test`, so the last job,
+# which passes only when every other one passed, carries that name.
 on:
   pull_request:
   push:
@@ -13,17 +16,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: test
+  node:
+    name: node (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
       - name: Tooling tests
-        run: npm run test:tooling
+        run: npm run -s test:node
+        env:
+          TEST_SHARD: ${{ matrix.shard }}/3
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Pull request contract tests
+        run: bash scripts/test-pr-contract.sh
       - name: shellcheck
         run: |
           mapfile -t scripts < <(grep -lE '^#!.*\b(bash|sh)\b' install.sh bin/* scripts/* scripts/git-hooks/* .github/scripts/* 2>/dev/null)
           shellcheck -x -S warning "${scripts[@]}"
+
+  test:
+    name: test
+    needs: [node, lint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do [ "$result" = success ] || exit 1; done

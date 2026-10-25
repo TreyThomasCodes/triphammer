@@ -505,14 +505,8 @@ private repository its `git` clones only when git's credential helpers give gith
 `github-app-token` mints from a test key against canned GitHub responses.
 
 The example project stands in for a project Triphammer serves: a project file, risk rules for the engine tests in
-`scripts/risk-tier.test.mjs`, and the teardown script the runner tests run. The tests read no file of this repository
-outside Triphammer's own (`plugins/triphammer/`, `.claude-plugin/`, `bin/`, `status/`,
-`scripts/risk-tier*`, `scripts/land-pr*`, `scripts/git-hooks/`, `scripts/commit-msg.test.mjs`,
-`scripts/test-git-repo.mjs`, `scripts/test-pr-contract.sh` and `.github/scripts/validate-pr-contract.sh`):
-`scripts/triphammer-copy-test.sh`, the last step of `npm run test:tooling`, copies only those files into a fresh git
-repository in a temporary directory, runs their tests there and fails when one fails or skips for another reason than
-agent-guard's skips for a repository under a temporary directory and the project-name tests' skips for a copy without
-`.triphammer/project.json`. This repository's own merge rules are tested in
+`scripts/risk-tier.test.mjs`, and the teardown script the runner tests run. CI runs the node tests in three shards
+side by side (`TEST_SHARD=k/3 npm run test:node`). This repository's own merge rules are tested in
 `scripts/project-risk-tiers.test.mjs`.
 
 ## Doctor
