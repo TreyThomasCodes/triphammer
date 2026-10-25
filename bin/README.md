@@ -537,14 +537,16 @@ It looks every command up on the units' PATH, not on the caller's: the `Environm
 in Triphammer's checkout, or of the last of the user's drop-ins for it that sets one (`ticket-runner@.service.d/` and
 `ticket-runner@<project>.service.d/` under `${XDG_CONFIG_HOME:-~/.config}/systemd/user`, by file name, the project's
 file before the template's of the same name; Install, A project's toolchain), with `%h` as `$HOME`. It reports that
-unit file when it is missing or sets no PATH.
+unit file when it is missing or sets no PATH. `ticket-runner --doctor --before-start`, which `triphammer add` runs,
+leaves out the Units check, as only `triphammer start` enables them, and prints `left out the units <unit>..., which
+triphammer start <project> enables` before its last line; any other argument exits 2.
 
 | Check | Passes when |
 | --- | --- |
 | .NET SDK | `dotnet --list-sdks` lists an SDK the checkout's `global.json` accepts: with `rollForward` `disable` the pinned version only; `patch`, `latestPatch` or none, the same feature band at or after it; `feature` or `latestFeature`, the same major.minor; `minor` or `latestMinor`, the same major; `major` or `latestMajor`, any later one. A prerelease counts only with `allowPrerelease` true. A checkout without `global.json` is not checked. |
 | Node | `node --version` is within the checkout's `package.json` `engines.node` when its comparators are `>=`, `>`, `<=`, `<`, `=` or bare versions of one to three parts, blank-separated; other forms (`^`, `~`, `\|\|`) only need `node` to run. A partial version is a range as in semver: `24` is `24.x`, `<=24` is `<25.0.0`, `>24` is `>=25.0.0`, `<24` is `<24.0.0`, and `24.1` is `24.1.x`. |
 | Docker | `docker info` answers the user running the doctor, and `docker compose version` is 2 or later. |
-| Playwright | `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
+| Playwright | Checked only when the checkout pins Playwright as `provision-project` reads it: a `package.json` that `git ls-files` lists names `@playwright/test` or `playwright` in `dependencies` or `devDependencies`. When the doctor cannot tell (no `jq`, no git checkout, a `package.json` that is not JSON), it checks. `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
 | Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node` and Claude Code login checks are skipped, and only `jq` is reported. |
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
@@ -553,7 +555,7 @@ unit file when it is missing or sets no PATH.
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | bwrap | With the `codex` module on, `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: Codex's sandbox needs unprivileged user namespaces, which Ubuntu restricts with AppArmor. |
 | Qwen | `QWEN_BASE_URL` answers an HTTP request within 10 seconds, with the `qwen-audit` module on (any status counts; no key is sent). |
-| Units | `systemctl --user is-enabled` says `enabled` for `ticket-runner@<project>.timer` and `merge-when-ready@<project>.timer`, and for `demo-gallery@<project>.service` with the `demo` module on. |
+| Units | `systemctl --user is-enabled` says `enabled` for `ticket-runner@<project>.timer` and `merge-when-ready@<project>.timer`, and for `demo-gallery@<project>.service` with the `demo` module on. Left out with `--before-start`. |
 | Checkout | `CHECKOUT` is on `main` with a clean tree, and after `git fetch origin` (the doctor's one change) its HEAD is `origin/main`, neither behind nor ahead. |
 
 It passes on no command's output but version numbers, so no token, key or account name reaches what it prints. The
@@ -729,8 +731,9 @@ triphammer add <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<o
 temporary directory as the caller, runs that clone's `provision-project` as root and removes the clone, so root never
 runs code from the checkout the service user can write. It then runs `ticket-runner --labels` as the service user, whose
 `gh` acts as the App, to create the labels Triphammer uses that the repository lacks (Labels; a failure is reported and
-undoes nothing, and the doctor lists what is still missing), runs the doctor for the project and prints the command
-that starts it. With `--dry-run` it does neither.
+undoes nothing, and the doctor lists what is still missing), runs the doctor for the project with `--before-start`,
+which leaves out the units `start` enables and says so (Doctor), and prints the command that starts it. With
+`--dry-run` it does neither.
 
 | `provision-project` argument | What it is |
 | --- | --- |
@@ -791,7 +794,8 @@ module. A project left out is the machine's only one; with several, the command 
 `ticket-runner` as the service user (`sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/<uid> TRIPHAMMER_PROJECT=<name>
 ~/.local/bin/ticket-runner --doctor`, without sudo when the caller is that user): `sudo -i` leaves `XDG_RUNTIME_DIR`
 unset, and without it the doctor's `systemctl --user` check cannot reach the user's manager; lingering keeps
-`/run/user/<uid>` there. The doctor reports the timers as not enabled until they are started. `start` runs
+`/run/user/<uid>` there. `triphammer doctor` checks the units too, so it reports the timers as not enabled until they
+are started; the doctor `add` runs leaves them out. `start` runs
 `sudo systemctl --machine=triphammer@ --user enable --now ...`. The status page is
 `sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service`. The status page and the gallery
 listen where the configs say (`STATUS_HOST`, `DEMO_GALLERY_HOST`).

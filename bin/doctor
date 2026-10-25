@@ -8,7 +8,19 @@
 # config's own message), looks every command up on the units' PATH rather than the caller's, and runs the checks the
 # README's Doctor table lists. Credential files are checked with stat only; nothing here opens, reads or prints them.
 # No command's output is passed on except version numbers, so no token, key or account name reaches the output.
+#
+#   doctor [--before-start]
+#
+# --before-start, which `triphammer add` gives, leaves out the check that the project's units are enabled, since only
+# `triphammer start` enables them, and says so in a line of its own. Any other argument exits 2.
 set -euo pipefail
+
+before_start=""
+case "$*" in
+  '') ;;
+  --before-start) before_start=1 ;;
+  *) echo "usage: ticket-runner --doctor [--before-start]" >&2; exit 2 ;;
+esac
 
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
@@ -152,10 +164,25 @@ else
   problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
 fi
 
-# Playwright's browsers: a Chromium in its browser cache. Which revision the project's Playwright wants is left to the
-# web tests, which say so when it is missing.
+# Playwright's browsers, for a project whose checkout pins Playwright as provision-project reads it (config.sh's
+# playwright_manifests and playwright_filter): a Chromium in its browser cache. Which revision the project's Playwright
+# wants is left to the web tests, which say so when it is missing. When the doctor cannot tell (no jq, no checkout, a
+# file that is not JSON), it checks.
+pins_playwright=1
+if [ -n "$jq_ok" ] && manifests="$(git -C "$checkout" ls-files -- "$playwright_manifests" 2>/dev/null)"; then
+  pins_playwright=""
+  while IFS= read -r manifest; do
+    [ -n "$manifest" ] || continue
+    if ! pin="$(jq -r "$playwright_filter" "$checkout/$manifest" 2>/dev/null)" || [ -n "$pin" ]; then
+      pins_playwright=1
+      break
+    fi
+  done <<< "$manifests"
+fi
 browsers="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/.cache/ms-playwright}"
-if ! compgen -G "$browsers/chromium*-[0-9]*" >/dev/null; then
+if [ -z "$pins_playwright" ]; then
+  :  # no Playwright, so no browser to check
+elif ! compgen -G "$browsers/chromium*-[0-9]*" >/dev/null; then
   problem "Playwright's Chromium is not installed in $browsers" \
     "run npx playwright install chromium in the checkout's web app, as this user"
 else
@@ -257,12 +284,14 @@ fi
 
 units=("ticket-runner@$project.timer" "merge-when-ready@$project.timer")
 ! module_on demo || units+=("demo-gallery@$project.service")
-for unit in "${units[@]}"; do
-  if ! state="$(systemctl --user is-enabled "$unit" 2>/dev/null)" || [ "$state" != enabled ]; then
-    problem "the unit $unit is ${state:-not enabled}" \
-      "link the template unit and run systemctl --user enable --now $unit (bin/README.md, Install)"
-  fi
-done
+if [ -z "$before_start" ]; then
+  for unit in "${units[@]}"; do
+    if ! state="$(systemctl --user is-enabled "$unit" 2>/dev/null)" || [ "$state" != enabled ]; then
+      problem "the unit $unit is ${state:-not enabled}" \
+        "link the template unit and run systemctl --user enable --now $unit (bin/README.md, Install)"
+    fi
+  done
+fi
 
 # The checkout: on main, clean, and at origin/main after a fetch (update-checkout's conditions, plus not ahead).
 if ! git -C "$checkout" rev-parse --git-dir >/dev/null 2>&1; then
@@ -280,6 +309,7 @@ else
   fi
 fi
 
+[ -z "$before_start" ] || echo "left out the units ${units[*]}, which triphammer start $project enables"
 if [ "$problems" -gt 0 ]; then
   echo "$problems problem(s) found"
   exit 1

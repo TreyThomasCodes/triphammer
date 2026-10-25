@@ -96,8 +96,8 @@ test('add, as an ordinary user, asks sudo once, runs a fresh clone\'s provision-
   assert.equal(calls[2], 'provision-project sudo=yes example/example-project --modules demo --set DEMO_URL=http://x.invalid/');
   assert.equal(calls[3], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 setsid -w env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --labels`);
   assert.equal(calls[4], 'ticket-runner project=example-project runtime=/run/user/1001 --labels');
-  assert.equal(calls[5], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 setsid -w env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor`);
-  assert.equal(calls[6], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor');
+  assert.equal(calls[5], `sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/1001 setsid -w env TRIPHAMMER_PROJECT=example-project ${s.home}/.local/bin/ticket-runner --doctor --before-start`);
+  assert.equal(calls[6], 'ticket-runner project=example-project runtime=/run/user/1001 --doctor --before-start');
   assert.equal(calls.length, 7);
   assert.match(result.stdout, /sudo asks for your password once/);
   assert.match(result.stdout, /^setting it up$/m);
@@ -135,8 +135,8 @@ test('add --dry-run creates no label and runs no doctor, and labels or a doctor 
   s.fail('runner', 1);
   const result = s.run('add', 'example/example-project');
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(s.calls().filter(call => call.startsWith('ticket-runner')).map(call => call.split(' ').at(-1)),
-    ['--labels', '--doctor']);
+  assert.deepEqual(s.calls().filter(call => call.startsWith('ticket-runner')).map(call => call.split(' ').slice(3).join(' ')),
+    ['--labels', '--doctor --before-start']);
   assert.match(result.stderr, /not every label Triphammer uses could be created; the doctor lists the missing ones/);
 });
 

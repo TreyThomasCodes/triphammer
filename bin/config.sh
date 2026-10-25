@@ -31,6 +31,14 @@
 # same_repo <dir> <dir>: succeeds when both directories are in one git repository (one common git directory), as a
 # project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is.
 
+# How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
+# checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
+# for under the jq filter $playwright_filter, which prints nothing when the file asks for no Playwright.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+playwright_manifests='*package.json'
+# shellcheck disable=SC2034  # read by the scripts that source this file
+playwright_filter='(.devDependencies // {}) + (.dependencies // {}) | .["@playwright/test"] // .playwright // empty'
+
 # The optional modules, and every setting a Triphammer config may give besides the four required ones.
 known_modules=(demo qwen-audit codex)
 optional_settings=(OWNER MODULES STATUS_HOST STATUS_PORT STATUS_ALLOWED_HOSTS DEMO_GALLERY_DIR DEMO_URL
