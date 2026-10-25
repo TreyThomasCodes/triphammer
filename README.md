@@ -63,6 +63,11 @@ Then protect the default branch with three required checks: `closing-issue`, `ow
 organization owns the repository, set the variable `TRIPHAMMER_OWNER` to your own login, on the repository or the
 organization.
 
+GitHub doesn't let you approve your own pull request, and the App can't push changes under `.github/workflows/`, so
+you open those pull requests yourself and `owner-approval` stays pending on them. Add yourself to the branch rules'
+bypass list (as repository or organization admin, for pull requests only) and merge those with the bypass. The App is
+not an admin, so the agents can't use it.
+
 The Configuration section of [`bin/README.md`](bin/README.md#configuration) lists every field.
 
 ## Day to day
