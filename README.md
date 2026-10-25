@@ -63,6 +63,10 @@ Then protect the default branch with three required checks: `closing-issue`, `ow
 organization owns the repository, set the variable `TRIPHAMMER_OWNER` to your own login, on the repository or the
 organization.
 
+A pull request you open yourself, such as a change under `.github/workflows/` that the App can't push, needs no
+approval: `owner-approval` passes at any commit you pushed. If someone else pushes to its branch, it waits for you as
+usual.
+
 The Configuration section of [`bin/README.md`](bin/README.md#configuration) lists every field.
 
 ## Day to day
