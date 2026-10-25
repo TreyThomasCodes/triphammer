@@ -9,7 +9,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Triphammer's files: what moves to its own repository.
-files=(plugins/triphammer .claude-plugin bin systemd status 'scripts/risk-tier*' 'scripts/land-pr*'
+files=(install.sh plugins/triphammer .claude-plugin bin systemd status 'scripts/risk-tier*' 'scripts/land-pr*'
   scripts/git-hooks scripts/commit-msg.test.mjs scripts/test-git-repo.mjs scripts/test-pr-contract.sh
   .github/scripts/validate-pr-contract.sh)
 allowed_skips=('the repository lies under a temporary directory' 'no .triphammer/project.json')

@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# The owner's command on a machine bin/provision set up, run as an ordinary user with sudo, or as root:
+#
+#   triphammer add <owner>/<repo> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>] [--dry-run]
+#   triphammer doctor [<project>]
+#   triphammer plan [<project>]
+#   triphammer start [<project>]
+#
+# add clones Triphammer's repository (from the machine file) into a temporary directory as the caller, runs that
+# clone's bin/provision-project as root through sudo with the arguments given, removes the clone, and then runs the
+# doctor for the project. Running a fresh clone keeps root from running code in a checkout the service user can
+# write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start enables and
+# starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's only
+# project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
+# which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
+#
+# sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
+# (add, start) or the service user (doctor, plan, start). Exit status: the step's own, 2 for a usage error, 1 when the
+# machine file is missing or malformed.
+#
+# Tests (triphammer.test.mjs) use TRIPHAMMER_PROVISION_ROOT for where /etc lies and TRIPHAMMER_PROVISION_GIT_BASE for
+# where repositories are cloned from, as provision does.
+set -euo pipefail
+
+root="${TRIPHAMMER_PROVISION_ROOT:-}"
+git_base="${TRIPHAMMER_PROVISION_GIT_BASE:-https://github.com/}"
+machine_file="$root/etc/triphammer.conf"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: triphammer add <owner>/<repo> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>] [--dry-run]
+       triphammer doctor [<project>]
+       triphammer plan [<project>]
+       triphammer start [<project>]
+EOF
+}
+usage_error() {
+  printf 'triphammer: %s\n' "$1" >&2
+  usage
+  exit 2
+}
+fail() {
+  printf 'triphammer: %s\n' "$1" >&2
+  exit 1
+}
+
+# The machine file: Triphammer's repository, the service user and its home.
+read_machine() {
+  local line key value
+  tri_repo="" user="" home=""
+  [ -r "$machine_file" ] || fail "$machine_file is missing; set the machine up first with install.sh"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}" value="${line#*=}"
+    case "$key" in
+      TRIPHAMMER_REPO) tri_repo="$value" ;;
+      TRIPHAMMER_USER) user="$value" ;;
+      TRIPHAMMER_HOME) home="$value" ;;
+    esac
+  done < "$machine_file"
+  [[ "$tri_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ && "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$home" == /* ]] \
+    || fail "$machine_file does not name Triphammer's repository, user and home; run install.sh again"
+}
+
+sudo=sudo
+[ "$(id -u)" != 0 ] || sudo=""
+# as_service <command...>: runs a command as the service user, which needs XDG_RUNTIME_DIR for systemctl --user.
+as_service() {
+  local uid
+  uid="$(id -u "$user")" || fail "the user $user that $machine_file names does not exist"
+  if [ "$(id -un)" = "$user" ]; then
+    env XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+  else
+    sudo -iu "$user" env XDG_RUNTIME_DIR="/run/user/$uid" "$@"
+  fi
+}
+
+# project <name or nothing>: sets `project` to the name given, or to the machine's only project.
+project() {
+  local configs names=()
+  if [ -n "${1:-}" ]; then
+    [[ "$1" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || usage_error "$1 is not a project name"
+    project="$1"
+    return 0
+  fi
+  configs="$(as_service ls -1 "$home/.config/triphammer" 2>/dev/null || true)"
+  while IFS= read -r name; do
+    [[ "$name" == *.conf ]] && names+=("${name%.conf}")
+  done <<< "$configs"
+  case ${#names[@]} in
+    1) project="${names[0]}" ;;
+    0) fail "no project is set up yet; add one with triphammer add <owner>/<repo>" ;;
+    *) printf 'triphammer: name the project, one of: %s\n' "${names[*]}" >&2; exit 2 ;;
+  esac
+}
+
+add() {
+  local arg dry_run="" status name
+  for arg; do [ "$arg" != --dry-run ] || dry_run=1; done
+  if [ $# -eq 0 ] || [[ "$1" == -* ]]; then usage_error "add needs a repository, owner/name"; fi
+  read_machine
+  if [ -n "$sudo" ]; then
+    echo "triphammer add installs the project's toolchains as root and writes its files as $user; sudo asks for your password once."
+    sudo -v
+  fi
+  work="$(mktemp -d)"  # global: the EXIT trap runs after add has returned
+  trap 'rm -rf -- "$work"' EXIT
+  git clone -q --depth 1 -- "$git_base$tri_repo.git" "$work/triphammer" \
+    || fail "could not clone $tri_repo, whose bin/provision-project sets the project up"
+  status=0
+  $sudo bash "$work/triphammer/bin/provision-project" "$@" | tee "$work/output" || status="${PIPESTATUS[0]}"
+  [ "$status" -eq 0 ] || exit "$status"
+  name="$(sed -n 's/^project: //p' "$work/output" | tail -n 1)"
+  [ -z "$dry_run" ] || return 0
+  [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "provision-project named no project"
+  echo
+  echo "The doctor's check of $name:"
+  as_service env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor || true
+  echo
+  echo "Start it, once the doctor finds nothing missing: triphammer start $name"
+}
+
+runner() {
+  local flag="$1"
+  shift
+  [ $# -le 1 ] || usage_error "${flag#--} takes at most one project"
+  read_machine
+  project "${1:-}"
+  as_service env TRIPHAMMER_PROJECT="$project" "$home/.local/bin/ticket-runner" "$flag"
+}
+
+start() {
+  [ $# -le 1 ] || usage_error "start takes at most one project"
+  read_machine
+  project "${1:-}"
+  local config="$home/.config/triphammer/$project.conf" modules units
+  as_service test -f "$config" || fail "$project has no config ($config); add it with triphammer add <owner>/<repo>"
+  modules="$(as_service sed -n 's/^MODULES=//p' "$config")"
+  units=("ticket-runner@$project.timer" "merge-when-ready@$project.timer")
+  [[ ",$modules," != *,demo,* ]] || units+=("demo-gallery@$project.service")
+  if [ "$(id -un)" = "$user" ]; then
+    as_service systemctl --user enable --now "${units[@]}"
+  else
+    $sudo systemctl --machine="$user@" --user enable --now "${units[@]}"
+  fi
+  echo "Started ${units[*]}."
+}
+
+case "${1:-}" in
+  add) shift; add "$@" ;;
+  doctor) shift; runner --doctor "$@" ;;
+  plan) shift; runner --plan "$@" ;;
+  start) shift; start "$@" ;;
+  ''|-h|--help|help) usage; [ -n "${1:-}" ] || exit 2 ;;
+  *) usage_error "unknown command $1" ;;
+esac

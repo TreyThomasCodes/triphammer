@@ -349,7 +349,7 @@ test('a user without a git commit identity is reported, name and email each, and
   assert.equal(result.status, 1, result.output);
   assert.deepEqual(result.problems.map(line => line.replace(/\. Fix: .*/, '')),
     ['git has no user.name for this user, so it may refuse to commit', 'git has no user.email for this user, so it may refuse to commit']);
-  assert.match(result.problems[0], /Fix: set it with git config --global user\.name, as bin\/provision does from APP_AUTHOR/);
+  assert.match(result.problems[0], /Fix: set it with git config --global user\.name, as triphammer add does from APP_AUTHOR/);
   writeFileSync(join(r.root, 'only-name'), '[user]\n\tname = someone\n');
   assertOneProblem(r.doctor({GIT_CONFIG_GLOBAL: join(r.root, 'only-name')}), /^git has no user\.email /);
 });

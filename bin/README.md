@@ -35,7 +35,10 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | File | What it does |
 | --- | --- |
 | `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the worktrees and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share a lock, a backoff and a stop file and take turns (see Several projects). |
-| `provision` | Run as root by the owner on a fresh Ubuntu server, turns it into a machine of Triphammer's own: the toolchain, the service user, the checkouts, the links, the plugin and the configs; see On a machine of its own below. |
+| `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers; see On a machine of its own below. |
+| `provision` | Run as root (by `install.sh`, through sudo) on a fresh Ubuntu server, turns it into a machine of Triphammer's own with no project yet: the shared toolchain, the service user, Triphammer's checkout, the links, the plugin, the machine file and the `triphammer` command; see On a machine of its own below. |
+| `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
+| `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
 | `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. `ticket-runner` calls it; see below. |
@@ -46,7 +49,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `security-review` | The `codex` module. Advisory security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session. `--full-area` audits the whole area for the monthly upkeep run. See below. |
 | `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the worktree whose HEAD is its pushed head, fetches `main` in Triphammer's checkout (the one `land-pr` resolves to through its link) and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the checkout, so `land-pr.sh` runs Triphammer `main`'s classifier against the worktree's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
 | `merge-when-ready` | A serial merge queue per repository, as the GitHub App (the `triphammer:merge-policy` skill), that merges armed pull requests and brings them up to date one at a time, stops for the owner's brakes and keeps off the branches a `ticket-runner` run works on. With a project (`TRIPHAMMER_PROJECT`) it serves only that project's repository, reads that project's runner and starts it after a merge. Its header lists the rules. |
-| `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. Its header lists the rules. |
+| `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. Its header lists the rules. |
 | `gh` | Runs the first other `gh` on `PATH` with `GH_TOKEN` from the `github-app-token` beside it (symlinks resolved), for the account of its `-R`/`--repo` argument when it has one; when no token can be had it runs nothing and exits 1. |
 | `config.sh` | Sourced by the bash scripts, and run with `--print` by the others: reads the Triphammer config and checks the project file (see Configuration). |
 | `ticket-runner@.service`, `ticket-runner@.timer` | Run `ticket-runner` for the project named by the instance (`ticket-runner@<project>.timer`) every ten minutes, with `TRIPHAMMER_PROJECT=<project>`; `merge-when-ready@<project>` also starts the service after each merge. |
@@ -493,7 +496,8 @@ sign with a key openssl generates in the test, and point `GITHUB_APP_CONFIG_DIR`
 test's temporary directory, so they never read Triphammer's App files or reach GitHub.
 A new fake command is a `fake-<name>.mjs` script beside the tests, put on `PATH` with `fakeCommand(bin, name, dir)` in
 `fixture.mjs`, which writes the shim that runs it with the directory it reads from and records into. The
-`provision` tests act out a whole machine with `fake-machine.mjs`, one fake for the package and account tools
+`provision` and `provision-project` tests (through `provision-fixture.mjs`) act out a whole machine with
+`fake-machine.mjs`, one fake for the package and account tools
 (`apt-get`, `dpkg-query`, `useradd`, `loginctl`, `systemctl`, `curl`, `runuser` and the rest) sharing one state file,
 take the system paths under `TRIPHAMMER_PROVISION_ROOT` and clone from local repositories under
 `TRIPHAMMER_PROVISION_GIT_BASE`, so they run without root and change nothing outside their temporary directory. For a
@@ -568,7 +572,7 @@ EOF
 # Optional: append MODULES and the settings of each module this machine runs (Configuration, Modules) to that file.
 for unit in ticket-runner@.service ticket-runner@.timer merge-when-ready@.service merge-when-ready@.timer \
     demo-gallery@.service; do
-  systemctl --user link "$checkout/bin/$unit"
+  systemctl --user link "$checkout/systemd/$unit"
 done
 for script in ticket-runner merge-when-ready land-pr github-app-token gh demo-gallery; do
   ln -sfn "$checkout/bin/$script" ~/.local/bin/"$script"
@@ -597,8 +601,8 @@ checks need a toolchain from elsewhere, such as one in the user's home, adds it 
 `~/.config/systemd/user/ticket-runner@.service.d/<name>.conf` for every project's sessions, or
 `ticket-runner@<project>.service.d/<name>.conf` for one project's (`ticket-runner.service.d/` for the non-template
 unit). systemd reads it after the unit, so its `PATH` replaces the unit's and must keep the unit's directories. A
-project that pins a .NET SDK in `global.json`, installed into `~/.dotnet`, needs this one, which `provision` writes
-when it installs an SDK:
+project that pins a .NET SDK in `global.json`, installed into `~/.dotnet`, needs this one, which `provision-project`
+writes when it installs an SDK:
 
 ```sh
 mkdir -p ~/.config/systemd/user/ticket-runner@.service.d
@@ -670,64 +674,92 @@ with a database container per worktree and web end-to-end tests in Chromium, one
 the gate noticeably quicker), and 100 GB of disk holds the Docker images and gate databases, the worktrees, the .NET
 SDK and NuGet cache, the npm cache, Playwright's browsers (about 1 GB per version) and the session transcripts.
 
-**Run it.** The owner runs it as root from any clone of Triphammer's repository (the one that holds `bin/`):
+**Set the machine up.** The owner runs `install.sh` as an ordinary user who may use sudo, or as root. It asks sudo for
+the password once, clones Triphammer into a temporary directory, runs that clone's `provision` as root with the
+arguments given and removes the clone afterwards; without `--triphammer` it adds
+`--triphammer <TRIPHAMMER_REPO> /srv/triphammer`. `TRIPHAMMER_REPO` (default this repository) and `TRIPHAMMER_REF`
+(default `main`) choose what it clones:
 
 ```sh
-sudo bin/provision --triphammer <owner>/<repo> /srv/<project> \
-  --app-author app/<app-login> \
-  --project <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<owner-login> \
-    --set DEMO_GALLERY_DIR=/home/triphammer/demo-gallery --set DEMO_URL=http://127.0.0.1:8788/ \
-    --set CODEX_AUDIT_MODEL=<model> --set CODEX_SECURITY_MODEL=<model>
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | TRIPHAMMER_REPO=<owner>/<repo> bash
 ```
 
-| Argument | What it is |
+From a clone, `sudo bin/provision --triphammer <owner>/<repo> /srv/triphammer` does the same.
+
+| `provision` argument | What it is |
 | --- | --- |
 | `--triphammer <owner/name> <checkout>` | Triphammer's repository and where to clone it. The units, the `~/.local/bin` links and the plugin install point at this checkout. |
-| `--project <owner/name> <checkout>` | A repository the machine serves and its checkout, once per project. Each gets a config file, `~/.config/triphammer/<name>.conf` with `<name>` from its `.triphammer/project.json`, and its own pair of timers. A project may share Triphammer's checkout when it is the same repository, as in the example above. |
-| `--modules <m,...>` | After a `--project`: the modules that project turns on (`MODULES`, Configuration). Each module's required settings must come with it. |
-| `--set KEY=VALUE` | After a `--project`: one more setting of its config, any optional one (Configuration, Modules) or `STATE_DIR`, which defaults to `~/.local/state/triphammer/projects/<name>`. |
-| `--app-author <login>` | `APP_AUTHOR` of every config. |
 | `--user <name>` | The service user, default `triphammer`. |
 | `--home <dir>` | The user's home when provision creates it, default `/home/<user>`. |
 | `--dry-run` | Prints each change it would make (`would: ...`) and makes none. Steps that read a checkout that is not cloned yet are listed without their details. |
 
-It checks every argument before anything changes; an unknown flag or a bad value exits 2 with the usage, and each
-project's settings go through `config.sh`, so a config it writes is one the scripts accept. It then installs what a
-ticket run, a repair run, the full gate and the web end-to-end tests need: git, `jq`, Python 3, curl and openssl from
-Ubuntu's archive, Docker Engine with Compose v2, `gh`, the service user in the `docker` group with lingering on (so its
-user units run without a login), the checkouts cloned as that user, Node at the version the checkouts' `.node-version`
-pins (one Node for all of them, into `/usr/local`), the .NET SDK each checkout's `global.json` pins (into `~/.dotnet`, with the drop-in under A project's toolchain),
-Claude Code, and Playwright's Chromium at the version each `package.json` pins, with its system libraries from
-Playwright's `install-deps`, or from Ubuntu's archive when Playwright does not know the release; Chromium must then start
-headless. With the `codex` module on for any project it also installs Codex (into `~/.local`), bubblewrap and the
-AppArmor profile `/etc/apparmor.d/bwrap`, which lets `bwrap` create user namespaces (a profile there that it did not
-write is left alone), and with the `demo` module ffmpeg. It links the scripts, `triphammer-status` and the units as Install
-does, including `demo-gallery@.service` and `triphammer-status.service`, installs the Triphammer plugin at user scope from
-Triphammer's checkout, points git's github.com credentials at `github-app-token` with `useHttpPath` on, creates `~/.config/github-app`
-(mode 700, empty), gives git a commit identity in the user's `~/.gitconfig` and writes each project's config; a config with other content is rewritten and the old one kept as
-`<name>.conf.old`. It enables no timer.
+It installs what every project shares: git, `jq`, Python 3, curl and openssl from Ubuntu's archive, Docker Engine with
+Compose v2, `gh`, the service user in the `docker` group with lingering on (so its user units run without a login),
+Triphammer's checkout cloned as that user, Node at the version its `.node-version` pins (one Node for every project,
+into `/usr/local`) and Claude Code. It links the scripts, `triphammer-status` and the units as Install does, including
+`demo-gallery@.service` and `triphammer-status.service`, installs the Triphammer plugin at user scope from Triphammer's
+checkout, points git's github.com credentials at `github-app-token` with `useHttpPath` on and creates
+`~/.config/github-app` (mode 700, empty). It writes the machine file `/etc/triphammer.conf` (Triphammer's repository
+and checkout, the service user and its home), and installs `bin/triphammer` as `/usr/local/bin/triphammer`, a copy root
+owns rather than a link into the checkout the service user can write. It enables no timer.
 
-Each step runs only when what it makes is missing or different, so a second run changes nothing that is already right
-and ends with `Nothing to change`. What it runs in the user's checkouts, git and `jq` among them, runs as the user,
-never as root. A failed step exits 1 naming it, and the next run carries on from there. A checkout path that holds
-anything but the user's clone of its repository stops it before anything changes.
+**Add a project.** Once the owner has placed the App's files and logged Claude Code in (Credentials, below):
+
+```sh
+triphammer add <owner>/<repo>
+triphammer add <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<owner-login> \
+  --set DEMO_GALLERY_DIR=/home/triphammer/demo-gallery --set DEMO_URL=http://127.0.0.1:8788/ \
+  --set CODEX_AUDIT_MODEL=<model> --set CODEX_SECURITY_MODEL=<model>
+```
+
+`triphammer add` asks sudo for the password once, clones Triphammer's repository (from the machine file) into a
+temporary directory as the caller, runs that clone's `provision-project` as root and removes the clone, so root never
+runs code from the checkout the service user can write. It then runs the doctor for the project and prints the command
+that starts it.
+
+| `provision-project` argument | What it is |
+| --- | --- |
+| `<owner/name>` | The repository. Its config is `~/.config/triphammer/<name>.conf`, with `<name>` from its `.triphammer/project.json`, and it gets its own pair of timers. |
+| `<checkout>` | Where to clone it, default `/srv/<repository name>`, or Triphammer's checkout when it is Triphammer's own repository. |
+| `--modules <m,...>` | The modules the project turns on (`MODULES`, Configuration). Each module's required settings must come with it. |
+| `--set KEY=VALUE` | One more setting of its config, any optional one (Configuration, Modules) or `STATE_DIR`, which defaults to `~/.local/state/triphammer/projects/<name>`. |
+| `--app-author <login>` | `APP_AUTHOR`. Without it, `app/<slug>` with the App's slug, which `github-app-token app-slug` reads from the App's files; when they are not placed yet it stops and says so. |
+| `--dry-run` | Prints each change it would make and makes none. |
+
+It installs what the project needs for a ticket run, a repair run, the full gate and the web end-to-end tests: its
+checkout cloned as the service user, the .NET SDK its `global.json` pins (into `~/.dotnet`, with the drop-in under A
+project's toolchain), and Playwright's Chromium at the version each `package.json` pins, with its system libraries from
+Playwright's `install-deps`, or from Ubuntu's archive when Playwright does not know the release; Chromium must then start
+headless. A project whose `.node-version` pins another Node than the machine's is refused. With the `codex` module it
+also installs Codex (into `~/.local`), bubblewrap and the AppArmor profile `/etc/apparmor.d/bwrap`, which lets `bwrap`
+create user namespaces (a profile there that it did not write is left alone), and with the `demo` module ffmpeg. It
+gives git a commit identity in the user's `~/.gitconfig` and writes the project's config; a config with other content is
+rewritten and the old one kept as `<name>.conf.old`. Another config of a different repository at the same checkout or
+with the same name stops it. It enables no timer.
+
+Both scripts check every argument before anything changes; an unknown flag or a bad value exits 2 with the usage, and
+the project's settings go through `config.sh`, so a config `provision-project` writes is one the scripts accept. Each
+step runs only when what it makes is missing or different, so a second run changes nothing that is already right and
+ends with `Nothing to change`. What they run in the user's checkouts, git and `jq` among them, runs as the user, never
+as root. A failed step exits 1 naming it, and the next run carries on from there. A checkout path that holds anything
+but the user's clone of its repository stops them before anything changes.
 
 **Private repositories.** `~/.config/github-app` and the credential helper come before any clone, and every clone asks
 `github-app-token` for github.com credentials: the one Triphammer's checkout links into `~/.local/bin` once it is
 cloned, and until then a copy of the one beside the running `provision`, which it puts in a directory under `/tmp`
 that root owns and the user may read and run, given to that clone alone (`git -c credential.<url>.helper=...`) and
-removed when provision ends. A private repository therefore clones once the App's files are in place: the first run
+removed when the script ends. A private repository therefore clones once the App's files are in place: the first run
 stops at the clone, naming the directory, the owner places them (below) and runs it again.
 
 **Commit identity.** git refuses to commit without a name and email on a machine whose host name has no domain, and a
-session may not set them, so provision sets `user.name` and `user.email` in the user's global git config, each only
-when it is not set already: for `--app-author app/<slug>`, the App's bot, `<slug>[bot]` at
+session may not set them, so `provision-project` sets `user.name` and `user.email` in the user's global git config, each
+only when it is not set already: for an `APP_AUTHOR` of `app/<slug>`, the App's bot, `<slug>[bot]` at
 `<slug>[bot]@users.noreply.github.com`; for an account login, that login at `<login>@users.noreply.github.com`. GitHub
 links a bot's commits to it by the form `<id>+<slug>[bot]@users.noreply.github.com`; to use it, set `user.email` that
-way as the user (`git config --global user.email ...`) and provision keeps it.
+way as the user (`git config --global user.email ...`) and `provision-project` keeps it.
 
-**Credentials.** `provision` never reads or writes one; it ends by listing these. The owner places them by hand, each
-owned by the service user and mode 600:
+**Credentials.** Neither script reads or writes one; each ends by listing the ones it needs. The owner places them by
+hand, each owned by the service user and mode 600:
 
 - the App's files in `~/.config/github-app`: `app-id`, `owner` and `agents.pem` (Install);
 - a Claude Code login: `sudo -iu triphammer claude auth login`, which prints a URL to open on any machine. Or
@@ -737,15 +769,17 @@ owned by the service user and mode 600:
 - with `qwen-audit`, the Qwen server's key in the file `QWEN_KEY_FILE` names;
 - with `codex`, `sudo -iu triphammer codex login`.
 
-**Check and start.** As the user,
-`sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/<uid> TRIPHAMMER_PROJECT=<name> ticket-runner --doctor` for each
-project, with `<uid>` the user's (`id -u triphammer`; provision prints it filled in), lists what is still missing
-(Doctor). `sudo -i` leaves `XDG_RUNTIME_DIR` unset, and without it the doctor's `systemctl --user` check cannot reach
-the user's manager; lingering keeps `/run/user/<uid>` there. The doctor reports the timers as not enabled until they
-are started. Then
-`sudo systemctl --machine=triphammer@ --user enable --now ticket-runner@<name>.timer merge-when-ready@<name>.timer`,
-plus `demo-gallery@<name>.service` with the `demo` module and, if wanted, `triphammer-status.service`. The status page and the
-gallery listen where the configs say (`STATUS_HOST`, `DEMO_GALLERY_HOST`).
+**Check and start.** `triphammer doctor [<project>]` lists what is still missing (Doctor), `triphammer plan
+[<project>]` prints what the next tick would do, and `triphammer start [<project>]` enables and starts
+`ticket-runner@<name>.timer` and `merge-when-ready@<name>.timer`, plus `demo-gallery@<name>.service` with the `demo`
+module. A project left out is the machine's only one; with several, the command lists them. `doctor` and `plan` run
+`ticket-runner` as the service user (`sudo -iu triphammer env XDG_RUNTIME_DIR=/run/user/<uid> TRIPHAMMER_PROJECT=<name>
+~/.local/bin/ticket-runner --doctor`, without sudo when the caller is that user): `sudo -i` leaves `XDG_RUNTIME_DIR`
+unset, and without it the doctor's `systemctl --user` check cannot reach the user's manager; lingering keeps
+`/run/user/<uid>` there. The doctor reports the timers as not enabled until they are started. `start` runs
+`sudo systemctl --machine=triphammer@ --user enable --now ...`. The status page is
+`sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service`. The status page and the gallery
+listen where the configs say (`STATUS_HOST`, `DEMO_GALLERY_HOST`).
 
 **Moving an existing install.** Two machines must never run the same project at once. On the old machine, stop its
 timers (`systemctl --user disable --now 'ticket-runner@*.timer' 'merge-when-ready@*.timer'`, or the non-template

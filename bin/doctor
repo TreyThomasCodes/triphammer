@@ -164,7 +164,7 @@ else
     [ -n "$browser" ] || continue
     if ! timeout 60 "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>/dev/null | grep -q '<html'; then
       problem "Chromium does not start headless ($browser)" \
-        "install its system libraries: as root, npx playwright install-deps chromium in the checkout's web app, or run bin/provision again (bin/README.md, On a machine of its own)"
+        "install its system libraries: as root, npx playwright install-deps chromium in the checkout's web app, or run triphammer add for the project again (bin/README.md, On a machine of its own)"
     fi
   done
 fi
@@ -177,7 +177,7 @@ if tool git git "install git $units_path"; then
   for key in user.name user.email; do
     [ -n "$(git -C "$identity_dir" config --get "$key" 2>/dev/null || true)" ] \
       || problem "git has no $key for this user, so it may refuse to commit" \
-        "set it with git config --global $key, as bin/provision does from APP_AUTHOR (bin/README.md, On a machine of its own)"
+        "set it with git config --global $key, as triphammer add does from APP_AUTHOR (bin/README.md, On a machine of its own)"
   done
 fi
 if tool python3 "Python 3" "install python3 $units_path"; then
@@ -233,7 +233,7 @@ fi
 if module_on codex && tool bwrap bubblewrap "install bubblewrap (apt-get install bubblewrap) $units_path"; then
   bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1 \
     || problem "bwrap cannot create a user namespace, so Codex's sandbox fails" \
-      "install the AppArmor profile /etc/apparmor.d/bwrap that allows it userns and load it (apparmor_parser -r), as bin/provision does with the codex module (bin/README.md, Codex)"
+      "install the AppArmor profile /etc/apparmor.d/bwrap that allows it userns and load it (apparmor_parser -r), as triphammer add does with the codex module (bin/README.md, Codex)"
 fi
 
 if module_on qwen-audit; then
