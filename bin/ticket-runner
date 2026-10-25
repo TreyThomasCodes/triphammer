@@ -40,8 +40,8 @@
 # and never stops a run or a tick.
 #
 # `ticket-runner --plan` prints what the next start would do; `ticket-runner --prune-dry-run` prints what the sweep
-# would remove. Neither changes anything. `ticket-runner --doctor` lists what is missing or wrong on the machine
-# (bin/doctor), and starts no tick.
+# would remove. Neither changes anything. `ticket-runner --doctor [--before-start]` lists what is missing or wrong
+# on the machine (bin/doctor, which takes the arguments after --doctor), and starts no tick.
 #
 # The owner only brakes:
 #   - a `hold` label on an issue or pull request skips it;
@@ -68,7 +68,7 @@ bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
 # --doctor lists what is missing or wrong on the machine (bin/doctor) and does nothing else.
-[ "${1:-}" != --doctor ] || exec "$bin/doctor"
+[ "${1:-}" != --doctor ] || exec "$bin/doctor" "${@:2}"
 load_config ticket-runner "$bin/.."
 repo="$cfg_repo" checkout="$cfg_checkout" app_author="$cfg_app_author" state="$cfg_state_dir"
 project="$cfg_project" shared="$cfg_shared_dir"

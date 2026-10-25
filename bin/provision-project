@@ -222,8 +222,7 @@ if cloned "$repo" "$checkout"; then
   while IFS= read -r manifest; do
     [ -n "$manifest" ] || continue
     dir="$(dirname "$checkout/$manifest")"
-    pin="$(as_user jq -r '(.devDependencies // {}) + (.dependencies // {}) | .["@playwright/test"] // .playwright // empty' \
-      "$checkout/$manifest")" || fail "$checkout/$manifest is not JSON"
+    pin="$(as_user jq -r "$playwright_filter" "$checkout/$manifest")" || fail "$checkout/$manifest is not JSON"
     [ -n "$pin" ] || continue
     if ! [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && as_user test -f "$dir/package-lock.json"; then
       pin="$(as_user jq -r '.packages["node_modules/@playwright/test"].version // .packages["node_modules/playwright"].version // empty' \
@@ -231,7 +230,7 @@ if cloned "$repo" "$checkout"; then
     fi
     [[ "$pin" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "$checkout/$manifest asks for Playwright $pin; pin one version or lock it"
     add_pin playwright_pins "$pin"
-  done < <(as_user git -C "$checkout" ls-files -- '*package.json')
+  done < <(as_user git -C "$checkout" ls-files -- "$playwright_manifests")
 else
   note "the project's name and toolchain versions come from its checkout, which is not cloned yet; a real run reads them after cloning"
 fi

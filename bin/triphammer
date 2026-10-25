@@ -8,10 +8,10 @@
 #
 # add clones Triphammer's repository (from the machine file) into a temporary directory as the caller, runs that
 # clone's bin/provision-project as root through sudo with the arguments given, removes the clone, and then runs the
-# doctor for the project. Running a fresh clone keeps root from running code in a checkout the service user can
-# write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start enables and
-# starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's only
-# project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
+# doctor for the project with --before-start, which leaves out the units start enables. Running a fresh clone keeps
+# root from running code in a checkout the service user can write. doctor and plan run ticket-runner --doctor or
+# --plan for a project as the service user; start enables and starts the project's timers, and its gallery with the
+# demo module. A <project> left out is the machine's only project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
 #
 # sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
@@ -118,7 +118,8 @@ add() {
   [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || fail "provision-project named no project"
   echo
   echo "The doctor's check of $name:"
-  as_service setsid -w env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor < /dev/null || true
+  as_service setsid -w env TRIPHAMMER_PROJECT="$name" "$home/.local/bin/ticket-runner" --doctor --before-start < /dev/null \
+    || true
   echo
   echo "Start it, once the doctor finds nothing missing: triphammer start $name"
 }
