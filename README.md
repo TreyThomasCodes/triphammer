@@ -27,7 +27,8 @@ curl -fsSL https://raw.githubusercontent.com/TreyThomasDotCodes/triphammer/main/
 ```
 
 This installs git, Docker, Node, the GitHub CLI and Claude Code, creates a `triphammer` user and clones Triphammer to
-`/srv/triphammer`. It asks for your password once. You can run it again at any time, since it only changes what isn't
+`/srv/triphammer`. For that user it installs the Triphammer plugin and the humanizer plugin, which comes from the
+`blader/humanizer` marketplace on GitHub. It asks for your password once. You can run it again at any time, since it only changes what isn't
 right yet. To see what it would do without doing it, end the line with `bash -s -- --dry-run` instead.
 
 Second, place the credentials. The installer never reads or writes one, so you put each in place by hand:
