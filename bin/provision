@@ -4,10 +4,16 @@
 # right. Projects come afterwards, each with `triphammer add` (bin/provision-project). See bin/README.md ("On a machine
 # of its own") for the arguments, the machine's size and what the owner does afterwards.
 #
-#   provision --triphammer <owner/name> <checkout> [--user <name>] [--home <dir>] [--dry-run]
+#   provision --triphammer <owner/name> <checkout> [--user <name>] [--home <dir>] [--dry-run] [--no-owner-steps]
+#   provision --owner-steps
 #
 # --triphammer is the repository that holds bin/ and the plugin, and where to clone it; the units, the ~/.local/bin
 # links and the plugin install point at that checkout.
+#
+# It ends with what is left for the owner (owner_steps in bin/provision-lib.sh): the App's files, Claude Code's login,
+# a project or the projects whose timers are off, and the optional status page, each only while it is not done, or one
+# line saying the machine is ready. --no-owner-steps leaves that out, and --owner-steps prints only that, for the user
+# and home the machine file names, and changes nothing; triphammer update uses both, so its report comes last.
 #
 # It installs, each only when it is not there already: git, jq, Python 3, curl and the like from Ubuntu's archive;
 # Docker Engine with Compose v2 and the GitHub CLI from their vendors' apt repositories, or Ubuntu's own packages when
@@ -36,13 +42,23 @@ prog=provision
 here="$(dirname "$(readlink -f "$0")")"
 usage() {
   cat >&2 <<'EOF'
-usage: provision --triphammer <owner/name> <checkout> [--user <name>] [--home <dir>] [--dry-run]
+usage: provision --triphammer <owner/name> <checkout> [--user <name>] [--home <dir>] [--dry-run] [--no-owner-steps]
+       provision --owner-steps
 EOF
 }
 # shellcheck source=bin/provision-lib.sh
 source "$here/provision-lib.sh"
 
-tri_repo="" tri_checkout="" user=triphammer home="" home_given="" dry_run=""
+if [ "${1:-}" = --owner-steps ]; then
+  [ $# -eq 1 ] || usage_error "--owner-steps takes no other argument"
+  [ "$(id -u)" = 0 ] || fail "run it as root (sudo $0 --owner-steps), as it checks what only root may"
+  dry_run=""
+  read_machine
+  owner_steps
+  exit 0
+fi
+
+tri_repo="" tri_checkout="" user=triphammer home="" home_given="" dry_run="" owner_report=1
 need_value() { [ "$1" -gt "$2" ] || usage_error "$3 needs $4"; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -59,6 +75,8 @@ while [ $# -gt 0 ]; do
       esac
       shift 2 ;;
     --dry-run) dry_run=1; shift ;;
+    --no-owner-steps) owner_report=""; shift ;;
+    --owner-steps) usage_error "--owner-steps takes no other argument" ;;
     -h|--help) usage; exit 0 ;;
     --project|--modules|--set|--app-author) usage_error "$1 belongs to triphammer add, which sets a project up once the machine is ready" ;;
     *) usage_error "unknown argument $1" ;;
@@ -263,11 +281,4 @@ root_file "$machine_file" 644 "$(machine_text "$tri_repo" "$tri_checkout" "$user
 root_file "$node_bin/triphammer" 755 "$(cat "$here/triphammer")"$'\n'
 
 summary
-cat <<EOF
-
-Next, as the owner (provision never reads or writes a credential):
-  1. Put the App's files in $app_dir, each owned by $user and mode 600: app-id, owner and agents.pem.
-  2. Log Claude Code in: sudo -iu $user claude auth login (or claude setup-token; bin/README.md).
-  3. Add a project: triphammer add <owner>/<repo>
-  4. Optionally the status page: sudo systemctl --machine=$user@ --user enable --now triphammer-status.service
-EOF
+[ -z "$owner_report" ] || owner_steps

@@ -4,7 +4,8 @@
 // It then prints $FAKE_CLAUDE_STDOUT (default "no blocking findings"), followed by its ANTHROPIC_AUTH_TOKEN when
 // $FAKE_CLAUDE_LEAK is set, and exits with $FAKE_CLAUDE_EXIT (default 0).
 // `claude --version` prints a version and `claude auth status` the login state, an account included, logged in unless
-// $FAKE_CLAUDE_LOGGED_OUT is set (then it exits 1); neither writes claude.json.
+// $FAKE_CLAUDE_LOGGED_OUT is set or the file <dir>/logged-out exists (then it exits 1); neither writes claude.json.
+// `claude auth status` appends to <dir>/auth-calls whether it leads a session of its own and what its stdin is.
 // `claude plugin marketplace add <checkout>` (the marketplace named in its .claude-plugin/marketplace.json, or, for a
 // GitHub <owner>/<repo>, the one named <repo>),
 // `claude plugin install <id> --scope <scope>` and their `list --json` keep their state in <dir>/plugins.json and
@@ -15,19 +16,20 @@ import {join} from 'node:path';
 import {gitSnapshot} from './fixture.mjs';
 
 const [dir, ...args] = process.argv.slice(2);
+// The session id is the sixth field of /proc/self/stat, after the command name in parentheses.
+const sessionLeader = () => Number(readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[3]) === process.pid;
 if (args[0] === '--version') {
   process.stdout.write('2.1.0 (Claude Code)\n');
   process.exit(0);
 }
 if (args[0] === 'auth' && args[1] === 'status') {
-  const loggedIn = !process.env.FAKE_CLAUDE_LOGGED_OUT;
+  appendFileSync(join(dir, 'auth-calls'), `${JSON.stringify({sessionLeader: sessionLeader(), stdin: readlinkSync('/proc/self/fd/0')})}\n`);
+  const loggedIn = !process.env.FAKE_CLAUDE_LOGGED_OUT && !existsSync(join(dir, 'logged-out'));
   process.stdout.write(`${JSON.stringify({loggedIn, email: 'fake-account@example.invalid'})}\n`);
   process.exit(loggedIn ? 0 : 1);
 }
 if (args[0] === 'plugin') {
-  // The session id is the sixth field of /proc/self/stat, after the command name in parentheses.
-  const session = Number(readFileSync('/proc/self/stat', 'utf8').split(') ')[1].split(' ')[3]);
-  appendFileSync(join(dir, 'plugin-calls'), `${JSON.stringify({args: args.slice(1), sessionLeader: session === process.pid,
+  appendFileSync(join(dir, 'plugin-calls'), `${JSON.stringify({args: args.slice(1), sessionLeader: sessionLeader(),
     stdin: readlinkSync('/proc/self/fd/0')})}\n`);
   const file = join(dir, 'plugins.json');
   const state = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {marketplaces: [], plugins: []};

@@ -2,14 +2,16 @@
 // `node fake-machine.mjs <machine>/<command> <arguments>`, installed by fixture.mjs's fakeCommand with
 // fakeCommand(bin, <command>, join(<machine>, <command>), 'machine'), so the directory's last part names the command.
 // Every call appends [command, ...arguments] to <machine>/calls as a JSON line. The machine's state is
-// <machine>/machine.json: {packages, unavailable, users: {name: {home, groups}}, linger, loaded, downloads: {url: file},
-// bin}, which the calls read and change:
+// <machine>/machine.json: {packages, unavailable, users: {name: {home, groups, uid}}, linger, enabled, loaded,
+// downloads: {url: file}, bin}, which the calls read and change:
 // - apt-get update; apt-get install ... <packages> adds them, or fails like apt-get when one is `unavailable`;
 //   dpkg-query -W -f=... <package> prints `installed` for an installed one; dpkg --print-architecture prints amd64;
 // - useradd --home-dir <home> ... <name> creates the user (and its home), usermod -aG <group> <name> adds a group,
-//   getent passwd <name> and id -u [<name>] / id -nG <name> report them (id -u alone is root's 0);
+//   getent passwd <name> and id -u [<name>] / id -nG <name> report them (id -u alone is root's 0; a user's uid is its
+//   `uid`, by default the caller's own, so the files the tests write are the user's);
 // - loginctl enable-linger <name> and loginctl show-user <name> --property=Linger --value;
-// - systemctl --machine=<name>@ --user link <path> links the unit into the user's ~/.config/systemd/user, and any
+// - systemctl --machine=<name>@ --user link <path> links the unit into the user's ~/.config/systemd/user, enable
+//   [--now] <unit...> adds the units to `enabled`, is-enabled [--quiet] [--] <unit> succeeds for one in it, and any
 //   other systemctl call only records;
 // - curl [-I] [-o <file>] <url> serves `downloads[url]` (a file's path) to the file or standard output, or fails as a
 //   404 does under -f;
@@ -29,7 +31,7 @@ const command = basename(dir);
 const machine = dirname(dir);
 appendFileSync(join(machine, 'calls'), `${JSON.stringify([command, ...args])}\n`);
 const file = join(machine, 'machine.json');
-const state = {packages: [], unavailable: [], users: {}, linger: [], loaded: [], downloads: {}, git: 'git', ...JSON.parse(readFileSync(file, 'utf8'))};
+const state = {packages: [], unavailable: [], users: {}, linger: [], enabled: [], loaded: [], downloads: {}, git: 'git', ...JSON.parse(readFileSync(file, 'utf8'))};
 const save = () => writeFileSync(file, JSON.stringify(state, null, 2));
 const done = (stdout = '', exit = 0, stderr = '') => {
   process.stdout.write(stdout);
@@ -72,7 +74,7 @@ switch (command) {
     if (args.length === 1) done('0\n');
     const user = state.users[args[1]];
     if (!user) done('', 1, `id: '${args[1]}': no such user\n`);
-    done(args[0] === '-nG' ? `${user.groups.join(' ')}\n` : '1001\n');
+    done(args[0] === '-nG' ? `${user.groups.join(' ')}\n` : `${user.uid ?? process.getuid()}\n`);
   }
   case 'loginctl':
     if (args[0] === 'enable-linger') {
@@ -90,6 +92,12 @@ switch (command) {
       mkdirSync(units, {recursive: true});
       symlinkSync(args[at + 1], join(units, basename(args[at + 1])));
     }
+    const units = args.filter(arg => !arg.startsWith('-')).slice(1);
+    if (args.includes('enable')) {
+      state.enabled.push(...units.filter(unit => !state.enabled.includes(unit)));
+      save();
+    }
+    if (args.includes('is-enabled')) done('', state.enabled.includes(units[0]) ? 0 : 1);
     done();
   }
   case 'curl': {

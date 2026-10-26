@@ -44,6 +44,19 @@ function setUp(t) {
   return {m, tmp, config, update, doctors: () => lines(join(m.home, '.local/ticket-runner-calls'))};
 }
 
+// What provision's report says is left on the machine setUp leaves: neither project started, nor the status page.
+const ownerSteps = `
+Next, as the owner (provision never reads or writes a credential):
+  1. Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):
+     - project-a: triphammer start project-a
+     - project-b: triphammer start project-b
+  2. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service
+`;
+const endsWithOwnerSteps = output => {
+  assert.ok(output.endsWith(ownerSteps), output);
+  assert.equal(output.split('Next, as the owner (provision never').length, 2, 'the report came more than once');
+};
+
 test('update on a machine with two projects and nothing to change changes nothing, keeps both configs byte for byte, and runs each doctor', t => {
   const {m, tmp, config, update, doctors} = setUp(t);
   const before = [config('project-a'), config('project-b')];
@@ -57,6 +70,8 @@ test('update on a machine with two projects and nothing to change changes nothin
   assert.deepEqual(changingCalls(result.calls), []);
   assert.deepEqual([config('project-a'), config('project-b')], before);
   assert.deepEqual(doctors(), ['project-a --doctor', 'project-b --doctor']);
+  // It ends with what is left for the owner, after the doctors.
+  endsWithOwnerSteps(result.stdout);
   assert.equal(readFileSync(join(m.sys, 'usr/local/bin/triphammer'), 'utf8'), real('triphammer'));
   assert.deepEqual(readdir(tmp), [], 'the clone was left behind');
 });
@@ -76,6 +91,7 @@ test('after a project\'s SDK pin changes, update --dry-run lists the install and
   assert.deepEqual(changingCalls(dry.calls), []);
   assert.deepEqual(installs(), installed);
   assert.deepEqual(doctors(), [], 'a dry run ran the doctor');
+  endsWithOwnerSteps(dry.stdout);
 
   const result = update();
   assert.equal(result.status, 0, result.output);

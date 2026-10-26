@@ -2,7 +2,7 @@
 // the calls of a run that change it.
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fakeCommand, git, here, lines, run, toolingEnv} from './fixture.mjs';
@@ -45,7 +45,7 @@ export const readdir = path => run('ls', ['-A', path]).split('\n').filter(Boolea
 // With `privateOrigins`, a fake git clones only when git's credential helpers give github.com credentials, and GitHub's
 // App API answers github-app-token for the installation on `example`. `provision` and `project` run the branch's
 // bin/provision and bin/provision-project on it (`projectFrom` from a working directory given; the fake npx records its
-// own in npx-cwds); `placeApp` puts App files with a fresh key in the user's ~/.config/github-app.
+// own in npx-cwds); `placeApp` puts App files with a fresh key in the user's ~/.config/github-app, each mode 600.
 export function machine(t, origins, {dockerRepo = true, ghRepo = true, privateOrigins = false} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'provision-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -154,6 +154,7 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
       writeFileSync(join(app, 'app-id'), '12345\n', {mode: 0o600});
       writeFileSync(join(app, 'owner'), 'example\n', {mode: 0o600});
       run('openssl', ['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', join(app, 'agents.pem')]);
+      chmodSync(join(app, 'agents.pem'), 0o600);
     },
   };
 }
@@ -164,6 +165,7 @@ export function changingCalls(calls) {
   return calls.filter(([command, ...args]) => {
     if (['dpkg-query', 'dpkg', 'getent', 'id', 'bwrap', 'git'].includes(command)) return false;
     if (command === 'loginctl') return args[0] !== 'show-user';
+    if (command === 'systemctl') return !args.includes('is-enabled');
     if (command === 'curl') return !args.includes('-fsSIL') && args.at(-1) !== 'https://api.github.com/app';
     if (command !== 'runuser') return true;
     const inner = args.slice(args.indexOf('--') + 1).filter(arg => !arg.includes('=') || arg.startsWith('-')).slice(2);

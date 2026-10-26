@@ -229,3 +229,74 @@ reload_units() {
   change "reload $user's systemd units" systemctl --machine="$user@" --user daemon-reload \
     || fail "systemctl could not reload $user's units"
 }
+# user_enabled <unit>: succeeds when the user's unit is enabled.
+user_enabled() {
+  user_exists && systemctl --machine="$user@" --user is-enabled --quiet -- "$1" >/dev/null 2>&1
+}
+
+# owner_steps: what is left for the owner, numbered, each with its fix, or one line saying the machine is ready. It
+# reads only what the machine can tell without a credential's value and prints no file's content and no command's
+# output: the App's files by owner and mode alone (stat, as the doctor checks) and, when all three pass, whether GitHub
+# accepts the App's key (github-app-token app-slug as the user, from the copy beside this script); Claude Code's login
+# by the exit status of claude auth status, as the user in a session of its own (its output can name the account); the
+# projects' configs in ~/.config/triphammer and whether their timers are enabled; and whether the status page is.
+owner_steps() {
+  local app_dir="$home/.config/github-app" uid name path what owner mode step=0 app=() projects=() off="" lines=()
+  uid="$(id -u "$user" 2>/dev/null || true)"
+  for name in app-id owner agents.pem; do
+    path="$app_dir/$name"
+    case "$name" in
+      app-id) what="the App's numeric id" ;;
+      owner) what="the login of the account the App is installed on" ;;
+      agents.pem) what="the App's private key" ;;
+    esac
+    if [ ! -e "$path" ]; then
+      app+=("$name is missing: put $what in $path, owned by $user, mode 600")
+    elif [ ! -f "$path" ]; then
+      app+=("$name is not a regular file: replace $path with $what, owned by $user, mode 600")
+    else
+      read -r owner mode < <(stat -L -c '%u %a' -- "$path")
+      { [ -n "$uid" ] && [ "$owner" = "$uid" ]; } || app+=("$name is not owned by $user: chown $user $path")
+      [ "$mode" = 600 ] || app+=("$name has mode $mode, not 600: chmod 600 $path")
+    fi
+  done
+  if [ ${#app[@]} -eq 0 ] && ! { bootstrap_helper && as_user "$bootstrap/github-app-token" app-slug >/dev/null 2>&1; }; then
+    app+=("GitHub did not accept the App's key, or could not be reached: app-id or agents.pem is not the App's; replace them with the App's, owned by $user, mode 600")
+  fi
+  if [ ${#app[@]} -gt 0 ]; then
+    lines+=("  $((step += 1)). The App's files in $app_dir:")
+    for what in "${app[@]}"; do lines+=("     - $what"); done
+  fi
+
+  if ! as_user_claude auth status >/dev/null 2>&1; then
+    lines+=("  $((step += 1)). Log Claude Code in: sudo -iu $user claude auth login (or claude setup-token; bin/README.md).")
+  fi
+
+  for path in "$home/.config/triphammer"/*.conf; do
+    name="${path##*/}" name="${name%.conf}"
+    { [ -f "$path" ] && [[ "$name" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]]; } || continue
+    if user_enabled "ticket-runner@$name.timer" && user_enabled "merge-when-ready@$name.timer"; then
+      projects+=("     - $name: its timers are on")
+    else
+      projects+=("     - $name: triphammer start $name")
+      off=1
+    fi
+  done
+  if [ ${#projects[@]} -eq 0 ]; then
+    lines+=("  $((step += 1)). Add a project: triphammer add <owner>/<repo>")
+  elif [ -n "$off" ]; then
+    lines+=("  $((step += 1)). Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):" "${projects[@]}")
+  fi
+
+  if ! user_enabled triphammer-status.service; then
+    lines+=("  $((step += 1)). Optionally the status page: sudo systemctl --machine=$user@ --user enable --now triphammer-status.service")
+  fi
+
+  echo
+  if [ "$step" -eq 0 ]; then
+    echo "Nothing left for the owner: the machine is ready."
+  else
+    echo "Next, as the owner (provision never reads or writes a credential):"
+    printf '%s\n' "${lines[@]}"
+  fi
+}
