@@ -335,16 +335,16 @@ test('the App check gets its token for the owner of REPO, not the owner file\'s 
   rmSync(join(r.app, 'agents.pem'));
   run('openssl', ['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', join(r.app, 'agents.pem')]);
   chmodSync(join(r.app, 'agents.pem'), 0o600);
-  const installations = 'GET https://api.github.com/app/installations';
-  const token = {stdout: JSON.stringify({token: 'ghs_acct_a', expires_at: '2999-01-01T00:00:00Z'})};
-  r.curlRoutes({[`GET ${qwenUrl}`]: {}, [installations]: {stdout: JSON.stringify([{id: 41, account: {login: 'acct-a'}}])},
-    'POST https://api.github.com/app/installations/41/access_tokens': token});
+  const installedOn = login => r.curlRoutes({[`GET ${qwenUrl}`]: {},
+    'GET https://api.github.com/app/installations': {stdout: JSON.stringify([{id: 41, account: {login}}])},
+    'POST https://api.github.com/app/installations/41/access_tokens':
+      {stdout: JSON.stringify({token: 'ghs_test', expires_at: '2999-01-01T00:00:00Z'})}});
+  installedOn('acct-a');
   assertOneProblem(r.doctor({XDG_CACHE_HOME: join(r.root, 'cache')}),
     /^gh does not act as the agents' GitHub App on acct-b, the owner of acct-b\/example-project \(gh api installation\/repositories fails\)\. Fix: install the App on acct-b, /);
   assert.deepEqual(r.gh.calls(), [['--version']], 'gh ran with a token of another account\'s installation');
   // Installed on acct-b as well, the check passes as acct-b.
-  r.curlRoutes({[`GET ${qwenUrl}`]: {}, [installations]: {stdout: JSON.stringify([{id: 41, account: {login: 'acct-b'}}])},
-    'POST https://api.github.com/app/installations/41/access_tokens': token});
+  installedOn('acct-b');
   const result = r.doctor({XDG_CACHE_HOME: join(r.root, 'cache')});
   assert.equal(result.status, 0, result.output);
 });
