@@ -163,8 +163,9 @@ load_config() {
       exit 2
     fi
   done
+  # No leading zero: the scripts do arithmetic with these, which reads 08 as octal.
   for key in CODEX_WEEKLY_CAP CODEX_FLOOR_PERCENT CODEX_RUN_PERCENT; do
-    if [ -n "${found[$key]:-}" ] && { ! [[ "${found[$key]}" =~ ^[0-9]{1,6}$ ]] \
+    if [ -n "${found[$key]:-}" ] && { ! [[ "${found[$key]}" =~ ^(0|[1-9][0-9]{0,5})$ ]] \
         || { [ "$key" != CODEX_WEEKLY_CAP ] && [ "${found[$key]}" -gt 100 ]; }; }; then
       echo "$script: $file: $key must be a whole number$([ "$key" = CODEX_WEEKLY_CAP ] || echo ' from 0 to 100'), not ${found[$key]}" >&2
       exit 2
