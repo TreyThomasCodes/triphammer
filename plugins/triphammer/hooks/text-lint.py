@@ -2,9 +2,18 @@
 # Claude Code hook, part of the Triphammer plugin (its hooks/hooks.json runs it; a project's .claude/settings.json may
 # run it too), for the text agents post: pull request and issue titles and bodies, and commit messages.
 #
-# PreToolUse on Bash: checks `gh pr create|edit`, `gh issue create|edit` (and glab's mr/issue create|edit|update) and
-# `git commit`. The text comes from --title/-t, --body/-b, -m/--message, a heredoc, or a --body-file/-F file. A
-# --body-file that does not exist is refused, so the check cannot be skipped by writing the file in the same command.
+# PreToolUse on Bash: checks `gh pr create|new|edit`, `gh issue create|new|edit` (and glab's mr/issue
+# create|new|edit|update) and `git commit`. Each command of a list, pipeline, subshell or substitution is found by its
+# words, parsed by agent-guard.py's shell parsing (loaded from beside this file): after variable assignments and the
+# wrappers it strips (env with its options, command, sudo, time, nohup, exec, nice, stdbuf, timeout, builtin), named
+# by its name or any path to it, quoted or escaped, with gh's -R/--repo and git's options (-C, -c, --no-pager...)
+# before the subcommand. The text comes from --title/-t and --body/-b (glab: --description/-d), git's -m/--message,
+# a heredoc the command reads, or a --body-file/-F file; a value may be the next word, attached (`-b'text'`, `-am msg`)
+# or after `=`, and when an option repeats its last value counts, as gh reads it (git joins its -m values). A command
+# with -h or --help posts nothing and is not checked. A --body-file that does not exist is refused, so the check
+# cannot be skipped by writing the file in the same command. Not covered: a command run by bash -c, eval, xargs, a
+# script or a gh alias, git's abbreviated long options (--mess), and a value given by an unquoted substitution
+# (--body $(cat f)) or computed when it runs.
 # Text that breaks a rule is refused with every rule it breaks:
 #
 #   upstream    DASH, TEST_PLAN, WORTH_KNOWING, CONTEXT_SOLUTION, FIX_FRAMING (not for issues, nor for a title or
@@ -19,8 +28,8 @@
 #
 # Code spans and fenced blocks are not prose. `gh pr comment` and issue comments are not checked.
 # `# text-lint-override: <reason>` anywhere in the command lets that one command through. Anything else the hook cannot
-# work out (malformed input, an exception) allows the command: it never blocks on its own failure, except that the
-# humanizer gate refuses when it cannot read its state.
+# work out (malformed input, an exception, agent-guard.py missing or its parse out of time) allows the command: it
+# never blocks on its own failure, except that the humanizer gate refuses when it cannot read its state.
 #
 # PostToolUse on Skill: records a run of the humanizer skill for the session_id in the state directory,
 # $TRIPHAMMER_HUMANIZER_STATE or ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer, outside the repository.
@@ -47,6 +56,7 @@
 #   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #   SOFTWARE.
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -60,15 +70,23 @@ HUMANIZER_SKILLS = {"humanizer", "humanizer:humanizer"}
 HUMANIZER_INSTALL = ("The humanizer plugin is not installed for this user: ask the owner to run "
                      "`/plugin marketplace add blader/humanizer`, then `/plugin install humanizer@humanizer`.")
 
-# Only at command position (after optional VAR=value assignments): a script or heredoc that merely mentions the
-# command is not one.
-AT = r"(?:^|[;&|(]\s*|\n\s*)(?:[A-Za-z_]\w*=\S*\s+)*"
-PR = re.compile(AT + r"(gh pr|glab mr) (create|edit|update)\b")
-ISSUE = re.compile(AT + r"(gh|glab) issue (create|edit|update)\b")
-COMMIT = re.compile(AT + r"git(?:\s+-C\s+\S+)?\s+commit\b")
-GATED_PR = re.compile(AT + r"gh pr (create|edit)\b")
-HEREDOC = re.compile(r"(<<-?\s*'?\"?(\w+)'?\"?\n)(.*?)(\n\s*\2\b)", re.S)
-QUOTED = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'[^']*'", re.S)
+# The commands that post text: (tool, group) to kind, and each verb (with its alias) to the verb it is.
+KINDS = {("gh", "pr"): "pr", ("glab", "mr"): "pr", ("gh", "issue"): "issue", ("glab", "issue"): "issue"}
+VERBS = {"create": "create", "new": "create", "edit": "edit", "update": "update"}
+# Per tool: the short option letters that take a value (attached, `-tTitle`, or the next word), the long options that
+# take the next word as their value, and the options that carry the title, the body and the body file.
+GH = ("aBbFHlmpRrTt", {"--repo", "--title", "--body", "--body-file", "--base", "--head", "--assignee", "--label",
+                       "--milestone", "--project", "--reviewer", "--template", "--recover"},
+      ("-t", "--title"), ("-b", "--body"), ("-F", "--body-file"))
+GLAB = ("abdeFilmRst", {"--repo", "--title", "--description", "--body-file", "--target-branch", "--source-branch",
+                        "--assignee", "--label", "--milestone", "--reviewer"},
+        ("-t", "--title"), ("-d", "--description"), ("-F", "--body-file"))
+TOOLS = {"gh": GH, "glab": GLAB}
+# git commit's: -S and -u take a value only attached, so the rest of their group is theirs.
+COMMIT_OPTIONS = ("mFcCt", {"--message", "--file", "--author", "--date", "--cleanup", "--trailer", "--fixup",
+                            "--squash", "--reuse-message", "--reedit-message", "--template", "--pathspec-from-file"})
+ATTACHED_ONLY = {"git": "Su"}
+MARKER = re.compile(r"\x00(\d+)\x00")  # agent-guard's mark of a heredoc body, also inside a word: "$(cat <<EOF ...)"
 
 FIX_PHRASES = [r"until now", r"previously", r"never reached", r"was missing", r"were missing",
                r"nothing (did|sent|was|reached|published|handled)", r"had no way to", r"there was no way to"]
@@ -136,49 +154,127 @@ def humanizer_gap(session_id):
     return None
 
 
-def unquote(text):
-    if text.startswith("'"):
-        return text[1:-1]
-    return re.sub(r"\\([\"\\$`])", r"\1", text[1:-1])
+def load_guard():
+    """agent-guard.py beside this hook, whose shell parsing (strip_heredocs, tokenize, pipelines, strip_prefix) finds
+    the commands here."""
+    sys.dont_write_bytecode = True  # no __pycache__ in the plugin's directory
+    spec = importlib.util.spec_from_file_location(
+        "agent_guard", os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent-guard.py"))
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    return guard
+
+
+def read_options(args, short_values, long_values, attached_only=""):
+    """The (option, value) pairs of args in order, and whether they ask for help (-h, --help). A long option's value
+    follows `=` or, when it is in long_values, is the next word; a short letter in short_values takes the rest of its
+    group (`-b'text'`, `-am msg`) or else the next word; one in attached_only ends the group, which is its value."""
+    pairs, i = [], 0
+    while i < len(args):
+        value = args[i].value
+        i += 1
+        if value == "--":
+            break
+        if value in ("-h", "--help"):
+            return pairs, True
+        if value.startswith("--"):
+            name, eq, attached = value.partition("=")
+            if eq:
+                pairs.append((name, attached))
+            elif name in long_values and i < len(args):
+                pairs.append((name, args[i].value))
+                i += 1
+        elif value.startswith("-") and len(value) > 1:
+            for j, letter in enumerate(value[1:], 2):
+                if letter in attached_only:
+                    break
+                if letter in short_values:
+                    if j < len(value):
+                        pairs.append(("-" + letter, value[j:]))
+                    elif i < len(args):
+                        pairs.append(("-" + letter, args[i].value))
+                        i += 1
+                    break
+    return pairs, False
+
+
+def posting_commands(cmd, cwd):
+    """(tool, kind, verb, options, heredoc, directory) for each command in cmd that posts text, found by its words
+    after any assignments and wrappers: options as read_options returns them, heredoc the first heredoc body it reads
+    (also one inside a word, as in --body "$(cat <<'EOF' ...)"), directory the one its relative files are read from."""
+    guard = load_guard()
+    text, bodies = guard.strip_heredocs(cmd)
+    try:
+        tokens = guard.tokenize(text)
+    except guard.Unbalanced as error:
+        # bash runs every line before the one where the quote opens, then stops with a syntax error.
+        tokens = guard.tokenize(text[:max(text.rfind("\n", 0, error.start), 0)])
+    for pipeline, _ in guard.pipelines(tokens):
+        for command in pipeline:
+            words = guard.strip_prefix(command.words)
+            if not words:
+                continue
+            tool, args, directory, i = os.path.basename(words[0].value), words[1:], cwd, 0
+            if tool in TOOLS:
+                positional = []  # the group and the verb, around -R/--repo and other options
+                while i < len(args) and len(positional) < 2:
+                    value = args[i].value
+                    if value in ("-h", "--help", "--"):
+                        break
+                    i += 2 if value in ("-R", "--repo") else 1
+                    if not value.startswith("-"):
+                        positional.append(value)
+                kind = KINDS.get(tuple([tool] + positional[:1])) if len(positional) == 2 else None
+                verb = VERBS.get(positional[1]) if kind else None
+                if not verb:
+                    continue
+                short, long = TOOLS[tool][:2]
+            elif tool == "git":
+                while i < len(args) and args[i].value.startswith("-"):
+                    value = args[i].value
+                    if value == "-C" and i + 1 < len(args) and isinstance(directory, str):
+                        directory = os.path.join(directory, os.path.expanduser(args[i + 1].value))
+                    i += 2 if value in guard.GIT_VALUE_OPTIONS else 1
+                if i >= len(args) or args[i].value != "commit":
+                    continue
+                if {"--amend", "--no-edit"} <= {w.value for w in args[i + 1:]}:
+                    continue  # keeps the message it has
+                kind, verb, (short, long) = "commit", "commit", COMMIT_OPTIONS
+                i += 1
+            else:
+                continue
+            options, helped = read_options(args[i:], short, long, ATTACHED_ONLY.get(tool, ""))
+            if helped:
+                continue  # prints help and posts nothing
+            marks = list(command.heredocs) + [int(k) for w in words for k in MARKER.findall(w.value)]
+            heredoc = next((bodies[k] for k in marks if k < len(bodies)), None)
+            yield tool, kind, verb, options, heredoc, directory
 
 
 def lint(cmd, cwd, session_id):
-    """(kind, failures) for cmd, or None when it is not checked or passes."""
-    if m := PR.search(cmd):
-        kind, verb = "pr", m.group(2)
-    elif m := ISSUE.search(cmd):
-        kind, verb = "issue", m.group(2)
-    elif COMMIT.search(cmd) and not re.search(r"--amend --no-edit|--no-edit --amend", cmd):
-        kind, verb = "commit", "commit"
-    else:
-        return None
+    """(kind, failures) for the first command in cmd that posts text breaking a rule, or None."""
+    for found in posting_commands(cmd, cwd):
+        result = lint_command(*found, session_id)
+        if result:
+            return result
+    return None
 
-    heredoc = HEREDOC.search(cmd)
-    heredoc = heredoc.group(3) if heredoc else None
-    head = HEREDOC.sub(lambda m: m.group(1) + m.group(4), cmd)  # flags and quoted values, without heredoc bodies
-    quoted_spans = [m.span() for m in QUOTED.finditer(head)]
 
-    def flag_values(flags, value):
-        """The matches of each flag in flags followed by value, skipping flags that are inside a quoted argument."""
-        pattern = r"(?:^|\s)(?P<flag>%s)(?:[ =](%s)|$)" % ("|".join(flags), value)
-        return [m for m in re.finditer(pattern, head, re.S | re.M)
-                if not any(start <= m.start("flag") < end for start, end in quoted_spans)]
+def lint_command(tool, kind, verb, options, heredoc, directory, session_id):
+    def values(names):
+        return [value for name, value in options if name in names]
 
-    def quoted_after(flags):
-        return [unquote(m.group(2)) for m in flag_values(flags, QUOTED.pattern) if m.group(2)]
+    def last(names):
+        found = values(names)
+        return found[-1] if found else None
 
-    def file_after(flags):
-        m = next((m for m in flag_values(flags, QUOTED.pattern + r"|[^\s;&|'\"]+") if m.group(2)), None)
-        if not m:
-            return None
-        path = m.group(2)
-        if path[:1] in "'\"" and path[-1:] == path[:1]:
-            path = path[1:-1]
-        if path == "-":
+    def file_text(names):
+        path = last(names)
+        if not path or path == "-":
             return None  # stdin: the heredoc carries the text
         full = os.path.expanduser(path)
-        if not os.path.isabs(full) and isinstance(cwd, str) and os.path.isabs(cwd):
-            full = os.path.join(cwd, full)
+        if not os.path.isabs(full) and isinstance(directory, str) and os.path.isabs(directory):
+            full = os.path.join(directory, full)
         try:
             with open(full) as f:
                 return f.read()
@@ -187,25 +283,23 @@ def lint(cmd, cwd, session_id):
                           f"the Write tool first, then run the command on its own, with a literal path.")
 
     if kind == "commit":
-        messages = quoted_after(["-m", "-am", "--message"])
-        msg = file_after(["-F", "--file"]) or heredoc or "\n\n".join(messages)
+        msg = file_text(["-F", "--file"]) or heredoc or "\n\n".join(values(["-m", "--message"]))
         title, _, body = msg.partition("\n")
+        text_options = []
     else:
-        titles = quoted_after(["--title", "-t"])
-        title = titles[0] if titles else ""
-        bodies = quoted_after(["--body", "-b", "--description", "-d"])
-        body = file_after(["--body-file", "-F"]) or heredoc or (bodies[0] if bodies else "")
+        title_flags, body_flags, file_flags = TOOLS[tool][2:]
+        title = last(title_flags) or ""
+        body = file_text(file_flags) or heredoc or last(body_flags) or ""
+        text_options = values(title_flags + body_flags + file_flags)
 
     fail = []
-    gated = GATED_PR.search(cmd)
-    if gated and (gated.group(1) == "create" or flag_values(["--title", "-t", "--body", "-b", "--body-file", "-F"],
-                                                            r"\S")):
+    if (tool, kind) == ("gh", "pr") and (verb == "create" or verb == "edit" and text_options):
         gap = humanizer_gap(session_id)
         if gap:
             fail.append(gap)
 
     if title or body:
-        fail = text_failures(kind, verb, title, body, cwd) + fail
+        fail = text_failures(kind, verb, title, body, directory) + fail
     return (kind, fail) if fail else None
 
 

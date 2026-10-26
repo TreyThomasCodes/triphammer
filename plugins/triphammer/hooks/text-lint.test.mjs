@@ -208,6 +208,66 @@ test('a command that only mentions gh pr create in its text is not checked', t =
   assert.equal(bash(s, `grep -n "gh pr create" plugins/triphammer/skills/review-loop/SKILL.md`), null);
 });
 
+// How the command is spelled.
+
+const B = `--title "Adds x" --body "Previously — broken"`;
+
+test('gh pr and issue create are checked however the command is spelled', t => {
+  const s = humanized(t);
+  for (const command of [`gh pr new ${B}`, `gh issue new ${B}`, `gh  pr create ${B}`, `gh\tpr\tcreate ${B}`,
+    `env gh pr create ${B}`, `env -u X FOO=1 gh pr create ${B}`, `command gh pr create ${B}`, `\\gh pr create ${B}`,
+    `/usr/bin/gh pr create ${B}`, `time gh pr create ${B}`, `nohup gh pr create ${B}`, `sudo -u x gh pr create ${B}`,
+    `gh -R a/b pr create ${B}`, `gh --repo a/b pr create ${B}`, `gh --repo=a/b pr create ${B}`,
+    `gh pr -R a/b create ${B}`, `true && gh pr create ${B}`, `(gh pr create ${B})`, `gh pr create ${B} | cat`]) {
+    assertRefused(bash(s, command), 'DASH');
+  }
+  assertRefused(bash(s, `gh  pr create ${B}`), 'CLOSES');
+  assertRefused(bash(s, `glab mr new --title "Adds x" --description "Previously — broken"`), 'DASH');
+});
+
+test('git commit is checked however git is spelled', t => {
+  const s = humanized(t);
+  for (const command of [`git -c user.name=x commit -m 'x — y'`, `git --no-pager commit -m 'x — y'`,
+    `git commit -m"x — y"`, `git commit -am'x — y'`, `git commit --message='x — y'`, `env git commit -m 'x — y'`,
+    `git  commit -m 'x — y'`, `/usr/bin/git commit -m 'x — y'`, `git commit -s -m 'x — y'`]) {
+    assertRefused(bash(s, command), 'DASH');
+  }
+});
+
+test('attached option values are read', t => {
+  const s = humanized(t);
+  const reason = bash(s, `gh pr create -t 'Adds x' -b'a — b'`);
+  assertRefused(reason, 'DASH');
+  assertRefused(bash(s, `gh pr create --title='Adds x' --body='a — b\n\nCloses #1'`), 'DASH');
+  assertRefused(bash(s, `gh pr create -t'Previously x' -b 'Adds it.\n\nCloses #1'`), 'FEATURE FRAMED');
+  assertRefused(bash(scratch(t), `gh pr create -t 'Adds x' -b'a — b'`), 'HUMANIZER');
+  writeFileSync(join(s.cwd, 'body.md'), 'Previously — x\n\nCloses #1\n');
+  assertRefused(bash(s, `gh pr create -t 'Adds x' -Fbody.md`), 'DASH');
+  assertRefused(bash(s, `gh pr create -t 'Adds x' --body-file=body.md`), 'DASH');
+});
+
+test('a commit -F file is read from the directory git -C names', t => {
+  const s = humanized(t);
+  mkdirSync(join(s.cwd, 'sub'));
+  writeFileSync(join(s.cwd, 'sub', 'message.txt'), 'Add x\n\nPreviously — broken\n');
+  assertRefused(bash(s, 'git -C sub commit -F message.txt'), 'DASH');
+});
+
+test('commands that post no text are allowed', t => {
+  const s = scratch(t);
+  for (const command of ['gh pr create --help', 'gh pr create -h', 'gh --help pr create', 'gh pr new --help',
+    'gh issue create --help', 'gh pr view 12', 'gh pr list -R a/b', 'git commit --help', 'git log -m',
+    'git commit --amend --no-edit', 'command -v gh', 'gh pr checkout 12', 'gh repo create x']) {
+    assert.equal(bash(s, command), null, command);
+  }
+});
+
+test('glab reads -d as the description, and -b as its target branch', t => {
+  const s = humanized(t);
+  assertRefused(bash(s, `glab mr create -t 'Adds x' -d 'a — b\n\nCloses #1'`), 'DASH');
+  assert.equal(bash(s, `glab mr create -t 'Adds x' -b main -d 'Adds it.\n\nCloses #1'`), null);
+});
+
 // Where the text comes from.
 
 test('text is read from --title and --body, -m, a heredoc and a --body-file', t => {
