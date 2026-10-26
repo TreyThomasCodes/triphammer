@@ -260,3 +260,42 @@ test('with the demo module off, or without its gallery or URL, it exits 2 naming
     assert.equal(existsSync(join(root, 'data')), false);
   }
 });
+
+test('a video ffmpeg cannot convert fails in one line and leaves the earlier publish as it was, with no half-built folder', t => {
+  const root = mkdtempSync(join(tmpdir(), 'demo-publish-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  // A fake ffmpeg that copies its input to its output, and fails as the real one does when the input is not a video.
+  const bin = join(root, 'ffmpeg-bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'ffmpeg'), `#!/bin/sh
+for arg; do [ "$prev" = -i ] && in=$arg; prev=$arg; done
+cat "$in" > "$prev"
+if grep -q 'not a video' "$prev"; then echo "$in: Invalid data found when processing input" >&2; exit 1; fi
+`, {mode: 0o755});
+  const env = {PATH: `${bin}:${join(root, 'gh', 'bin')}:${process.env.PATH}`};
+  mkdirSync(join(root, 'first'));
+  writeFileSync(join(root, 'first', 'a.png'), 'first png');
+  const first = runIn(root, ['999', '--summary', 'Shows the demo', join(root, 'first')], env);
+  assert.equal(first.status, 0, first.stderr);
+  const demos = join(root, 'data', 'demos');
+  const meta = readFileSync(join(demos, 'pr-999', 'meta.json'), 'utf8');
+  mkdirSync(join(root, 'second'));
+  writeFileSync(join(root, 'second', 'b.png'), 'second png');
+  writeFileSync(join(root, 'second', 'v.webm'), 'not a video');
+  const r = runIn(root, ['999', '--summary', 'Shows another demo', join(root, 'second')], env);
+  assert.equal(r.status, 1);
+  assert.doesNotMatch(r.stderr, /Traceback/);
+  assert.equal(r.stderr.trimEnd().split('\n').length, 1, r.stderr);
+  assert.match(r.stderr, /^demo-publish: ffmpeg could not convert .*\/second\/v\.webm: .*Invalid data found when processing input; /);
+  assert.deepEqual(readdirSync(join(demos, 'pr-999')).sort(), ['00-first-a.png', 'meta.json']);
+  assert.equal(readFileSync(join(demos, 'pr-999', '00-first-a.png'), 'utf8'), 'first png');
+  assert.equal(readFileSync(join(demos, 'pr-999', 'meta.json'), 'utf8'), meta);
+  assert.deepEqual(readdirSync(demos).sort(), ['index.html', 'pr-999']);
+});
+
+test('publishing again replaces the earlier entry and leaves no staging folder in the gallery', t => {
+  const r = demoPublish(t, {'b.png': 'second png'}, {first: {'a.png': 'first png'}});
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.published, ['00-results-b.png']);
+  assert.deepEqual(readdirSync(join(r.folder, '../data/demos')).sort(), ['index.html', 'pr-999']);
+});
