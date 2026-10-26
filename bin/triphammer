@@ -34,12 +34,12 @@
 # sudo asks for the password once (sudo -v) before add or update changes anything, and it is not used when the caller
 # is root (add, start, update) or the service user (doctor, plan, start). provision, provision-project and ticket-runner
 # run in a session of their own with nothing on stdin, as install.sh runs provision: their output still reaches the
-# terminal, but no command under them can be stopped for touching it. So Ctrl-C at the terminal reaches this script and the bash that runs the step
-# (directly or through sudo), but not the step. As in install.sh, on an INT, TERM or HUP the script sends TERM to that
-# bash (from a session of its own, since some sudo versions do not relay a signal sent from the process group the
-# command runs in); on any of the three that bash sends TERM to the step's whole process group and waits for the step
-# to end; and only then does the script end, by the signal it got. Exit status: the step's own (update's, above), 2 for
-# a usage error, 1 when the machine file is missing or malformed.
+# terminal, but no command under them can be stopped for touching it. So Ctrl-C at the terminal reaches this script
+# and the bash that runs the step (directly or through sudo), but not the step. As in install.sh, on an INT, TERM or
+# HUP the script sends TERM to that bash (from a session of its own, since some sudo versions do not relay a signal
+# sent from the process group the command runs in); on any of the three that bash sends TERM to the step's whole
+# process group and waits for the step to end; and only then does the script end, by the signal it got. Exit status:
+# the step's own (update's, above), 2 for a usage error, 1 when the machine file is missing or malformed.
 #
 # Tests (triphammer.test.mjs) use TRIPHAMMER_PROVISION_ROOT for where /etc lies and TRIPHAMMER_PROVISION_GIT_BASE for
 # where repositories are cloned from, as provision does.
@@ -251,7 +251,7 @@ user_systemctl() {
 }
 
 update() {
-  local arg dry=() names repos=() name repo i step=0 status=0 changed="" units shown doctor_failed=""
+  local arg dry=() names repos=() name repo i status=0 changed="" units shown
   for arg; do
     case "$arg" in
       --dry-run) dry=(--dry-run) ;;
@@ -277,12 +277,10 @@ update() {
   for i in "${!names[@]}"; do
     echo
     echo "The project ${names[i]}:"
-    step=0
-    as_root provision-project "${repos[i]}" "${dry[@]}" || step=$?
-    if [ "$step" -ne 0 ]; then
-      printf 'triphammer: provision-project %s failed (exit %s)\n' "${repos[i]}" "$step" >&2
-      status=$step
-    fi
+    as_root provision-project "${repos[i]}" "${dry[@]}" || {
+      status=$?
+      printf 'triphammer: provision-project %s failed (exit %s)\n' "${repos[i]}" "$status" >&2
+    }
     grep -qx 'Nothing to change: the machine is as asked.' "$work/output" || changed=1
   done
 
@@ -318,9 +316,8 @@ update() {
   for name in "${names[@]}"; do
     echo
     echo "The doctor's check of $name:"
-    service_runner "$name" --doctor || doctor_failed=1
+    service_runner "$name" --doctor || [ "$status" -ne 0 ] || status=1  # a failed step's status wins over the doctor's
   done
-  [ "$status" -ne 0 ] || [ -z "$doctor_failed" ] || status=1
   exit "$status"
 }
 
