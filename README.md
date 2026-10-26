@@ -29,7 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/TreyThomasDotCodes/triphammer/main/
 This installs git, Docker, Node, the GitHub CLI and Claude Code, creates a `triphammer` user and clones Triphammer to
 `/srv/triphammer`. For that user it installs the Triphammer plugin and the humanizer plugin, which comes from the
 `blader/humanizer` marketplace on GitHub. It asks for your password once. You can run it again at any time, since it only changes what isn't
-right yet. To see what it would do without doing it, end the line with `bash -s -- --dry-run` instead.
+right yet. To see what it would do without doing it, end the line with `bash -s -- --dry-run` instead. It ends by
+listing what is still left for you, each step with its fix, or by saying the machine is ready.
 
 Second, place the credentials. The installer never reads or writes one, so you put each in place by hand:
 
@@ -60,7 +61,8 @@ triphammer update             # or triphammer update --dry-run, to see what it w
 ```
 
 It runs the setup again for the machine and for each project, keeping each project's settings, reloads the units when
-one changed, and ends with each project's doctor. Nothing runs it on a schedule; changes as root stay yours.
+one changed, runs each project's doctor and ends with the same list of what is left for you as the installer. Nothing
+runs it on a schedule; changes as root stay yours.
 
 [`bin/README.md`](bin/README.md) covers every option, the configuration, and running Triphammer on a machine you also
 use for other things.

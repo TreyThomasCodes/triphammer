@@ -54,6 +54,11 @@ echo "project: example-project"
 echo "provision sudo=\${UNDER_SUDO:-no} $*" >> '${record}'
 pwd >> '${record}.cwd'
 ${session('provision')}
+if [ "$1" = --owner-steps ]; then
+  [ ! -e '${root}/owner-steps-fails' ] || exit 4
+  echo "the owner's steps"
+  exit 0
+fi
 ${slowStep('machine')}
 [ ! -e '${root}/machine-fails' ] || exit "$(cat '${root}/machine-fails')"
 ${summary('provision')}
@@ -277,8 +282,8 @@ test('update, as an ordinary user, runs a fresh clone\'s provision with the mach
     `${service} sed -n s/^REPO=//p ${s.home}/.config/triphammer/a.conf`,
     `${service} sed -n s/^REPO=//p ${s.home}/.config/triphammer/b.conf`]);
   const rest = calls.slice(4);
-  assert.match(step(rest[0]), new RegExp(`^sudo <session> bash ${clone}/provision --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home}$`));
-  assert.equal(rest[1], `provision sudo=yes --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home}`);
+  assert.match(step(rest[0]), new RegExp(`^sudo <session> bash ${clone}/provision --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home} --no-owner-steps$`));
+  assert.equal(rest[1], `provision sudo=yes --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home} --no-owner-steps`);
   assert.match(step(rest[2]), new RegExp(`^sudo <session> bash ${clone}/provision-project example/project-a$`));
   assert.equal(rest[3], 'provision-project sudo=yes example/project-a');
   assert.equal(rest[5], 'provision-project sudo=yes example/project-b');
@@ -287,14 +292,19 @@ test('update, as an ordinary user, runs a fresh clone\'s provision with the mach
     + 'ticket-runner@b.service ticket-runner@b.timer merge-when-ready@b.service merge-when-ready@b.timer demo-gallery@b.service');
   assert.deepEqual(calls.filter(call => call.startsWith('ticket-runner')), [
     'ticket-runner project=a runtime=/run/user/1001 --doctor', 'ticket-runner project=b runtime=/run/user/1001 --doctor']);
+  // It ends with what is left for the owner: provision's report, from the clone, as root.
+  assert.match(step(calls.at(-2)), new RegExp(`^sudo <session> bash ${clone}/provision --owner-steps$`));
+  assert.equal(calls.at(-1), 'provision sudo=yes --owner-steps');
+  assert.ok(result.stdout.endsWith("The doctor's check of b:\nthe owner's steps\n"), result.stdout);
   assert.deepEqual(calls.filter(call => /systemctl .* (daemon-reload|enable|start|stop|restart)\b/.test(call)), [],
     'update reloaded or touched a unit');
   assert.match(result.stdout, /^Nothing to change: the machine and every project are as asked\.$/m);
   assert.deepEqual([s.config('a'), s.config('b')], before);
-  assert.deepEqual(s.cwds(), ['/', '/', '/']);
+  assert.deepEqual(s.cwds(), ['/', '/', '/', '/']);
   assert.deepEqual(readdir(s.tmp), [], 'the clone was left behind');
   assert.deepEqual(s.sessions(), ['provision leader /dev/null', 'provision-project leader /dev/null',
-    'provision-project leader /dev/null', 'ticket-runner leader /dev/null', 'ticket-runner leader /dev/null']);
+    'provision-project leader /dev/null', 'ticket-runner leader /dev/null', 'ticket-runner leader /dev/null',
+    'provision leader /dev/null']);
 });
 
 test('update reloads the service user\'s units only when systemd says a unit file changed, or cannot say', t => {
@@ -319,7 +329,8 @@ test('update as root runs every step without sudo, and a change in any step is r
   assert.equal(result.status, 0, result.stderr);
   const calls = s.calls();
   assert.ok(!calls.some(call => call.startsWith('sudo -v') || call.startsWith('sudo <') || / sudo=yes /.test(call)));
-  assert.ok(calls.includes(`provision sudo=no --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home}`));
+  assert.ok(calls.includes(`provision sudo=no --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home} --no-owner-steps`));
+  assert.equal(calls.at(-1), 'provision sudo=no --owner-steps');
   assert.ok(calls.some(call => call.startsWith('systemctl runtime= --machine=triphammer@ --user show ')));
   assert.match(result.stdout, /^The changes above were made\.$/m);
   assert.doesNotMatch(result.stdout, /sudo asks/);
@@ -332,13 +343,16 @@ test('update --dry-run passes --dry-run to provision and every provision-project
   const result = s.run('update', '--dry-run');
   assert.equal(result.status, 0, result.stderr);
   const calls = s.calls();
-  assert.ok(calls.includes(`provision sudo=yes --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home} --dry-run`));
+  assert.ok(calls.includes(`provision sudo=yes --triphammer example/triphammer ${s.root}/triphammer --user triphammer --home ${s.home} --no-owner-steps --dry-run`));
   assert.deepEqual(calls.filter(call => call.startsWith('provision-project')),
     ['provision-project sudo=yes example/project-a --dry-run', 'provision-project sudo=yes example/project-b --dry-run']);
   assert.ok(!calls.some(call => call.includes('daemon-reload')));
   assert.ok(!calls.some(call => call.startsWith('ticket-runner')));
   assert.match(result.stdout, /^would: reload triphammer's systemd units$/m);
   assert.match(result.stdout, /^The changes above would be made; nothing was changed\.$/m);
+  // The report only reads, so a dry run ends with it too.
+  assert.equal(calls.at(-1), 'provision sudo=yes --owner-steps');
+  assert.ok(result.stdout.endsWith("nothing was changed.\nthe owner's steps\n"), result.stdout);
   assert.deepEqual([s.config('a'), s.config('b')], before);
   assert.deepEqual(readdir(s.tmp), []);
 });
@@ -377,6 +391,15 @@ test('a doctor that finds a problem makes update exit 1, and a config without on
     assert.match(refused.stderr, /b\.conf names no repository as one REPO=<owner>\/<name> line/);
     assert.ok(!bad.calls().some(call => /^provision/.test(call)), text);
   }
+});
+
+test('a report that fails makes update exit 1 after every other step', t => {
+  const s = setup(t, twoProjects);
+  s.mark('owner-steps-fails');
+  const result = s.run('update');
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(s.calls().filter(call => call.startsWith('ticket-runner')).length, 2);
+  assert.match(result.stderr, /^triphammer: provision could not list what is left for the owner \(exit 4\)$/m);
 });
 
 test('update refuses a machine file without Triphammer\'s checkout', t => {

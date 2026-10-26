@@ -715,6 +715,8 @@ From a clone, `sudo bin/provision --triphammer <owner>/<repo> /srv/triphammer` d
 | `--user <name>` | The service user, default `triphammer`. |
 | `--home <dir>` | The user's home when provision creates it, default `/home/<user>`. |
 | `--dry-run` | Prints each change it would make (`would: ...`) and makes none. Steps that read a checkout that is not cloned yet are listed without their details. |
+| `--no-owner-steps` | Leaves out the closing list of what is left for the owner. |
+| `--owner-steps` | Alone: prints only that list, for the user and home the machine file names, and changes nothing. |
 
 It installs what every project shares: git, `jq`, Python 3, curl and openssl from Ubuntu's archive, Docker Engine with
 Compose v2, `gh`, the service user in the `docker` group with lingering on (so its user units run without a login),
@@ -726,6 +728,21 @@ GitHub, each only when it is missing, points git's github.com credentials at `gi
 `~/.config/github-app` (mode 700, empty). It writes the machine file `/etc/triphammer.conf` (Triphammer's repository
 and checkout, the service user and its home), and installs `bin/triphammer` as `/usr/local/bin/triphammer`, a copy root
 owns rather than a link into the checkout the service user can write. It enables no timer.
+
+**What is left.** `provision` ends with the owner's steps that are still left, numbered, each with its fix, or with
+`Nothing left for the owner: the machine is ready.` It tells from what it can check without reading a credential's
+value, and prints no file's content and no command's output:
+
+1. The App's files: `app-id`, `owner` and `agents.pem` in `~/.config/github-app`, each owned by the service user with
+   mode 600, checked by owner and mode alone as the doctor does. A file that is missing, not a regular file, someone
+   else's (`chown`) or of another mode (`chmod 600`) gets a line of its own. When all three pass, it runs
+   `github-app-token app-slug` as the service user (the copy beside `provision`), and a failure means GitHub did not
+   accept the key, or could not be reached: `app-id` or `agents.pem` is not the App's.
+2. Claude Code's login: the exit status of `claude auth status`, run as the service user in a session of its own.
+3. Projects: with no config in `~/.config/triphammer/`, `triphammer add <owner>/<repo>`; once one project's timers
+   (`ticket-runner@<name>.timer`, `merge-when-ready@<name>.timer`) are not both enabled, each project, with
+   `triphammer start <name>` for those.
+4. The status page, optional, while `triphammer-status.service` is not enabled.
 
 **Add a project.** Once the owner has placed the App's files and logged Claude Code in (Credentials, below):
 
@@ -790,8 +807,9 @@ only when it is not set already: for an `APP_AUTHOR` of `app/<slug>`, the App's 
 links a bot's commits to it by the form `<id>+<slug>[bot]@users.noreply.github.com`; to use it, set `user.email` that
 way as the user (`git config --global user.email ...`) and `provision-project` keeps it.
 
-**Credentials.** Neither script reads or writes one; each ends by listing the ones it needs. The owner places them by
-hand, each owned by the service user and mode 600:
+**Credentials.** Neither script reads or writes one; `provision` ends by listing those still missing (What is left,
+above) and `provision-project` the ones it needs. The owner places them by hand, each owned by the service user and
+mode 600:
 
 - the App's files in `~/.config/github-app`: `app-id`, `owner` and `agents.pem` (Install);
 - a Claude Code login: `sudo -iu triphammer claude auth login`, which prints a URL to open on any machine. Or
@@ -826,10 +844,12 @@ machine file's repository, checkout, user and home, then the clone's `provision-
 config, with the `REPO` its config names and no setting, so each keeps its settings. When systemd reports that a unit
 the projects use changed on disk (`NeedDaemonReload`), or cannot say, it runs
 `sudo systemctl --machine=triphammer@ --user daemon-reload`; it enables, starts and stops no unit. It says whether
-anything changed, then runs the doctor for each project and exits 1 when a doctor finds a problem. A failing
-`provision` stops it; a failing `provision-project` does not stop the other projects, and `update` exits with its
-status. `--dry-run` passes `--dry-run` to each script, prints `would: reload ...` for the reload, runs no doctor and
-changes nothing.
+anything changed, then runs the doctor for each project and exits 1 when a doctor finds a problem. It ends with what
+is left for the owner, from the clone's `provision --owner-steps` as root (What is left, above; its first `provision`
+run leaves the list out with `--no-owner-steps`); a report that fails makes it exit 1. A failing `provision` stops it;
+a failing `provision-project` does not stop the other projects, and `update` exits with its status. `--dry-run` passes
+`--dry-run` to each script, prints `would: reload ...` for the reload, runs no doctor and changes nothing; it still
+ends with the list, which only reads.
 
 **Moving an existing install.** Two machines must never run the same project at once. On the old machine, stop its
 timers (`systemctl --user disable --now 'ticket-runner@*.timer' 'merge-when-ready@*.timer'`, or the non-template

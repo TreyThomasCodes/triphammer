@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {git, here, lines, run} from './fixture.mjs';
 import {changingCalls, codename, machine, readdir, scripts, triphammerFiles, units} from './provision-fixture.mjs';
@@ -20,6 +20,8 @@ for (const [what, args, message] of [
   ['a project argument', [...tri, '--project', 'example/y', '/y'], /--project belongs to triphammer add/],
   ['a malformed --user', [...tri, '--user', 'Bad User'], /--user must be a user name/],
   ['a relative --home', [...tri, '--home', 'home'], /--home must be an absolute path/],
+  ['--owner-steps with another argument', ['--owner-steps', '--dry-run'], /--owner-steps takes no other argument/],
+  ['--owner-steps after --triphammer', [...tri, '--owner-steps'], /--owner-steps takes no other argument/],
 ]) {
   test(`${what} stops provision with exit 2 and the usage before anything runs`, t => {
     const m = machine(t, {});
@@ -34,6 +36,7 @@ for (const [what, args, message] of [
 test('on a fresh machine it installs everything but a project, and a second run changes nothing', t => {
   const m = machine(t, {'example/triphammer': triphammerFiles});
   const checkout = join(m.root, 'triphammer');
+  writeFileSync(join(m.state, 'claude/logged-out'), '');
   const first = m.provision(...at(m, tri));
   assert.equal(first.status, 0, first.output);
 
@@ -90,8 +93,17 @@ test('on a fresh machine it installs everything but a project, and a second run 
   assert.equal(statSync(command).isSymbolicLink(), false);
 
   assert.match(first.stdout, /change\(s\) made\./);
-  assert.match(first.stdout, new RegExp(`Put the App's files in ${m.home}/\\.config/github-app`));
-  assert.match(first.stdout, /^ {2}3\. Add a project: triphammer add <owner>\/<repo>$/m);
+  // A fresh machine has every step left.
+  const app = join(m.home, '.config/github-app');
+  assert.ok(first.stdout.endsWith(`\nNext, as the owner (provision never reads or writes a credential):
+  1. The App's files in ${app}:
+     - app-id is missing: put the App's numeric id in ${app}/app-id, owned by triphammer, mode 600
+     - owner is missing: put the login of the account the App is installed on in ${app}/owner, owned by triphammer, mode 600
+     - agents.pem is missing: put the App's private key in ${app}/agents.pem, owned by triphammer, mode 600
+  2. Log Claude Code in: sudo -iu triphammer claude auth login (or claude setup-token; bin/README.md).
+  3. Add a project: triphammer add <owner>/<repo>
+  4. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service
+`), first.stdout);
 
   const changed = changingCalls(first.calls).map(call => call.join(' '));
   for (const pattern of [/^runuser .* git .*clone /, /^runuser .* sh -c /, /^apt-get install /, /^useradd /, /^systemctl .* link /]) {
@@ -167,7 +179,93 @@ test('--dry-run on a fresh machine lists the changes and makes none', t => {
   assert.deepEqual(changingCalls(result.calls), []);
   assert.ok(!existsSync(m.home) && !existsSync(join(m.root, 'triphammer')) && !existsSync(join(m.sys, 'etc/apt'))
     && !existsSync(join(m.sys, 'etc/triphammer.conf')));
+  // The report only reads, so a dry run ends with it too: on a machine without the user, every step is left.
+  assert.deepEqual(result.stdout.match(/^ {2}\d\. .*/gm).map(line => line.slice(0, 20)),
+    ['  1. The App\'s files', '  2. Log Claude Code', '  3. Add a project: ', '  4. Optionally the ']);
 });
+
+const setState = (m, state) => writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+
+// The owner's steps on a machine provision has set up: the App's files placed (with sentinels for the values no
+// output may show), Claude Code logged in, one project whose timers and the status page are enabled; `undo` takes one
+// of them back before `provision --owner-steps` runs.
+function ownerSteps(t, undo = () => {}) {
+  const m = machine(t, {'example/triphammer': triphammerFiles});
+  const provisioned = m.provision(...at(m, tri));
+  assert.equal(provisioned.status, 0, provisioned.output);
+  m.placeApp();
+  const app = join(m.home, '.config/github-app');
+  writeFileSync(join(app, 'app-id'), '918273645\n');
+  writeFileSync(join(app, 'owner'), 'sentinel-owner-login\n');
+  mkdirSync(join(m.home, '.config/triphammer'), {recursive: true});
+  writeFileSync(join(m.home, '.config/triphammer/project-a.conf'), 'REPO=example/project-a\n');
+  const state = {...m.machine(), enabled: ['ticket-runner@project-a.timer', 'merge-when-ready@project-a.timer', 'triphammer-status.service']};
+  setState(m, state);
+  undo(m, app, state);
+  const authCalls = lines(join(m.state, 'claude/auth-calls')).length;
+  const result = m.provision('--owner-steps');
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.stderr, '');
+  for (const secret of ['918273645', 'sentinel-owner-login', 'PRIVATE KEY', 'fake-account@example.invalid', 'loggedIn']) {
+    assert.ok(!result.output.includes(secret), `the report shows ${secret}`);
+  }
+  if (existsSync(join(app, 'agents.pem'))) {
+    for (const line of readFileSync(join(app, 'agents.pem'), 'utf8').split('\n').filter(line => line.length > 20)) {
+      assert.ok(!result.output.includes(line), 'the report shows the App\'s key');
+    }
+  }
+  // claude auth status ran as the user in a session of its own with nothing on stdin.
+  const auth = lines(join(m.state, 'claude/auth-calls')).slice(authCalls).map(line => JSON.parse(line));
+  assert.deepEqual(auth, [{sessionLeader: true, stdin: '/dev/null'}]);
+  assert.deepEqual(changingCalls(result.calls), []);
+  return {m, app, steps: result.stdout.split('\n').filter(line => /^ {2}\d\. | {5}- /.test(line)), stdout: result.stdout};
+}
+
+test('on a machine with every step done, the report is one line saying it is ready, and provision ends with it', t => {
+  const {m, stdout} = ownerSteps(t);
+  assert.equal(stdout, '\nNothing left for the owner: the machine is ready.\n');
+  const again = m.provision(...at(m, tri));
+  assert.equal(again.status, 0, again.output);
+  assert.ok(again.stdout.endsWith('\nNothing to change: the machine is as asked.\n\nNothing left for the owner: the machine is ready.\n'),
+    again.stdout);
+  // --no-owner-steps leaves the report out.
+  const without = m.provision(...at(m, tri), '--no-owner-steps');
+  assert.equal(without.status, 0, without.output);
+  assert.ok(without.stdout.endsWith('\nNothing to change: the machine is as asked.\n'), without.stdout);
+});
+
+for (const [what, undo, expected] of [
+  ['a wrong mode on agents.pem', (m, app) => chmodSync(join(app, 'agents.pem'), 0o644),
+    app => [`  1. The App's files in ${app}:`, `     - agents.pem has mode 644, not 600: chmod 600 ${app}/agents.pem`]],
+  ['a missing app-id', (m, app) => rmSync(join(app, 'app-id')),
+    app => [`  1. The App's files in ${app}:`, `     - app-id is missing: put the App's numeric id in ${app}/app-id, owned by triphammer, mode 600`]],
+  ['an app-id that is a directory', (m, app) => { rmSync(join(app, 'app-id')); mkdirSync(join(app, 'app-id')); },
+    app => [`  1. The App's files in ${app}:`, `     - app-id is not a regular file: replace ${app}/app-id with the App's numeric id, owned by triphammer, mode 600`]],
+  ['files someone else owns', (m, app, state) => setState(m, {...state, users: {...state.users, triphammer: {...state.users.triphammer, uid: 4242}}}),
+    app => [`  1. The App's files in ${app}:`, ...['app-id', 'owner', 'agents.pem'].map(name =>
+      `     - ${name} is not owned by triphammer: chown triphammer ${app}/${name}`)]],
+  ['a key the App rejects', (m, app, state) => {
+    const {'https://api.github.com/app': _, ...downloads} = state.downloads;
+    setState(m, {...state, downloads});
+  }, app => [`  1. The App's files in ${app}:`, '     - GitHub did not accept the App\'s key, or could not be reached: app-id or agents.pem is not the App\'s; replace them with the App\'s, owned by triphammer, mode 600']],
+  ['Claude Code logged out', m => writeFileSync(join(m.state, 'claude/logged-out'), ''),
+    () => ['  1. Log Claude Code in: sudo -iu triphammer claude auth login (or claude setup-token; bin/README.md).']],
+  ['no project', m => rmSync(join(m.home, '.config/triphammer/project-a.conf')),
+    () => ['  1. Add a project: triphammer add <owner>/<repo>']],
+  ['a project whose timers are off', (m, app, state) => {
+    writeFileSync(join(m.home, '.config/triphammer/project-b.conf'), 'REPO=example/project-b\n');
+    setState(m, {...state, enabled: [...state.enabled, 'ticket-runner@project-b.timer']});
+  }, () => ['  1. Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):',
+    '     - project-a: its timers are on', '     - project-b: triphammer start project-b']],
+  ['the status page not enabled', (m, app, state) => setState(m, {...state, enabled: state.enabled.slice(0, 2)}),
+    () => ['  1. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service']],
+]) {
+  test(`with ${what}, the report lists that step alone, with its fix`, t => {
+    const {app, steps, stdout} = ownerSteps(t, undo);
+    assert.match(stdout, /^Next, as the owner \(provision never reads or writes a credential\):$/m);
+    assert.deepEqual(steps, expected(app));
+  });
+}
 
 test('a checkout path that holds something else stops provision with exit 1 before anything changes', t => {
   const m = machine(t, {'example/triphammer': triphammerFiles});

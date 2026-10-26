@@ -23,10 +23,13 @@
 # replaces /usr/local/bin/triphammer), then the clone's provision-project for each project that has a config, with its
 # REPO (read as data, never run) and no setting, so each keeps its settings. When systemd says one of the Triphammer
 # units the projects use changed on disk (NeedDaemonReload), or cannot say, it reloads the service user's units; it
-# enables, starts and stops no unit. It ends with a line saying whether anything changed, and then runs the doctor for
-# each project. --dry-run passes --dry-run to each script, prints `would: reload ...` for the reload, runs no doctor and
-# changes nothing. A provision that fails stops it; a provision-project that fails does not stop the other projects,
-# and update then exits with its status. A doctor that finds a problem makes it exit 1. Nothing runs it on a timer.
+# enables, starts and stops no unit. It prints a line saying whether anything changed, runs the doctor for each project,
+# and ends with what is left for the owner, the report provision ends with (provision --owner-steps, run as root from the
+# clone; the run of provision before leaves it out with --no-owner-steps). --dry-run passes --dry-run to each script,
+# prints `would: reload ...` for the reload, runs no doctor and changes nothing; it still ends with the report, which
+# only reads. A provision that fails stops it; a provision-project that fails does not stop the other projects, and
+# update then exits with its status. A doctor that finds a problem, or a report that fails, makes it exit 1. Nothing
+# runs it on a timer.
 #
 # The service user, its home and Triphammer's repository and checkout come from the machine file /etc/triphammer.conf,
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
@@ -272,7 +275,8 @@ update() {
   done
 
   echo "The machine:"
-  as_root provision --triphammer "$tri_repo" "$tri_checkout" --user "$user" --home "$home" "${dry[@]}" || exit $?
+  as_root provision --triphammer "$tri_repo" "$tri_checkout" --user "$user" --home "$home" --no-owner-steps "${dry[@]}" \
+    || exit $?
   grep -qx 'Nothing to change: the machine is as asked.' "$work/output" || changed=1
   for i in "${!names[@]}"; do
     echo
@@ -311,13 +315,18 @@ update() {
   else
     echo "The changes above were made."
   fi
-  [ ${#dry[@]} -eq 0 ] || exit "$status"
-
-  for name in "${names[@]}"; do
-    echo
-    echo "The doctor's check of $name:"
-    service_runner "$name" --doctor || [ "$status" -ne 0 ] || status=1  # a failed step's status wins over the doctor's
-  done
+  if [ ${#dry[@]} -eq 0 ]; then
+    for name in "${names[@]}"; do
+      echo
+      echo "The doctor's check of $name:"
+      service_runner "$name" --doctor || [ "$status" -ne 0 ] || status=1  # a failed step's status wins over the doctor's
+    done
+  fi
+  # What is left for the owner, from provision's own report; it only reads, so a dry run prints it too.
+  as_root provision --owner-steps || {
+    printf 'triphammer: provision could not list what is left for the owner (exit %s)\n' "$?" >&2
+    [ "$status" -ne 0 ] || status=1
+  }
   exit "$status"
 }
 
