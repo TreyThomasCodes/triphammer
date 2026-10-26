@@ -569,3 +569,34 @@ test('the shared stop file stops every project\'s merge queue', t => {
     assert.match(r.projectLog(), /paused: .*triphammer\/stop exists/);
   }
 });
+
+// The config may spell REPO in any case; the installation lists the canonical name, here o/a and o/b.
+test('with REPO spelled in another case, the pull request ticket-runner repairs is still not updated', async t => {
+  const {r, holder} = await busySetup(t);
+  r.config({REPO: 'O/A'});
+  writeCurrent(r, {pid: holder.pid, kind: 'repair', number: 2, prs: [2]});
+  r.pulls('o/a', [queued(2, 'BEHIND', '2026-10-17T09:00:00Z')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), []);
+  assert.match(r.log(), /o\/a#2: not updating it while ticket-runner is repairing it/);
+});
+
+test('with REPO spelled in another case, a merge into the served repository starts the ticket runner', t => {
+  const r = queueSetup(t);
+  r.config({REPO: 'O/A'});
+  r.pulls('o/a', [pr(1, 'CLEAN')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`]);
+  assert.equal(r.starts(), 1);
+  assert.match(r.log(), /started ticket-runner after merging o\/a#1\n/);
+});
+
+test("with a project whose REPO is spelled in another case, the tick still runs that repository's queue", t => {
+  const r = projectSetup(t, 'b');
+  writeConfig(join(r.root, 'xdg/triphammer/b.conf'),
+    {REPO: 'O/B', CHECKOUT: r.root, APP_AUTHOR: 'app/agents', STATE_DIR: join(r.root, 'state/b')});
+  r.pulls('o/b', [pr(2, 'CLEAN'), pr(3, 'BEHIND')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/b#2 ${pr(2).headRefOid}`, 'update-branch o/b#3']);
+  assert.deepEqual(r.projectStarts(), ['started b']);
+});
