@@ -30,8 +30,8 @@ function runIn(root, args, env = {}, script = join(here, 'demo-publish')) {
 // or {hardlink: target} for a hard link) built in a throwaway directory next to `outside/secret.txt`, with a fake `gh`
 // that knows PR #999 and the gallery in the throwaway directory. `linkAs` passes a symlink of that name to `results`
 // instead of `results` itself. `first` names files (name -> content) in a folder `first` published to the same gallery
-// before the run.
-function demoPublish(t, results, {linkAs, first} = {}) {
+// before the run, whose meta.json the result holds as `firstMeta`. `bin` goes first on PATH for both runs.
+function demoPublish(t, results, {linkAs, first, bin} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'demo-publish-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
   const outside = join(root, 'outside');
@@ -47,17 +47,20 @@ function demoPublish(t, results, {linkAs, first} = {}) {
     else symlinkSync(content.link.replace('{outside}', outside), join(folder, path));
   }
   if (linkAs) symlinkSync(folder, join(root, linkAs));
-  const run = path => runIn(root, ['999', '--summary', 'Shows the demo', path]);
+  const env = bin ? {PATH: `${bin}:${join(root, 'gh', 'bin')}:${process.env.PATH}`} : {};
+  const run = path => runIn(root, ['999', '--summary', 'Shows the demo', path], env);
+  const gallery = join(root, 'data', 'demos', 'pr-999');
+  let firstMeta;
   if (first) {
     mkdirSync(join(root, 'first'));
     for (const [name, content] of Object.entries(first)) writeFileSync(join(root, 'first', name), content);
     assert.equal(run(join(root, 'first')).status, 0);
+    firstMeta = readFileSync(join(gallery, 'meta.json'), 'utf8');
   }
   const result = run(join(root, linkAs ?? 'results'));
-  const gallery = join(root, 'data', 'demos', 'pr-999');
   const published = existsSync(gallery) ? readdirSync(gallery).filter(name => name !== 'meta.json').sort() : [];
   const read = name => readFileSync(join(gallery, name), 'utf8');
-  return {...result, folder, published, read};
+  return {...result, folder, published, read, firstMeta};
 }
 
 // demo-publish run with `args` built from paths in a throwaway directory holding folders `one` and `two` (each with a
@@ -259,4 +262,31 @@ test('with the demo module off, or without its gallery or URL, it exits 2 naming
     assert.equal(existsSync(join(root, 'gh', 'calls')), false);
     assert.equal(existsSync(join(root, 'data')), false);
   }
+});
+
+test('a video ffmpeg cannot convert fails in one line and leaves the earlier publish as it was, with no half-built folder', t => {
+  // A fake ffmpeg that copies its input to its output, and fails as the real one does when the input is not a video.
+  const bin = mkdtempSync(join(tmpdir(), 'demo-publish-ffmpeg-'));
+  t.after(() => rmSync(bin, {recursive: true, force: true}));
+  writeFileSync(join(bin, 'ffmpeg'), `#!/bin/sh
+for arg; do [ "$prev" = -i ] && in=$arg; prev=$arg; done
+cat "$in" > "$prev"
+if grep -q 'not a video' "$prev"; then echo "$in: Invalid data found when processing input" >&2; exit 1; fi
+`, {mode: 0o755});
+  const r = demoPublish(t, {'b.png': 'second png', 'v.webm': 'not a video'}, {first: {'a.png': 'first png'}, bin});
+  assert.equal(r.status, 1);
+  assert.doesNotMatch(r.stderr, /Traceback/);
+  assert.equal(r.stderr.trimEnd().split('\n').length, 1, r.stderr);
+  assert.match(r.stderr, /^demo-publish: ffmpeg could not convert .*\/results\/v\.webm: .*Invalid data found when processing input; /);
+  assert.deepEqual(r.published, ['00-first-a.png']);
+  assert.equal(r.read('00-first-a.png'), 'first png');
+  assert.equal(r.read('meta.json'), r.firstMeta);
+  assert.deepEqual(readdirSync(join(r.folder, '../data/demos')).sort(), ['index.html', 'pr-999']);
+});
+
+test('publishing again replaces the earlier entry and leaves no staging folder in the gallery', t => {
+  const r = demoPublish(t, {'b.png': 'second png'}, {first: {'a.png': 'first png'}});
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.published, ['00-results-b.png']);
+  assert.deepEqual(readdirSync(join(r.folder, '../data/demos')).sort(), ['index.html', 'pr-999']);
 });
