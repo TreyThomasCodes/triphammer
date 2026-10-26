@@ -7,7 +7,8 @@ name: risk-tier
 # waits, the owner's review is (re)requested. A pull request the owner opened counts as approved at each commit the
 # owner pushed to it, since GitHub lets no one approve their own pull request; a commit anyone else pushed to it, such
 # as an agent's, still needs the owner, by the same rules as an approval. A hold label or the owner's latest review
-# requesting changes keeps any tier pending.
+# requesting changes keeps any tier pending. The owner's login matches in any case, as GitHub matches logins
+# (scripts/risk-tier-workflow.test.mjs runs these checks).
 # The same job posts the required `closing-issue` status from validate-pr-contract.sh, here because this workflow
 # already runs on every event that can change it (a push, an edited description, a retarget).
 # A project calls this workflow from its own (README, "Set up a project"), pinned to a Triphammer commit; then the
@@ -181,7 +182,8 @@ jobs:
           fi
           reviews="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews")"
           latest="$(jq -r --arg owner "$OWNER" \
-            '[.[][] | select(.user.login == $owner and .state != "COMMENTED")] | last | .state // ""' <<< "$reviews")"
+            '[.[][] | select((.user.login // "" | ascii_downcase) == ($owner | ascii_downcase) and .state != "COMMENTED")]
+             | last | .state // ""' <<< "$reviews")"
           if [ "$latest" = CHANGES_REQUESTED ]; then
             status pending "Held: @$OWNER requested changes; approve or dismiss that review to release it"
           fi
@@ -199,7 +201,8 @@ jobs:
           timeline="$(gh api --paginate --slurp "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/timeline")"
           since="$(jq -r '[.[][] | select(.event == "base_ref_changed" or .event == "automatic_base_change_succeeded" or .event == "base_ref_force_pushed") | .created_at] | max // ""' <<< "$timeline")"
           state="$(jq -r --arg owner "$OWNER" --arg since "$since" \
-            '[.[][] | select(.user.login == $owner and .state != "COMMENTED" and .submitted_at > $since)]
+            '[.[][] | select((.user.login // "" | ascii_downcase) == ($owner | ascii_downcase)
+               and .state != "COMMENTED" and .submitted_at > $since)]
              | last | select(. != null) | "\(.state) \(.commit_id)"' <<< "$reviews")"
           if [ "$state" = "APPROVED $HEAD_SHA" ]; then
             status success "Escalate: approved by @$OWNER at ${HEAD_SHA:0:7}"
@@ -224,7 +227,7 @@ jobs:
           # (a branch update from main). The push that started this run can reach the activity a little after the event,
           # so the lookup is repeated for up to a minute until the head commit is in it. A failed lookup leaves the pull
           # request waiting.
-          if [ "$PULL_REQUEST_AUTHOR" = "$OWNER" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+          if [ "${PULL_REQUEST_AUTHOR,,}" = "${OWNER,,}" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
             activity='[]'
             for attempt in 1 2 3 4 5 6; do
               activity="$(gh api -X GET --paginate --slurp "repos/$REPOSITORY/activity" -f "ref=refs/heads/$HEAD_REF" \
@@ -233,7 +236,8 @@ jobs:
               [ "$attempt" = 6 ] || sleep 10
             done
             pushed="$(jq -r --arg owner "$OWNER" --arg since "$since" \
-              '.[][] | select(.actor.login == $owner and .activity_type != "branch_deletion" and .timestamp > $since)
+              '.[][] | select((.actor.login // "" | ascii_downcase) == ($owner | ascii_downcase)
+                 and .activity_type != "branch_deletion" and .timestamp > $since)
                | .after' <<< "$activity")"
             for commit in $pushed; do
               if [ "$commit" = "$HEAD_SHA" ]; then
