@@ -184,6 +184,8 @@ test('--dry-run on a fresh machine lists the changes and makes none', t => {
     ['  1. The App\'s files', '  2. Log Claude Code', '  3. Add a project: ', '  4. Optionally the ']);
 });
 
+const setState = (m, state) => writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+
 // The owner's steps on a machine provision has set up: the App's files placed (with sentinels for the values no
 // output may show), Claude Code logged in, one project whose timers and the status page are enabled; `undo` takes one
 // of them back before `provision --owner-steps` runs.
@@ -197,9 +199,8 @@ function ownerSteps(t, undo = () => {}) {
   writeFileSync(join(app, 'owner'), 'sentinel-owner-login\n');
   mkdirSync(join(m.home, '.config/triphammer'), {recursive: true});
   writeFileSync(join(m.home, '.config/triphammer/project-a.conf'), 'REPO=example/project-a\n');
-  const state = m.machine();
-  state.enabled = ['ticket-runner@project-a.timer', 'merge-when-ready@project-a.timer', 'triphammer-status.service'];
-  writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+  const state = {...m.machine(), enabled: ['ticket-runner@project-a.timer', 'merge-when-ready@project-a.timer', 'triphammer-status.service']};
+  setState(m, state);
   undo(m, app, state);
   const authCalls = lines(join(m.state, 'claude/auth-calls')).length;
   const result = m.provision('--owner-steps');
@@ -219,7 +220,6 @@ function ownerSteps(t, undo = () => {}) {
   assert.deepEqual(changingCalls(result.calls), []);
   return {m, app, steps: result.stdout.split('\n').filter(line => /^ {2}\d\. | {5}- /.test(line)), stdout: result.stdout};
 }
-const setState = (m, state) => writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
 
 test('on a machine with every step done, the report is one line saying it is ready, and provision ends with it', t => {
   const {m, stdout} = ownerSteps(t);
@@ -236,18 +236,18 @@ test('on a machine with every step done, the report is one line saying it is rea
 
 for (const [what, undo, expected] of [
   ['a wrong mode on agents.pem', (m, app) => chmodSync(join(app, 'agents.pem'), 0o644),
-    app => ['  1. The App\'s files in APP:', `     - agents.pem has mode 644, not 600: chmod 600 ${app}/agents.pem`]],
+    app => [`  1. The App's files in ${app}:`, `     - agents.pem has mode 644, not 600: chmod 600 ${app}/agents.pem`]],
   ['a missing app-id', (m, app) => rmSync(join(app, 'app-id')),
-    app => ['  1. The App\'s files in APP:', `     - app-id is missing: put the App's numeric id in ${app}/app-id, owned by triphammer, mode 600`]],
+    app => [`  1. The App's files in ${app}:`, `     - app-id is missing: put the App's numeric id in ${app}/app-id, owned by triphammer, mode 600`]],
   ['an app-id that is a directory', (m, app) => { rmSync(join(app, 'app-id')); mkdirSync(join(app, 'app-id')); },
-    app => ['  1. The App\'s files in APP:', `     - app-id is not a regular file: replace ${app}/app-id with the App's numeric id, owned by triphammer, mode 600`]],
+    app => [`  1. The App's files in ${app}:`, `     - app-id is not a regular file: replace ${app}/app-id with the App's numeric id, owned by triphammer, mode 600`]],
   ['files someone else owns', (m, app, state) => setState(m, {...state, users: {...state.users, triphammer: {...state.users.triphammer, uid: 4242}}}),
-    app => ['  1. The App\'s files in APP:', ...['app-id', 'owner', 'agents.pem'].map(name =>
+    app => [`  1. The App's files in ${app}:`, ...['app-id', 'owner', 'agents.pem'].map(name =>
       `     - ${name} is not owned by triphammer: chown triphammer ${app}/${name}`)]],
   ['a key the App rejects', (m, app, state) => {
     const {'https://api.github.com/app': _, ...downloads} = state.downloads;
     setState(m, {...state, downloads});
-  }, () => ['  1. The App\'s files in APP:', '     - GitHub did not accept the App\'s key, or could not be reached: app-id or agents.pem is not the App\'s; replace them with the App\'s, owned by triphammer, mode 600']],
+  }, app => [`  1. The App's files in ${app}:`, '     - GitHub did not accept the App\'s key, or could not be reached: app-id or agents.pem is not the App\'s; replace them with the App\'s, owned by triphammer, mode 600']],
   ['Claude Code logged out', m => writeFileSync(join(m.state, 'claude/logged-out'), ''),
     () => ['  1. Log Claude Code in: sudo -iu triphammer claude auth login (or claude setup-token; bin/README.md).']],
   ['no project', m => rmSync(join(m.home, '.config/triphammer/project-a.conf')),
@@ -263,7 +263,7 @@ for (const [what, undo, expected] of [
   test(`with ${what}, the report lists that step alone, with its fix`, t => {
     const {app, steps, stdout} = ownerSteps(t, undo);
     assert.match(stdout, /^Next, as the owner \(provision never reads or writes a credential\):$/m);
-    assert.deepEqual(steps, expected(app).map(line => line.replace('APP', app)));
+    assert.deepEqual(steps, expected(app));
   });
 }
 
