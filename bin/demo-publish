@@ -6,9 +6,9 @@
   demo-publish --reindex                        refresh pull request states and rebuild the page
 
 Publishing <pr> again replaces its media once every new file is copied or converted; a publish that fails exits
-nonzero with one line on stderr and leaves the earlier demo as it was. Symlinks inside the folder, and a folder argument that is itself a symlink,
-are never followed, and a file whose real path leaves the folder is never copied; each one is named in the output as
-skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
+nonzero with one line on stderr and leaves the earlier demo as it was. Symlinks inside the folder, and a folder
+argument that is itself a symlink, are never followed, and a file whose real path leaves the folder is never copied;
+each one is named in the output as skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
 DEMO_URL; with the demo module off, or either setting missing, it exits 2 (bin/README.md, "Configuration").
 """
 import html, json, os, secrets, shutil, stat, subprocess, sys, tempfile
