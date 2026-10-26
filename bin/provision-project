@@ -61,6 +61,8 @@ declare -A module_needs=([demo]="DEMO_GALLERY_DIR DEMO_URL" [qwen-audit]="QWEN_B
 
 repo="" checkout="" modules="" modules_given="" sets="" unsets=" " app_author="" dry_run=""
 need_value() { [ "$1" -gt "$2" ] || usage_error "$3 needs $4"; }
+given() { [[ $'\n'"$sets" == *$'\n'"$1="* ]]; }
+unsetting() { [[ "$unsets" == *" $1 "* ]]; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --modules)
@@ -75,7 +77,7 @@ while [ $# -gt 0 ]; do
         REPO|CHECKOUT) usage_error "--unset cannot remove $2; every config has it, from the arguments before the options" ;;
         APP_AUTHOR) usage_error "--unset cannot remove APP_AUTHOR; every config has it, and --app-author gives another" ;;
       esac
-      [[ "$unsets" != *" $2 "* ]] || usage_error "--unset names $2 twice"
+      ! unsetting "$2" || usage_error "--unset names $2 twice"
       unsets+="$2 "
       shift 2 ;;
     --set)
@@ -89,7 +91,7 @@ while [ $# -gt 0 ]; do
       esac
       [[ " ${settable[*]} " == *" $key "* ]] || usage_error "--set names $key, which is not a setting --set may give (${settable[*]})"
       [[ "$2" != *$'\n'* ]] || usage_error "--set $key: the value may not hold a line break"
-      [[ $'\n'"$sets" != *$'\n'"$key="* ]] || usage_error "--set gives $key twice"
+      ! given "$key" || usage_error "--set gives $key twice"
       sets="${sets:+$sets$'\n'}$2"
       shift 2 ;;
     --app-author)
@@ -112,22 +114,13 @@ done
 [ -z "$app_author" ] || [[ "$app_author" =~ ^(app/)?[A-Za-z0-9][A-Za-z0-9-]*$ ]] \
   || usage_error "--app-author must be a login or app/<slug>, not $app_author"
 for key in $unsets; do
-  [[ $'\n'"$sets" != *$'\n'"$key="* ]] || usage_error "--set and --unset both name $key"
+  ! given "$key" || usage_error "--set and --unset both name $key"
   [ "$key" != MODULES ] || [ -z "$modules_given" ] || usage_error "--modules and --unset MODULES are both given"
 done
 
 # The existing config's settings, in its order (old_keys, old), once it is read; none until then.
 old_keys=()
 declare -A old=()
-# setting <key>: the value --set gave, or nothing.
-setting() {
-  local line
-  while IFS= read -r line; do
-    [[ "$line" != "$1="* ]] || { printf '%s' "${line#*=}"; return 0; }
-  done <<< "$sets"
-}
-given() { [[ $'\n'"$sets" == *$'\n'"$1="* ]]; }
-unsetting() { [[ "$unsets" == *" $1 "* ]]; }
 # merge <checkout> <app author> <default state dir>: sets conf_keys and conf to the settings the config is to hold: the
 # required four, MODULES, then the existing config's others in its order and the new ones in --set's, each the value
 # this run gives, or else the existing one, unless --unset removes it.
@@ -140,24 +133,19 @@ merge() {
   put REPO "$repo"
   put CHECKOUT "$1"
   put APP_AUTHOR "$2"
-  if given STATE_DIR; then put STATE_DIR "$(setting STATE_DIR)"
-  elif [ -n "${old[STATE_DIR]:-}" ] && ! unsetting STATE_DIR; then put STATE_DIR "${old[STATE_DIR]}"
+  if [ -n "${old[STATE_DIR]:-}" ] && ! unsetting STATE_DIR; then put STATE_DIR "${old[STATE_DIR]}"
   else put STATE_DIR "$3"
   fi
   if [ -n "$modules_given" ]; then [ -z "$modules" ] || put MODULES "$modules"
   elif [ -n "${old[MODULES]+set}" ] && ! unsetting MODULES; then put MODULES "${old[MODULES]}"
   fi
   for key in "${old_keys[@]}"; do
-    [ -z "${conf[$key]+set}" ] || continue
     case "$key" in REPO|CHECKOUT|APP_AUTHOR|STATE_DIR|MODULES) continue ;; esac
-    if given "$key"; then put "$key" "$(setting "$key")"
-    elif ! unsetting "$key"; then put "$key" "${old[$key]}"
-    fi
+    unsetting "$key" || put "$key" "${old[$key]}"
   done
+  # --set's values last: one replaces a kept value in its place, and a new key goes at the end.
   while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    key="${line%%=*}"
-    [ -n "${conf[$key]+set}" ] || put "$key" "${line#*=}"
+    [ -z "$line" ] || put "${line%%=*}" "${line#*=}"
   done <<< "$sets"
 }
 module() { [[ ",${conf[MODULES]:-}," == *",$1,"* ]]; }
