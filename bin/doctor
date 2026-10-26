@@ -164,6 +164,71 @@ else
   problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
 fi
 
+# Compose names: each other project with a config in ${XDG_CONFIG_HOME:-~/.config}/triphammer whose project file gives
+# a composeProjectPattern, as this one's does, must match no Compose project name this one's matches, or either
+# project's sweep may prune the other's containers while both run. Two patterns are taken as disjoint only when each
+# starts with ^ and a literal prefix, has no | outside parentheses, and neither prefix starts the other; any other pair
+# is reported. A project whose file is missing or malformed runs no sweep, so it is left out.
+# compose_prefix <pattern>: prints the literal text every name the pattern matches starts with, or fails when the
+# pattern does not tie every match to such a prefix.
+compose_prefix() {
+  local pattern="$1" head='^\^([A-Za-z0-9_-]*)(.?)' prefix i c depth=0 class="" closer rest
+  [[ "$pattern" =~ $head ]] || return 1
+  prefix="${BASH_REMATCH[1]}"
+  # A quantifier after the run makes its last character optional.
+  case "${BASH_REMATCH[2]}" in '*'|'?'|'{') prefix="${prefix%?}" ;; esac
+  for ((i = 1; i < ${#pattern}; i++)); do
+    c="${pattern:i:1}"
+    if [ -n "$class" ]; then
+      # Inside a bracket expression: [:name:], [.x.] and [=x=] end at their own closer, and the first ] (after an
+      # optional ^) is a member.
+      if [ "$c" = '[' ] && [[ "${pattern:i+1:1}" == [:.=] ]]; then
+        closer="${pattern:i+1:1}]" rest="${pattern:i+2}"
+        [[ "$rest" == *"$closer"* ]] || return 1
+        rest="${rest%%"$closer"*}"
+        i=$((i + 2 + ${#rest} + 1)) class=in
+      elif [ "$c" = ']' ] && [ "$class" != start ]; then
+        class=""
+      elif [ "$c" = '^' ] && [ "$class" = start ] && [ "${pattern:i-1:1}" = '[' ]; then
+        :
+      else
+        class=in
+      fi
+      continue
+    fi
+    case "$c" in
+      '\') i=$((i + 1)) ;;
+      '[') class=start ;;
+      '(') depth=$((depth + 1)) ;;
+      ')') depth=$((depth - 1)); [ "$depth" -ge 0 ] || return 1 ;;
+      '|') [ "$depth" -gt 0 ] || return 1 ;;
+    esac
+  done
+  [ -z "$class" ] && [ "$depth" -eq 0 ] || return 1
+  printf '%s\n' "$prefix"
+}
+own_pattern=""
+! check_project doctor "$checkout" >/dev/null 2>&1 || own_pattern="$(project_get "$checkout" composeProjectPattern)"
+if [ -n "$own_pattern" ]; then
+  own_anchored=1
+  if own_prefix="$(compose_prefix "$own_pattern")"; then own_anchored=0; fi
+  for other_file in "${XDG_CONFIG_HOME:-$HOME/.config}"/triphammer/*.conf; do
+    [ -f "$other_file" ] || continue
+    other="${other_file##*/}" other="${other%.conf}"
+    [ "$other" != "$project" ] || continue
+    other_checkout="$(sed -n 's/^CHECKOUT=//p' "$other_file" 2>/dev/null | head -n 1 || true)"
+    [ -n "$other_checkout" ] && check_project doctor "$other_checkout" >/dev/null 2>&1 || continue
+    other_pattern="$(project_get "$other_checkout" composeProjectPattern)"
+    [ -n "$other_pattern" ] || continue
+    if [ "$own_anchored" -eq 0 ] && other_prefix="$(compose_prefix "$other_pattern")" \
+        && [[ "$own_prefix" != "$other_prefix"* && "$other_prefix" != "$own_prefix"* ]]; then
+      continue
+    fi
+    problem "the composeProjectPattern of $project ($own_pattern) and that of $other ($other_pattern) can match the same Compose project name, so either project's database sweep may prune the other's containers" \
+      "give each project's .triphammer/project.json a composeProjectPattern that starts with ^ and a literal prefix the other's does not start with, such as ^$project- and ^$other-"
+  done
+fi
+
 # Playwright's browsers, for a project whose checkout pins Playwright as provision-project reads it (config.sh's
 # playwright_manifests and playwright_filter): a Chromium in its browser cache. Which revision the project's Playwright
 # wants is left to the web tests, which say so when it is missing. When the doctor cannot tell (no jq, no checkout, a
