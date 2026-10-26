@@ -225,6 +225,32 @@ test('where the scanner cannot tell code from text, the declarations there count
   assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'string S = $"{N\n[Fact] void B')), unread(path, 2, 1));
 });
 
+test('a regex after default, extends or for await (...), a TSX type parameter list and an HTML-like comment hide no removed test', async () => {
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  const removes = /: removes test cases \(2 before, 1 after/;
+  const cases = [
+    ['src/web/src/x.test.ts', 'export default /[test(]/;'],
+    ['src/web/src/x.test.ts', 'class A extends /[test(]/.constructor {}'],
+    ['src/web/src/x.test.ts', 'async function f(y) { for await (const x of y) /[test(]/.exec(x); }'],
+    ['src/web/src/x.test.tsx', "interface Api { map: <T>(x: T) => T }\nconst close = '</T>', label = 'test(', done = 'x';"],
+    ['src/web/src/x.test.tsx', "type F = <T>(x: T) => T;\nconst s = '</T>', t = 'test(', u = 'x';"],
+    ['src/web/src/x.test.js', "<!-- test('b', () => {});"],
+    ['src/web/src/x.test.js', "x = 1\n--> test('b', () => {});"],
+  ];
+  for (const [path, line] of cases) {
+    const result = await testChange(path, two, `test('a', () => {});\n${line}\n`);
+    assert.equal(result.tier, 'escalate', line);
+    assert.match(result.reasons.join('\n'), removes, line);
+  }
+  // Ordinary JSX in a TSX test still reads as code around it.
+  const tsx = 'src/web/src/x.test.tsx';
+  const jsx = "render(<Foo />);\nconst e = expect(<div>a</div>);\nfunction F() { return <div title=\"it(\">b</div>; }\n"
+    + "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("test('b', () => {});\n", '')),
+    {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
+});
+
 test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {
   const path = 'src/web/src/x.test.tsx';
   const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it(</p>;\n"

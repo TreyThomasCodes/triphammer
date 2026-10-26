@@ -276,16 +276,18 @@ export function compareVersions(a, b) {
 // Thrown where the scanner below cannot tell code from text.
 class Unreadable extends Error {}
 // A JavaScript / starts a regex after an operator, at the start of an expression, after one of these keywords, or after
-// the ) of if, while, for or with; after a name, a literal, a ] or any other ) it divides.
-const regexAfterWords = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+// the ) of if, while, for (for await too) or with; after a name, a literal, a ] or any other ) it divides.
+const regexAfterWords = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'default',
+  'do', 'else', 'extends', 'yield', 'await']);
 const regexAfterParens = new Set(['if', 'while', 'for', 'with']);
 
 // A C# or JavaScript file read left to right as its compiler reads it: code is the text with comments, the inside of
 // every string, character, regex and template literal and JSX text blanked (delimiters and line breaks kept, so blanked
 // text never joins two tokens), and C# directive lines other than #if, #elif, #else and #endif blanked. Template, JSX and
 // C# interpolation holes are code. Where the scanner cannot tell (an unterminated string, character, regex, template,
-// comment or JSX element, an unbalanced bracket, or a JavaScript / after a }, which ends a block when a regex follows and
-// an object literal when it divides), it stops: unsure is the raw text from the start of that token to the end of the
+// comment or JSX element, an unbalanced bracket, a JavaScript / after a }, which ends a block when a regex follows and
+// an object literal when it divides, or a JavaScript <!-- or -->, which outside a module can comment out the rest of
+// the line), it stops: unsure is the raw text from the start of that token to the end of the
 // file, and code holds none of it. JSX is read only where jsx is true; in TypeScript a < there is a generic or a type.
 // Line breaks arrive as \n, but for U+2028 and U+2029 in JavaScript, which end a comment or regex and not a string.
 function scan(text, {csharp, jsx: readsJsx}) {
@@ -352,6 +354,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       }
       if (c === '"' || c === "'") { i++; escaped(c, false); previous = 'operand'; continue; }
       if (!csharp && c === '`') { i++; template(); previous = 'operand'; continue; }
+      if (!csharp && (text.startsWith('<!--', i) || text.startsWith('-->', i))) fail();
       if (!csharp && c === '/') {
         if (previous === 'unsure') fail();
         if (previous === 'operator') { regex(); previous = 'operand'; continue; }
@@ -363,7 +366,8 @@ function scan(text, {csharp, jsx: readsJsx}) {
         i += name.length;
         const property = text[i - name.length - 1] === '.';
         previous = !property && regexAfterWords.has(name) ? 'operator' : 'operand';
-        if (!property) lastWord = name;
+        // for await ( opens a condition as for ( does.
+        if (!property) lastWord = name === 'await' && after === 'for' ? 'for' : name;
         continue;
       }
       i++;
@@ -517,8 +521,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
     blank(from, i - 1);
   }
   // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
-  // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends is taken for one
-  // (<T extends U>() => ...), so both are unsure.
+  // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends, or an opening tag
+  // followed by (, is taken for a type parameter list (<T extends U>() => ..., type F = <T>(x: T) => T), so all are
+  // unsure, JSX text that starts with ( included.
   function jsx() {
     i++;
     if (text[i] === '>') {
@@ -540,6 +545,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       }
       if (c === '>') {
         i++;
+        if (match(/\s*\(/y)) fail();
         children(tag);
         return;
       }
