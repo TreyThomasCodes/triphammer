@@ -113,12 +113,12 @@ test('directives and line comments end at every line break the compiler accepts,
     {tier: 'escalate', reasons: [`${specPath}: removes test cases (2 before, 1 after)`]});
 });
 
-test('adding an #if, #elif or #else to a C# test file escalates, even where a string fools the comment scanner', async () => {
+test('adding an #if, #elif or #else to a C# test file escalates, and a comment marker in an interpolation hole hides no test', async () => {
   const path = 'tests/X/FooTests.cs';
   const twoFacts = 'class FooTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   const hidden = 'class FooTests{\n[Fact] void A(){}\nstring s = $"{"/*"}";\n#if NEVER\n*/\n[Fact] void B(){}\n#endif\n}\n';
-  assert.deepEqual(await testChange(path, twoFacts, hidden),
-    {tier: 'escalate', reasons: [`${path}: adds conditional compilation (added directive: #if NEVER)`]});
+  assert.deepEqual(await testChange(path, twoFacts, hidden), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`,
+    `${path}: adds conditional compilation (added directive: #if NEVER)`]});
   const debug = 'class FooTests{\n[Fact] void A(){}\n#if DEBUG\n[Fact] void B(){}\n#endif\n}\n';
   assert.deepEqual(await testChange(path, twoFacts, debug), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`,
     `${path}: adds conditional compilation (added directive: #if DEBUG)`]});
@@ -132,8 +132,9 @@ test('adding an #if, #elif or #else to a C# test file escalates, even where a st
     + '    [Fact] public void A() {}\n    [Fact] public void B() {}\n}\n';
   const swapHead = 'public class FooTests {\n    [Fact] public void A() {}\n    static string S = $"{ "/*" }";\n'
     + '#if NEVER\n    // */\n    [Fact] public void B() {}\n#endif\n}\n';
-  assert.deepEqual(await testChange('tests/Pricing.Tests/FooTests.cs', swapBase, swapHead),
-    {tier: 'escalate', reasons: ['tests/Pricing.Tests/FooTests.cs: adds conditional compilation (added directive: #if NEVER)']});
+  assert.deepEqual(await testChange('tests/Pricing.Tests/FooTests.cs', swapBase, swapHead), {tier: 'escalate', reasons: [
+    'tests/Pricing.Tests/FooTests.cs: removes test cases (2 before, 1 after)',
+    'tests/Pricing.Tests/FooTests.cs: adds conditional compilation (added directive: #if NEVER)']});
   // Directive text is compared trimmed with whitespace collapsed, so reindenting one stays automatic.
   assert.deepEqual(await testChange(path, debug, debug.replace('#if DEBUG', '  #  if   DEBUG')), {tier: 'auto', reasons: []});
   // A lone CR or U+2028 starts a directive line too.
@@ -170,6 +171,62 @@ test('comment markers inside strings and the #else of an #if false region keep t
   assert.deepEqual(countReasons(await testChange(csharpPath, before, after)), []);
   const spec = specTests('loads', 'filters');
   assert.deepEqual(await testChange(specPath, spec, spec.replace("test('loads'", "test('loads http://x/* '")), {tier: 'auto', reasons: []});
+});
+
+test('a C# test case named only inside a regular, verbatim, interpolated or raw string no longer counts', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const facts = (...lines) => `class PricingTests{\n[Fact] void A(){}\n${lines.join('\n')}\n}\n`;
+  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  for (const string of ['const string S = "[Fact]";', 'const string S = """\n[Fact]\n""";', 'const string S = """[Fact]""";',
+    'string S = @"say ""hi"" [Fact]";', 'string S = @"\n[Fact]\n";', 'string S = $"{N} [Fact]";', 'string S = $"{(N > 0 ? "a" : "b")} [Fact]";',
+    'string S = $@"{N}\n[Fact]";', 'string S = @$"{N}\n[Fact]";', 'string S = $"""\n{N} [Fact]\n""";', 'string S = $$"""\n{N} {{N}} [Fact]\n""";',
+    'string S = $"{N:F2} [Fact]";', "char Q = '\"'; string S = \"[Fact]\";"]) {
+    assert.deepEqual(await testChange(path, facts('[Fact] void B(){}'), facts(string)), removed, string);
+  }
+  // Quotes inside a literal end nothing early, so a real test after it still counts.
+  for (const string of ['string S = "\\"[";', "char Q = '\"';", 'string S = @"""";', 'string S = """ a "" b """;', 'string S = $"{"}"}";']) {
+    assert.deepEqual(await testChange(path, facts('[Fact] void B(){}'), facts(string, '[Fact] void B(){}')), {tier: 'auto', reasons: []}, string);
+  }
+});
+
+test('a JavaScript test case named only inside a string, template, regex, comment after a regex or JSX text no longer counts', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  for (const after of ["const r = /'/; // test('b', () => {})", "const s = 'test(';", 'const s = "it(";', "const s = `\n${n} test('b', () => {})`;",
+    "const s = `${`}`} test('b')`;", "const r = /[/'\"]/; // test('b')", "if (ok) /'/.test(s); // test('b', () => {})",
+    "const r = x ? /'/ : y; // test('b')", "return typeof /'/; // test('b')", "const half = total! / 2; const r = /'/; // test('b')"]) {
+    const head = `test('a', () => {});\n${after}\n`;
+    assert.deepEqual(await testChange(path, two, head), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]}, after);
+  }
+  const tsx = 'src/web/src/x.test.tsx';
+  assert.deepEqual(await testChange(tsx, two, "test('a', () => {});\nconst e = <p title=\"it(\">don't test('b', () => {})</p>;\n"),
+    {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
+});
+
+test('where the scanner cannot tell code from text, the declarations there count on the base only', async () => {
+  const unread = (path, before, after) => ({tier: 'escalate',
+    reasons: [`${path}: removes test cases (${before} before, ${after} after, counting those in text it cannot read on the base only)`]});
+  const spec = 'src/web/src/x.test.ts';
+  // A / after a } starts a regex after a block and divides after an object literal.
+  const blockThenSlash = "test('a', () => {});\n{}\n/x/g.exec(s); test('b', () => {});\n";
+  assert.deepEqual(await testChange(spec, blockThenSlash, blockThenSlash.replace("'a'", "'a2'")), unread(spec, 2, 1));
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = 'open;\ntest('b', () => {});\n"), unread(spec, 2, 1));
+  assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = `${x;\ntest('b', () => {});\n"), unread(spec, 2, 1));
+  const path = 'tests/X/PricingTests.cs';
+  const facts = 'class PricingTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'const string S = """\n[Fact] void B')), unread(path, 2, 1));
+  assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'string S = $"{N\n[Fact] void B')), unread(path, 2, 1));
+});
+
+test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {
+  const path = 'src/web/src/x.test.tsx';
+  const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it(</p>;\n"
+    + "const s = `it's ${'}'} ${`${n}`}`;\nconst r = /[/]\\/'/g;\nconst q = a++ / 2;\nconst o = {a: 1};\n"
+    + "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+  const csharp = 'class PricingTests{\n#region don\'t\n#endregion\nchar Q = \'\\\'\';\nstring S = $"{{ {N} }}";\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange('tests/X/PricingTests.cs', csharp, csharp.replace('void A', 'void A2')), {tier: 'auto', reasons: []});
 });
 
 test('removing a test( from a web spec that stays escalates and names the file', async () => {

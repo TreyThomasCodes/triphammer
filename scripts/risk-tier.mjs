@@ -115,8 +115,8 @@ export function parseRules(text) {
 
 // Test-case declarations: C# methods attributed [Fact] or [Theory] (with arguments such as Skip), and test( or it( calls
 // in JavaScript and TypeScript. Renaming or moving a test within a file keeps the count; moving it to another file
-// lowers this one's. Declarations inside // or /* */ comments, or inside a C# #if region that may not compile, do not
-// count.
+// lowers this one's. Declarations inside comments, string, regex or template literals or JSX text, or inside a C# #if
+// region that may not compile, do not count (see scan and testRemovalProblem).
 const csharpTestCase = /[[,]\s*(?:Xunit\.)?(?:Fact|Theory)(?:Attribute)?\s*[\](,]/g;
 const javascriptTestCase = /(?<![\w.$])(?:test|it)(?:\.(?:only|skip|fixme|fail))?\s*\(/g;
 
@@ -273,11 +273,329 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-// String literals (so comment markers inside them stay text) and comments, scanned left to right; an unclosed block
-// comment runs to the end of the file. C# verbatim strings double their quotes instead of escaping them.
-const stringsAndComments = /(?:@\$?|\$@)"(?:""|[^"])*"|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`|\/\*[\s\S]*?(?:\*\/|$)|\/\/[^\n]*/g;
-const withoutComments = text => text.replace(stringsAndComments, token =>
-  token.startsWith('/*') || token.startsWith('//') ? token.replace(/[^\n]/g, ' ') : token);
+// Thrown where the scanner below cannot tell code from text.
+class Unreadable extends Error {}
+// A JavaScript / starts a regex after an operator, at the start of an expression, after one of these keywords, or after
+// the ) of if, while, for or with; after a name, a literal, a ] or any other ) it divides.
+const regexAfterWords = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+const regexAfterParens = new Set(['if', 'while', 'for', 'with']);
+
+// A C# or JavaScript file read left to right as its compiler reads it: code is the text with comments, the inside of
+// every string, character, regex and template literal and JSX text blanked (delimiters and line breaks kept, so blanked
+// text never joins two tokens), and C# directive lines other than #if, #elif, #else and #endif blanked. Template, JSX and
+// C# interpolation holes are code. Where the scanner cannot tell (an unterminated string, character, regex, template,
+// comment or JSX element, an unbalanced bracket, or a JavaScript / after a }, which ends a block when a regex follows and
+// an object literal when it divides), it stops: unsure is the raw text from the start of that token to the end of the
+// file, and code holds none of it. JSX is read only where jsx is true; in TypeScript a < there is a generic or a type.
+// Line breaks arrive as \n, but for U+2028 and U+2029 in JavaScript, which end a comment or regex and not a string.
+function scan(text, {csharp, jsx: readsJsx}) {
+  const lineEnd = csharp ? /\n/g : /[\n\u2028\u2029]/g;
+  const endOfLine = from => {
+    lineEnd.lastIndex = from;
+    return lineEnd.exec(text)?.index ?? text.length;
+  };
+  const out = text.split('');
+  const blank = (from, to) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' '; };
+  const fail = () => { throw new Unreadable(); };
+  const match = pattern => { pattern.lastIndex = i; return pattern.exec(text)?.[0]; };
+  // A name, keyword or number: word characters and anything outside ASCII but whitespace.
+  const word = csharp ? /(?:\w|[^\s\0-\x7f])+/y : /(?:[\w$]|[^\s\0-\x7f])+/y;
+  let i = 0, top = 0;
+  // The $ and @ prefixes and the quotes that open a C# string at from, or null.
+  const opening = /(\$*)(@?)(\$*)("+)/y;
+  const stringOpener = from => {
+    opening.lastIndex = from;
+    return opening.exec(text);
+  };
+
+  // Code up to the end of the file or, in a hole, up to the } that closes it, where it stops.
+  function code(nested) {
+    const opens = [];
+    let previous = 'operator', lastWord, lineStart = !nested;
+    while (i < text.length) {
+      if (!nested) top = i;
+      const c = text[i];
+      if (c === '\n') lineStart = true;
+      if (/\s/.test(c)) { i++; continue; }
+      if (csharp && lineStart && c === '#') { directive(); continue; }
+      lineStart = false;
+      if (text.startsWith('//', i)) {
+        const end = endOfLine(i);
+        blank(i, end);
+        i = end;
+        continue;
+      }
+      if (text.startsWith('/*', i)) {
+        const end = text.indexOf('*/', i + 2);
+        if (end < 0) fail();
+        blank(i, end + 2);
+        i = end + 2;
+        continue;
+      }
+      const after = lastWord;
+      lastWord = undefined;
+      const opener = csharp && /[$@"]/.test(c) ? stringOpener(i) : null;
+      if (opener) {
+        // A run of three or more quotes opens a raw string, unless verbatim, where "" is an escaped quote.
+        const [all, before, verbatim, between, run] = opener;
+        const dollars = before.length + between.length;
+        if (!verbatim && run.length >= 3) {
+          i += all.length;
+          raw(run.length, dollars);
+        } else {
+          i += all.length - run.length + 1;
+          if (verbatim) doubled(dollars > 0);
+          else escaped('"', dollars > 0);
+        }
+        previous = 'operand';
+        continue;
+      }
+      if (c === '"' || c === "'") { i++; escaped(c, false); previous = 'operand'; continue; }
+      if (!csharp && c === '`') { i++; template(); previous = 'operand'; continue; }
+      if (!csharp && c === '/') {
+        if (previous === 'unsure') fail();
+        if (previous === 'operator') { regex(); previous = 'operand'; continue; }
+      }
+      if (readsJsx && c === '<' && previous === 'operator' && /[\w$>]/.test(text[i + 1] ?? '')) { jsx(); previous = 'operand'; continue; }
+      if (csharp && nested && c === ':' && opens.length === 0) { format(); continue; }
+      const name = match(word);
+      if (name) {
+        i += name.length;
+        const property = text[i - name.length - 1] === '.';
+        previous = !property && regexAfterWords.has(name) ? 'operator' : 'operand';
+        if (!property) lastWord = name;
+        continue;
+      }
+      i++;
+      if ('([{'.includes(c)) {
+        opens.push(c === '(' && regexAfterParens.has(after) ? 'condition' : c);
+        previous = 'operator';
+      } else if (')]}'.includes(c)) {
+        if (opens.length === 0 && nested && c === '}') {
+          i--;
+          return;
+        }
+        const open = opens.pop();
+        if (open !== {')': '(', ']': '[', '}': '{'}[c] && !(c === ')' && open === 'condition')) fail();
+        previous = c === '}' ? 'unsure' : open === 'condition' ? 'operator' : 'operand';
+      } else if ((c === '+' || c === '-') && text[i] === c) {
+        i++;
+        previous = 'operand';
+      } else if (!(c === '!' && previous === 'operand' && text[i] !== '=')) {
+        // A ! after an operand is TypeScript's non-null assertion, which leaves an operand.
+        previous = 'operator';
+      }
+    }
+    if (nested) fail();
+  }
+  // A C# directive line: #if, #elif, #else and #endif stay for withoutDisabledRegions (less any comment), others go.
+  function directive() {
+    const end = endOfLine(i);
+    const line = text.slice(i, end);
+    const comment = line.indexOf('//');
+    blank(/^#\s*(?:if|elif|else|endif)\b/.test(line) ? (comment < 0 ? end : i + comment) : i, end);
+    i = end;
+  }
+  // A hole of n braces in an interpolated string or a template, from its opening braces past its closing ones.
+  function hole(n) {
+    i += n;
+    code(true);
+    if (!text.startsWith('}'.repeat(n), i)) fail();
+    i += n;
+  }
+  // A C# interpolation's format (after the :), which runs to the } that closes the hole.
+  function format() {
+    const end = text.indexOf('}', i);
+    if (end < 0 || /["\n]/.test(text.slice(i, end))) fail();
+    blank(i, end);
+    i = end;
+  }
+  // A JavaScript string, a C# regular string or character literal: backslash escapes, ending at the line's end.
+  function escaped(quote, holes) {
+    let from = i;
+    for (;;) {
+      const c = text[i];
+      if (c === undefined || c === '\n') fail();
+      if (c === '\\') {
+        if (i + 1 >= text.length) fail();
+        i += 2;
+      } else if (c === quote) {
+        blank(from, i++);
+        return;
+      } else if (holes && text.startsWith('{{', i)) {
+        i += 2;
+      } else if (holes && c === '{') {
+        blank(from, i);
+        hole(1);
+        from = i;
+      } else i++;
+    }
+  }
+  // A C# verbatim string (@"", $@"", @$""): a doubled quote is a quote, and it may span lines.
+  function doubled(holes) {
+    let from = i;
+    for (;;) {
+      const c = text[i];
+      if (c === undefined) fail();
+      if (text.startsWith('""', i) || (holes && text.startsWith('{{', i))) {
+        i += 2;
+      } else if (c === '"') {
+        blank(from, i++);
+        return;
+      } else if (holes && c === '{') {
+        blank(from, i);
+        hole(1);
+        from = i;
+      } else i++;
+    }
+  }
+  // A C# raw string opened by quotes (three or more) quotes, interpolated with that many braces when dollars is not 0.
+  function raw(quotes, dollars) {
+    let from = i;
+    for (;;) {
+      const c = text[i];
+      if (c === undefined) fail();
+      if (c === '"') {
+        const run = match(/"+/y).length;
+        if (run > quotes) fail();
+        if (run === quotes) {
+          blank(from, i);
+          i += run;
+          return;
+        }
+        i += run;
+      } else if (dollars && c === '{') {
+        const run = match(/\{+/y).length;
+        if (run >= 2 * dollars) fail();
+        i += run;
+        if (run >= dollars) {
+          i -= dollars;
+          blank(from, i);
+          hole(dollars);
+          from = i;
+        }
+      } else i++;
+    }
+  }
+  // A JavaScript template literal, from after its backtick.
+  function template() {
+    let from = i;
+    for (;;) {
+      const c = text[i];
+      if (c === undefined) fail();
+      if (c === '\\') {
+        i += 2;
+      } else if (c === '`') {
+        blank(from, i++);
+        return;
+      } else if (text.startsWith('${', i)) {
+        blank(from, i);
+        i++;
+        hole(1);
+        from = i;
+      } else i++;
+    }
+  }
+  // A JavaScript regex literal and its flags; a / inside a [class] does not end it.
+  function regex() {
+    const from = ++i;
+    const end = endOfLine(i);
+    let inClass = false;
+    for (;;) {
+      const c = text[i];
+      if (i >= end) fail();
+      if (c === '\\') {
+        if (i + 1 >= end) fail();
+        i += 2;
+        continue;
+      }
+      i++;
+      if (inClass) inClass = c !== ']';
+      else if (c === '[') inClass = true;
+      else if (c === '/') break;
+    }
+    blank(from, i - 1);
+  }
+  // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
+  // arrow (<T,>() => ...) read as one does not parse, so it is unsure.
+  function jsx() {
+    i++;
+    if (text[i] === '>') {
+      i++;
+      children();
+      return;
+    }
+    const tag = match(/[\w$.:-]+/y);
+    if (!tag) fail();
+    i += tag.length;
+    for (;;) {
+      while (/\s/.test(text[i] ?? '')) i++;
+      const c = text[i];
+      if (c === undefined) fail();
+      if (text.startsWith('/>', i)) {
+        i += 2;
+        return;
+      }
+      if (c === '>') {
+        i++;
+        children();
+        return;
+      }
+      if (c === '{') {
+        hole(1);
+        continue;
+      }
+      const attribute = match(/[\w$:-]+/y);
+      if (!attribute) fail();
+      i += attribute.length;
+      while (/\s/.test(text[i] ?? '')) i++;
+      if (text[i] !== '=') continue;
+      i++;
+      while (/\s/.test(text[i] ?? '')) i++;
+      const value = text[i];
+      if (value === '"' || value === "'") {
+        const end = text.indexOf(value, i + 1);
+        if (end < 0) fail();
+        blank(i + 1, end);
+        i = end + 1;
+      } else if (value === '{') hole(1);
+      else if (value === '<') jsx();
+      else fail();
+    }
+  }
+  // A JSX element's children, up to and past its closing tag.
+  function children() {
+    let from = i;
+    for (;;) {
+      const c = text[i];
+      if (c === undefined) fail();
+      if (c === '{') {
+        blank(from, i);
+        hole(1);
+        from = i;
+      } else if (c === '<') {
+        blank(from, i);
+        if (text[i + 1] === '/') {
+          const end = text.indexOf('>', i);
+          if (end < 0) fail();
+          i = end + 1;
+          return;
+        }
+        jsx();
+        from = i;
+      } else i++;
+    }
+  }
+
+  try {
+    code(false);
+    return {code: out.join(''), unsure: ''};
+  } catch (error) {
+    if (!(error instanceof Unreadable)) throw error;
+    blank(top, text.length);
+    return {code: out.join(''), unsure: text.slice(top)};
+  }
+}
 // C# lines that compile for certain when no preprocessor symbol is defined (the test projects define none this relies
 // on). Only the literal conditions true and false are known: a branch under any other condition (#if NEVER, #if !DEBUG)
 // does not count, nor does a later #elif or #else of it, since which branch compiles is then unknown. The #else of an
@@ -304,14 +622,17 @@ function withoutDisabledRegions(text) {
 }
 
 // Every line break rewritten as \n, so a line comment or a directive line ends where the compiler ends it: C# breaks
-// lines at CR, LF, CRLF, U+0085, U+2028 and U+2029, and JavaScript at all of these but U+0085.
+// lines at CR, LF, CRLF, U+0085, U+2028 and U+2029. JavaScript breaks them at all of these but U+0085; there only CR and
+// CRLF are rewritten, since a string may hold U+2028 and U+2029 (scan ends comments and regexes at them).
 const csharpLines = text => text.replace(/\r\n|[\r\u0085\u2028\u2029]/g, '\n');
-// The number of test cases a test file of the language declares outside comments (and, in C#, regions that may not
-// compile).
-function countTestCases(language, text) {
+// The test cases a test file of the language declares in code (outside comments and literals, and in C# outside regions
+// that may not compile), and those in the text the scanner cannot read.
+function countTestCases(path, language, text) {
   const {csharp} = language;
-  const code = withoutComments(csharp ? csharpLines(text) : text.replace(/\r\n|[\r\u2028\u2029]/g, '\n'));
-  return (csharp ? withoutDisabledRegions(code) : code).match(language.testCase)?.length ?? 0;
+  const jsx = !csharp && !/\.[mc]?ts$/i.test(path);
+  const {code, unsure} = scan(csharp ? csharpLines(text) : text.replace(/\r\n?/g, '\n'), {csharp, jsx});
+  const count = part => part.match(language.testCase)?.length ?? 0;
+  return {code: count(csharp ? withoutDisabledRegions(code) : code), unsure: count(unsure)};
 }
 
 // The #if, #elif and #else lines of a C# file as a count per line text (trimmed, whitespace runs collapsed, `# if` read
@@ -345,16 +666,21 @@ function conditionalProblem(path, status, language, source) {
   return added.length ? `adds conditional compilation (added directive: ${added.join('; ')})` : undefined;
 }
 
-// Why a modified test file escalates, or undefined when it keeps at least as many test cases as on the base.
+// Why a modified test file escalates, or undefined when it keeps at least as many test cases as on the base. Evidence
+// fails closed: a declaration in text the scanner cannot read counts on the base and not on the head, so a head that
+// hides one there escalates.
 function testRemovalProblem(path, language, source) {
-  let before, after;
+  let base, head;
   try {
-    before = countTestCases(language, source.base(path));
-    after = countTestCases(language, source.head(path));
+    base = countTestCases(path, language, source.base(path));
+    head = countTestCases(path, language, source.head(path));
   } catch {
     return 'cannot read both versions to count its test cases';
   }
-  return after < before ? `removes test cases (${before} before, ${after} after)` : undefined;
+  const [before, after] = [base.code + base.unsure, head.code];
+  if (after >= before) return undefined;
+  const unread = base.unsure || head.unsure ? ', counting those in text it cannot read on the base only' : '';
+  return `removes test cases (${before} before, ${after} after${unread})`;
 }
 
 // The bin map as npm writes it to the lockfile: a string names the package's own command, and paths lose a leading ./.
