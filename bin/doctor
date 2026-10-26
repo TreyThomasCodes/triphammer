@@ -210,8 +210,8 @@ compose_prefix() {
 own_pattern=""
 ! check_project doctor "$checkout" >/dev/null 2>&1 || own_pattern="$(project_get "$checkout" composeProjectPattern)"
 if [ -n "$own_pattern" ]; then
-  own_anchored=1
-  if own_prefix="$(compose_prefix "$own_pattern")"; then own_anchored=0; fi
+  # A pattern compose_prefix cannot tie to a prefix gets the empty one, which every name starts with, so it is reported.
+  own_prefix="$(compose_prefix "$own_pattern" || true)"
   for other_file in "${XDG_CONFIG_HOME:-$HOME/.config}"/triphammer/*.conf; do
     [ -f "$other_file" ] || continue
     other="${other_file##*/}" other="${other%.conf}"
@@ -220,10 +220,8 @@ if [ -n "$own_pattern" ]; then
     [ -n "$other_checkout" ] && check_project doctor "$other_checkout" >/dev/null 2>&1 || continue
     other_pattern="$(project_get "$other_checkout" composeProjectPattern)"
     [ -n "$other_pattern" ] || continue
-    if [ "$own_anchored" -eq 0 ] && other_prefix="$(compose_prefix "$other_pattern")" \
-        && [[ "$own_prefix" != "$other_prefix"* && "$other_prefix" != "$own_prefix"* ]]; then
-      continue
-    fi
+    other_prefix="$(compose_prefix "$other_pattern" || true)"
+    [[ "$own_prefix" == "$other_prefix"* || "$other_prefix" == "$own_prefix"* ]] || continue
     problem "the composeProjectPattern of $project ($own_pattern) and that of $other ($other_pattern) can match the same Compose project name, so either project's database sweep may prune the other's containers" \
       "give each project's .triphammer/project.json a composeProjectPattern that starts with ^ and a literal prefix the other's does not start with, such as ^$project- and ^$other-"
   done
