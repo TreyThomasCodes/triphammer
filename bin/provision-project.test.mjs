@@ -26,8 +26,13 @@ for (const [what, args, message] of [
   ['a third argument', [...project, 'more'], /unexpected argument more/],
   ['an unknown module', [...project, '--modules', 'nope'], /MODULES names nope, which is not a module/],
   ['--modules twice', [...project, '--modules', 'codex', '--modules', 'demo'], /--modules is given twice/],
-  ['a module without its settings', [...project, '--modules', 'demo', '--set', 'DEMO_URL=http://gallery.example.invalid/'],
-    /the demo module needs DEMO_GALLERY_DIR/],
+  ['--unset of REPO', [...project, '--unset', 'REPO'], /--unset cannot remove REPO/],
+  ['--unset of CHECKOUT', [...project, '--unset', 'CHECKOUT'], /--unset cannot remove CHECKOUT/],
+  ['--unset of APP_AUTHOR', [...project, '--unset', 'APP_AUTHOR'], /--unset cannot remove APP_AUTHOR; every config has it/],
+  ['--unset of what is not a key', [...project, '--unset', 'owner'], /--unset takes a setting's name, not owner/],
+  ['--unset twice', [...project, '--unset', 'OWNER', '--unset', 'OWNER'], /--unset names OWNER twice/],
+  ['--set and --unset of one key', [...project, '--set', 'OWNER=example-person', '--unset', 'OWNER'], /--set and --unset both name OWNER/],
+  ['--modules and --unset MODULES', [...project, '--modules', '', '--unset', 'MODULES'], /--modules and --unset MODULES are both given/],
   ['--set of a setting that is not one', [...project, '--set', 'NOPE=1'], /--set names NOPE, which is not a setting --set may give/],
   ['--set of REPO', [...project, '--set', 'REPO=a/b'], /--set cannot give REPO/],
   ['--set of APP_AUTHOR', [...project, '--set', 'APP_AUTHOR=x'], /--set cannot give APP_AUTHOR; --app-author gives it/],
@@ -270,4 +275,104 @@ test('a config of another repository with the same checkout or the same project 
   const sameName = m.project('example/copy', join(m.root, 'copy'));
   assert.equal(sameName.status, 1, sameName.output);
   assert.match(sameName.stderr, /example-project\.conf is the config of another repository named example-project/);
+});
+
+// A project added with an owner, two modules and their settings; `config` is its config file.
+function added(t) {
+  const m = ready(t, {'example/example-project': projectFiles('example-project')});
+  const checkout = join(m.root, 'example-project');
+  const first = m.project('example/example-project', checkout, '--modules', 'codex,demo', '--set', 'OWNER=example-person',
+    '--set', 'CODEX_AUDIT_MODEL=gpt-test', '--set', 'CODEX_SECURITY_MODEL=gpt-test',
+    '--set', 'DEMO_GALLERY_DIR=/srv/gallery', '--set', 'DEMO_URL=http://gallery.example.invalid/');
+  assert.equal(first.status, 0, first.output);
+  assert.match(first.stdout, /^config: OWNER added \(example-person\)$/m);
+  assert.match(first.stdout, /^config: MODULES added \(codex,demo\)$/m);
+  const config = join(m.home, '.config/triphammer/example-project.conf');
+  return {m, checkout, config, text: readFileSync(config, 'utf8')};
+}
+const settingsOf = text => text.split('\n').slice(1).join('\n');
+
+test('a second run with no flags keeps every setting the config has, byte for byte, and says so', t => {
+  const {m, checkout, config, text} = added(t);
+  assert.equal(settingsOf(text), `REPO=example/example-project\nCHECKOUT=${checkout}\nAPP_AUTHOR=app/example-agents\n`
+    + `STATE_DIR=${m.home}/.local/state/triphammer/projects/example-project\nMODULES=codex,demo\nOWNER=example-person\n`
+    + 'CODEX_AUDIT_MODEL=gpt-test\nCODEX_SECURITY_MODEL=gpt-test\nDEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://gallery.example.invalid/\n');
+  const again = m.project('example/example-project');
+  assert.equal(again.status, 0, again.output);
+  assert.equal(readFileSync(config, 'utf8'), text);
+  for (const line of ['OWNER kept (example-person)', 'MODULES kept (codex,demo)', `CHECKOUT kept (${checkout})`,
+    'APP_AUTHOR kept (app/example-agents)', 'DEMO_URL kept (http://gallery.example.invalid/)']) {
+    assert.ok(again.stdout.split('\n').includes(`config: ${line}`), `${line}\n${again.stdout}`);
+  }
+  assert.doesNotMatch(again.stdout, /^config: \w+ (added|changed|removed)/m);
+  assert.doesNotMatch(again.stdout, /APP_AUTHOR: app\/example-agents, the App's slug/);
+  assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+  assert.deepEqual(changingCalls(again.calls), []);
+});
+
+test('a run that gives one setting changes that one and keeps the others, and --dry-run shows the same', t => {
+  const {m, config, text} = added(t);
+  const dry = m.project('example/example-project', '--set', 'OWNER=another-person', '--dry-run');
+  assert.equal(dry.status, 0, dry.output);
+  assert.match(dry.stdout, /^config: OWNER changed \(example-person, now another-person\)$/m);
+  assert.match(dry.stdout, /^config: MODULES kept \(codex,demo\)$/m);
+  assert.match(dry.stdout, /^would: rewrite .*example-project\.conf/m);
+  assert.equal(readFileSync(config, 'utf8'), text);
+
+  const result = m.project('example/example-project', '--set', 'OWNER=another-person');
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.stdout, /^config: OWNER changed \(example-person, now another-person\)$/m);
+  assert.match(result.stdout, /^config: CODEX_AUDIT_MODEL kept \(gpt-test\)$/m);
+  assert.equal(readFileSync(config, 'utf8'), text.replace('OWNER=example-person', 'OWNER=another-person'));
+});
+
+test('--unset removes a setting, and --modules \'\' turns every module off and keeps their settings', t => {
+  const {m, config, text} = added(t);
+  const unset = m.project('example/example-project', '--modules', 'codex', '--unset', 'DEMO_URL', '--unset', 'QWEN_MODEL');
+  assert.equal(unset.status, 0, unset.output);
+  assert.match(unset.stdout, /^config: MODULES changed \(codex,demo, now codex\)$/m);
+  assert.match(unset.stdout, /^config: DEMO_URL removed \(it was http:\/\/gallery\.example\.invalid\/\)$/m);
+  assert.match(unset.stdout, /^config: DEMO_GALLERY_DIR kept \(\/srv\/gallery\)$/m);
+  assert.match(unset.stdout, /^config: QWEN_MODEL is not set, so --unset removes nothing$/m);
+  assert.equal(readFileSync(config, 'utf8'),
+    text.replace('MODULES=codex,demo', 'MODULES=codex').replace('DEMO_URL=http://gallery.example.invalid/\n', ''));
+
+  const off = m.project('example/example-project', '--modules', '');
+  assert.equal(off.status, 0, off.output);
+  assert.match(off.stdout, /^config: MODULES removed \(it was codex\)$/m);
+  const now = readFileSync(config, 'utf8');
+  assert.doesNotMatch(now, /^MODULES=/m);
+  assert.match(now, /^OWNER=example-person$/m);
+  assert.match(now, /^CODEX_AUDIT_MODEL=gpt-test$/m);
+});
+
+test('a module the settings that result leave without what it needs stops provision-project with exit 2 before anything changes', t => {
+  const {m, config, text} = added(t);
+  const result = m.project('example/example-project', '--unset', 'DEMO_URL');
+  assert.equal(result.status, 2, result.output);
+  assert.match(result.stderr, /the demo module needs DEMO_URL/);
+  assert.match(result.stderr, /^usage: provision-project /m);
+  assert.deepEqual(changingCalls(result.calls), []);
+  assert.equal(readFileSync(config, 'utf8'), text);
+
+  const fresh = ready(t, {'example/other': {'.triphammer/project.json': JSON.stringify({name: 'other'})}});
+  const first = fresh.project('example/other', join(fresh.root, 'other'), '--modules', 'demo', '--set', 'DEMO_URL=http://gallery.example.invalid/');
+  assert.equal(first.status, 2, first.output);
+  assert.match(first.stderr, /the demo module needs DEMO_GALLERY_DIR/);
+  assert.deepEqual(changingCalls(first.calls), []);
+});
+
+test('a key the config has that is not a setting stops provision-project until --unset removes it, whose value stays hidden when it looks secret', t => {
+  const {m, config, text} = added(t);
+  writeFileSync(config, `${text}EXAMPLE_TOKEN=s3cret-value\n`, {mode: 0o600});
+  const refused = m.project('example/example-project');
+  assert.equal(refused.status, 2, refused.output);
+  assert.match(refused.stderr, /example-project\.conf sets EXAMPLE_TOKEN, which is not a config setting; --unset EXAMPLE_TOKEN removes it/);
+  assert.deepEqual(changingCalls(refused.calls), []);
+
+  const removed = m.project('example/example-project', '--unset', 'EXAMPLE_TOKEN');
+  assert.equal(removed.status, 0, removed.output);
+  assert.match(removed.stdout, /^config: EXAMPLE_TOKEN removed \(it was <not shown>\)$/m);
+  assert.ok(!removed.output.includes('s3cret-value'), 'the value reached the output');
+  assert.equal(readFileSync(config, 'utf8'), text);
 });

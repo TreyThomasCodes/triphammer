@@ -740,9 +740,10 @@ which leaves out the units `start` enables and says so (Doctor), and prints the 
 | --- | --- |
 | `<owner/name>` | The repository. Its config is `~/.config/triphammer/<name>.conf`, with `<name>` from its `.triphammer/project.json`, and it gets its own pair of timers. |
 | `<checkout>` | Where to clone it, default `/srv/<repository name>`, or Triphammer's checkout when it is Triphammer's own repository. |
-| `--modules <m,...>` | The modules the project turns on (`MODULES`, Configuration). Each module's required settings must come with it. |
+| `--modules <m,...>` | The modules the project turns on (`MODULES`, Configuration), in place of those its config has; `--modules ''` turns every module off. Each module's required settings must come with it or be in the config already. |
 | `--set KEY=VALUE` | One more setting of its config, any optional one (Configuration, Modules) or `STATE_DIR`, which defaults to `~/.local/state/triphammer/projects/<name>`. |
-| `--app-author <login>` | `APP_AUTHOR`. Without it, `app/<slug>` with the App's slug, which `github-app-token app-slug` reads from the App's files; when they are not placed yet it stops and says so. |
+| `--unset KEY` | Removes a setting the config has, any but `REPO`, `CHECKOUT` and `APP_AUTHOR`, and not one the same run gives with `--set`, nor `MODULES` with `--modules`. A `STATE_DIR` removed goes back to its default. |
+| `--app-author <login>` | `APP_AUTHOR`. Without it, the config's `APP_AUTHOR`, or else `app/<slug>` with the App's slug, which `github-app-token app-slug` reads from the App's files; when they are not placed yet it stops and says so. |
 | `--dry-run` | Prints each change it would make and makes none. |
 
 It installs what the project needs for a ticket run, a repair run, the full gate and the web end-to-end tests: its
@@ -753,7 +754,11 @@ headless. A project whose `.node-version` pins another Node than the machine's i
 also installs Codex (into `~/.local`), bubblewrap and the AppArmor profile `/etc/apparmor.d/bwrap`, which lets `bwrap`
 create user namespaces (a profile there that it did not write is left alone), and with the `demo` module ffmpeg. It
 gives git a commit identity in the user's `~/.gitconfig` and writes the project's config; a config with other content is
-rewritten and the old one kept as `<name>.conf.old`. Another config of a different repository at the same checkout or
+rewritten and the old one kept as `<name>.conf.old`. When the project has a config already (the one that names its
+repository), each setting in it, its checkout included, stays unless the run gives another or removes it with
+`--unset`; the file is read as `KEY=VALUE` lines and never run, and a key in it that is not a setting stops the run
+until `--unset` removes it. It prints a line for each setting, `config: <KEY> added`, `kept`, `changed` or `removed`,
+with the value unless the key's name looks like a secret's, and `--dry-run` prints the same lines. Another config of a different repository at the same checkout or
 with the same name stops it. It enables no timer.
 
 Both scripts check every argument before anything changes; an unknown flag or a bad value exits 2 with the usage, and

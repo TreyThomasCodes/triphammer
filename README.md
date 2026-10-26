@@ -46,7 +46,9 @@ triphammer start <project>
 
 `triphammer add` clones the repository to `/srv/<repo>`, installs the toolchains it pins, writes its config, creates the
 labels Triphammer uses that the repository lacks and runs the doctor, which lists anything still missing and how to fix
-it, but for the timers. `triphammer start` turns on its timers.
+it, but for the timers. Run again for a project that has a config, it keeps each setting unless you give another, with
+`--set KEY=VALUE`, `--modules` or `--app-author`, or remove one with `--unset KEY`, and it prints what each setting
+became. `triphammer start` turns on its timers.
 
 [`bin/README.md`](bin/README.md) covers every option, the configuration, and running Triphammer on a machine you also
 use for other things.
