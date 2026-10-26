@@ -426,6 +426,27 @@ test('a malformed or unknown setting exits 2 and runs nothing', async t => {
   assert.deepEqual(r.codexCalls(), []);
 });
 
+test('a Codex limit with a leading zero, which bash arithmetic reads as octal, exits 2 and runs nothing', async t => {
+  const r = auditSetup(t);
+  r.configure({CODEX_RUN_PERCENT: '08'});
+  let result = await r.codexAudit();
+  assert.equal(result.code, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /CODEX_RUN_PERCENT must be a whole number from 0 to 100, not 08/);
+  r.configure({CODEX_RUN_PERCENT: null});
+  r.settings('run_percent=08\n');
+  result = await r.codexAudit();
+  assert.equal(result.code, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /invalid Codex setting run_percent=08/);
+  r.settings('');
+  result = await r.codexAudit({CODEX_AUDIT_FLOOR_PERCENT: '09'});
+  assert.equal(result.code, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /invalid Codex setting floor_percent=09/);
+  assert.deepEqual(r.codexCalls(), []);
+  assert.deepEqual(r.runs(), []);
+  result = await r.codexAudit({CODEX_AUDIT_FLOOR_PERCENT: '0'});
+  assert.equal(result.code, 0, 'a bare 0 is still a limit');
+});
+
 test('a usage-limit error from Codex is skipped with exit 4 as "Codex: usage limit" and writes no audit', async t => {
   const r = auditSetup(t);
   const result = await r.codexAudit({FAKE_CODEX_MODE: 'usage'});

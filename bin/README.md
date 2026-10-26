@@ -143,9 +143,9 @@ is on.`), and the `triphammer:ticket-run` and `triphammer:upkeep` skills skip th
 | `QWEN_MODEL` | `qwen-audit`, required | The model name the server serves | letters, digits and `._:/-` |
 | `CODEX_AUDIT_MODEL` | `codex`, required by `local-audit --model codex` without `--codex-model` | The model of upkeep's Codex audit | letters, digits and `._:/-` |
 | `CODEX_SECURITY_MODEL` | `codex`, required by `security-review` | The model of the security reviews | letters, digits and `._:/-` |
-| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 25) | a whole number |
-| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 10) | a whole number from 0 to 100 |
-| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 5) | a whole number from 0 to 100 |
+| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 25) | a whole number, no leading zero |
+| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 10) | a whole number from 0 to 100, no leading zero |
+| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 5) | a whole number from 0 to 100, no leading zero |
 
 A module's settings may stay in the file while the module is off. A script that needs a module that is off, or a
 required setting the config leaves out, exits 2 naming the module or the setting (`the codex module is off; add it to
@@ -556,7 +556,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
 | Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node`, Claude Code login and plugin checks are skipped, and only `jq` is reported. |
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
-| The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). |
+| The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). It runs with `GITHUB_APP_OWNER` set to the owner part of `REPO`, as `ticket-runner` sets it, so the token is for the App's installation on the account that owns `REPO`, not the `owner` file's. |
 | Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next` and `agent-working` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | Plugins | `claude plugin list --json` lists at user scope the Triphammer plugin (named by `.claude-plugin/marketplace.json` in Triphammer's checkout) and `humanizer@humanizer`, as `provision` checks them. Each missing one is a problem whose fix is running the installer again; a list that fails is a problem of its own, never a pass. Skipped without `jq`. |

@@ -128,7 +128,7 @@ test('the Triphammer config accepts every module and its settings, and an empty 
   const optional = 'MODULES=codex,demo,qwen-audit\nDEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://demos.example.invalid:8888/\n'
     + 'QWEN_BASE_URL=http://localhost:8080\nQWEN_KEY_FILE=/srv/secrets/qwen key\nQWEN_MODEL=org/qwen-test:q4_k\n'
     + 'CODEX_AUDIT_MODEL=codex-audit-test\nCODEX_SECURITY_MODEL=codex-security-test-latest\nCODEX_WEEKLY_CAP=0\n'
-    + 'CODEX_FLOOR_PERCENT=100\nCODEX_RUN_PERCENT=007\nSTATUS_HOST=::\nSTATUS_PORT=65535\n'
+    + 'CODEX_FLOOR_PERCENT=100\nCODEX_RUN_PERCENT=7\nSTATUS_HOST=::\nSTATUS_PORT=65535\n'
     + 'STATUS_ALLOWED_HOSTS=status.example,[::1]:8443\nDEMO_GALLERY_HOST=gallery.example.invalid\nDEMO_GALLERY_PORT=1\n';
   const expected = {REPO: 'acme/widgets', CHECKOUT: '/srv/widgets', APP_AUTHOR: 'app/widget-bot', STATE_DIR: '/srv/state/runner', PROJECT: 'solo'};
   for (const [text, listen] of [
@@ -168,6 +168,10 @@ test('a malformed Triphammer config line or value is refused with exactly the me
     [`${settings}CODEX_WEEKLY_CAP=lots\n`, file => `${file}: CODEX_WEEKLY_CAP must be a whole number, not lots`],
     [`${settings}CODEX_FLOOR_PERCENT=101\n`, file => `${file}: CODEX_FLOOR_PERCENT must be a whole number from 0 to 100, not 101`],
     [`${settings}CODEX_RUN_PERCENT=-5\n`, file => `${file}: CODEX_RUN_PERCENT must be a whole number from 0 to 100, not -5`],
+    [`${settings}CODEX_WEEKLY_CAP=08\n`, file => `${file}: CODEX_WEEKLY_CAP must be a whole number, not 08`],
+    [`${settings}CODEX_FLOOR_PERCENT=08\n`, file => `${file}: CODEX_FLOOR_PERCENT must be a whole number from 0 to 100, not 08`],
+    [`${settings}CODEX_RUN_PERCENT=08\n`, file => `${file}: CODEX_RUN_PERCENT must be a whole number from 0 to 100, not 08`],
+    [`${settings}CODEX_RUN_PERCENT=00\n`, file => `${file}: CODEX_RUN_PERCENT must be a whole number from 0 to 100, not 00`],
     [`${settings}STATUS_HOST=bad host\n`, file => `${file}: STATUS_HOST must be an address or host name (letters, digits and ._:-), not bad host`],
     [`${settings}DEMO_GALLERY_HOST=$(x)\n`, file => `${file}: DEMO_GALLERY_HOST must be an address or host name (letters, digits and ._:-), not $(x)`],
     [`${settings}STATUS_PORT=0\n`, file => `${file}: STATUS_PORT must be a port from 1 to 65535, not 0`],
