@@ -135,7 +135,7 @@ function writeConfig(r) {
 test('a Chromium that does not start headless is reported, the newest revision checked', t => {
   const r = doctorSetup(t);
   r.chromium(1250, 'echo "error while loading shared libraries: libnss3.so" >&2; exit 127');
-  assertOneProblem(r.doctor(), /^Chromium does not start headless \(.*chromium-1250\/chrome-linux64\/chrome\)\. Fix: install its system libraries/);
+  assertOneProblem(r.doctor(), /^Chromium does not start headless \(.*chromium-1250\/chrome-linux64\/chrome\)\. Fix: install its system libraries: .*, or run triphammer update /);
   r.chromium(1250);
   r.chromium(1243, 'exit 1');
   assert.equal(r.doctor().status, 0);
@@ -158,7 +158,7 @@ test('with the codex module on, a bwrap that cannot create a user namespace, or 
 test('a .NET SDK outside global.json\'s pin and rollForward is reported', t => {
   const r = doctorSetup(t);
   r.answers('dotnet', {'--list-sdks': {stdout: '10.0.300 [/sdk]\n10.0.500-preview.1 [/sdk]\n'}});
-  assertOneProblem(r.doctor(), /^no \.NET SDK matches 10\.0\.400 \(rollForward latestPatch\).*Fix: install the \.NET SDK 10\.0\.400/);
+  assertOneProblem(r.doctor(), /^no \.NET SDK matches 10\.0\.400 \(rollForward latestPatch\).*Fix: run triphammer update, which installs it on a machine of its own; elsewhere install the \.NET SDK 10\.0\.400/);
   r.answers('dotnet', {});
   assertOneProblem(r.doctor(), /^no \.NET SDK matches 10\.0\.400/);
 });
@@ -217,7 +217,7 @@ test('Docker that does not answer the user, and Docker without Compose v2, are r
 test('missing Playwright browsers are reported', t => {
   const r = doctorSetup(t);
   rmSync(join(r.browsers, 'chromium-1243'), {recursive: true});
-  assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in .*Fix: run npx playwright install chromium/);
+  assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in .*Fix: run triphammer update, which installs it on a machine of its own; elsewhere run npx playwright install chromium/);
 });
 
 test('Chromium is checked only for a checkout whose tracked package.json, at any depth, pins Playwright', t => {
