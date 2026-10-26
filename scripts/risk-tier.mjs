@@ -275,19 +275,25 @@ export function compareVersions(a, b) {
 
 // Thrown where the scanner below cannot tell code from text.
 class Unreadable extends Error {}
-// A JavaScript / starts a regex after an operator, at the start of an expression, after one of these keywords, or after
-// the ) of if, while, for (for await too) or with; after a name, a literal, a ] or any other ) it divides.
-const regexAfterWords = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'default',
-  'do', 'else', 'extends', 'yield', 'await']);
-const regexAfterParens = new Set(['if', 'while', 'for', 'with']);
+// A JavaScript / starts a regex, and a < a JSX element where JSX is read, after an operator; they divide and compare
+// after an operand on the same line. After anything else the token is unsure, since its meaning hangs on what came
+// before. Operators are the punctuators but ), ] and }, a prefix ++, -- or !, and the operator words; operands are
+// names, numbers, literals, a ) or a ], and a postfix ++, -- or ! (TypeScript's non-null assertion) after one on the same
+// line. Unsure are an operand on an earlier line (a semicolon may be inserted between), a }, which ends a block or an
+// object literal, the ) of if, while, for (for await too) or with, which ends a statement's head, a ++, -- or ! after
+// any of these, and the unsure words, which are keywords or names by context or start a statement.
+const operatorWords = new Set(['return', 'typeof', 'instanceof', 'in', 'new', 'delete', 'void', 'throw', 'case', 'default',
+  'do', 'else', 'extends']);
+const unsureWords = new Set(['of', 'yield', 'await', 'async', 'let', 'static', 'break', 'continue', 'const', 'var', 'class',
+  'function', 'import', 'export', 'if', 'for', 'while', 'with', 'switch', 'try', 'catch', 'finally', 'debugger', 'enum']);
+const conditionWords = new Set(['if', 'while', 'for', 'with']);
 
 // A C# or JavaScript file read left to right as its compiler reads it: code is the text with comments, the inside of
 // every string, character, regex and template literal and JSX text blanked (delimiters and line breaks kept, so blanked
 // text never joins two tokens), and C# directive lines other than #if, #elif, #else and #endif blanked. Template, JSX and
 // C# interpolation holes are code. Where the scanner cannot tell (an unterminated string, character, regex, template,
-// comment or JSX element, an unbalanced bracket, a JavaScript / after a }, which ends a block when a regex follows and
-// an object literal when it divides, or a JavaScript <!-- or -->, which outside a module can comment out the rest of
-// the line), it stops: unsure is the raw text from the start of that token to the end of the
+// comment or JSX element, an unbalanced bracket, a JavaScript / or < whose meaning is unsure, or a JavaScript <!-- or
+// -->, which outside a module can comment out the rest of the line), it stops: unsure is the raw text from the start of that token to the end of the
 // file, and code holds none of it. JSX is read only where jsx is true; in TypeScript a < there is a generic or a type.
 // Line breaks arrive as \n, but for U+2028 and U+2029 in JavaScript, which end a comment or regex and not a string.
 function scan(text, {csharp, jsx: readsJsx}) {
@@ -313,11 +319,13 @@ function scan(text, {csharp, jsx: readsJsx}) {
   // Code up to the end of the file or, in a hole, up to the } that closes it, where it stops.
   function code(nested) {
     const opens = [];
-    let previous = 'operator', lastWord, lineStart = !nested;
+    // The kind of the last token (operator, operand or unsure) and whether a line has ended since it.
+    let previous = 'operator', broke = false, lastWord, lineStart = !nested;
     while (i < text.length) {
       if (!nested) top = i;
       const c = text[i];
       if (c === '\n') lineStart = true;
+      if (endOfLine(i) === i) broke = true;
       if (/\s/.test(c)) { i++; continue; }
       if (csharp && lineStart && c === '#') { directive(); continue; }
       lineStart = false;
@@ -330,12 +338,15 @@ function scan(text, {csharp, jsx: readsJsx}) {
       if (text.startsWith('/*', i)) {
         const end = text.indexOf('*/', i + 2);
         if (end < 0) fail();
+        if (endOfLine(i) < end) broke = true;
         blank(i, end + 2);
         i = end + 2;
         continue;
       }
       const after = lastWord;
       lastWord = undefined;
+      const before = previous === 'operand' && broke ? 'unsure' : previous;
+      broke = false;
       const opener = csharp && /[$@"]/.test(c) ? stringOpener(i) : null;
       if (opener) {
         // A run of three or more quotes opens a raw string, unless verbatim, where "" is an escaped quote.
@@ -356,23 +367,28 @@ function scan(text, {csharp, jsx: readsJsx}) {
       if (!csharp && c === '`') { i++; template(); previous = 'operand'; continue; }
       if (!csharp && (text.startsWith('<!--', i) || text.startsWith('-->', i))) fail();
       if (!csharp && c === '/') {
-        if (previous === 'unsure') fail();
-        if (previous === 'operator') { regex(); previous = 'operand'; continue; }
+        if (before === 'unsure') fail();
+        if (before === 'operator') { regex(); previous = 'operand'; continue; }
       }
-      if (readsJsx && c === '<' && previous === 'operator' && /[\w$>]/.test(text[i + 1] ?? '')) { jsx(); previous = 'operand'; continue; }
+      if (readsJsx && c === '<' && before !== 'operand') {
+        if (before === 'unsure' || !/[\w$>]/.test(text[i + 1] ?? '')) fail();
+        jsx();
+        previous = 'operand';
+        continue;
+      }
       if (csharp && nested && c === ':' && opens.length === 0) { format(); continue; }
       const name = match(word);
       if (name) {
         i += name.length;
         const property = text[i - name.length - 1] === '.';
-        previous = !property && regexAfterWords.has(name) ? 'operator' : 'operand';
+        previous = property ? 'operand' : operatorWords.has(name) ? 'operator' : unsureWords.has(name) ? 'unsure' : 'operand';
         // for await ( opens a condition as for ( does.
         if (!property) lastWord = name === 'await' && after === 'for' ? 'for' : name;
         continue;
       }
       i++;
       if ('([{'.includes(c)) {
-        opens.push(c === '(' && regexAfterParens.has(after) ? 'condition' : c);
+        opens.push(c === '(' && conditionWords.has(after) ? 'condition' : c);
         previous = 'operator';
       } else if (')]}'.includes(c)) {
         if (opens.length === 0 && nested && c === '}') {
@@ -381,14 +397,15 @@ function scan(text, {csharp, jsx: readsJsx}) {
         }
         const open = opens.pop();
         if (open !== {')': '(', ']': '[', '}': '{'}[c] && !(c === ')' && open === 'condition')) fail();
-        previous = c === '}' ? 'unsure' : open === 'condition' ? 'operator' : 'operand';
+        previous = c === '}' || open === 'condition' ? 'unsure' : 'operand';
       } else if ((c === '+' || c === '-') && text[i] === c) {
+        // Postfix after an operand, prefix after an operator: either way the kind stays.
         i++;
-        previous = 'operand';
-      } else if (!(c === '!' && previous === 'operand' && text[i] !== '=')) {
-        // A ! after an operand is TypeScript's non-null assertion, which leaves an operand.
-        previous = 'operator';
-      }
+        previous = before;
+      } else if (c === '!' && text[i] !== '=') {
+        // A ! after an operand is TypeScript's non-null assertion, and after an operator a not.
+        previous = before;
+      } else previous = 'operator';
     }
     if (nested) fail();
   }

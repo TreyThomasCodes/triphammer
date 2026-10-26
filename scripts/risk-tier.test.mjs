@@ -193,7 +193,7 @@ test('a JavaScript test case named only inside a string, template, regex, commen
   const path = 'src/web/src/x.test.ts';
   const two = "test('a', () => {});\ntest('b', () => {});\n";
   for (const after of ["const r = /'/; // test('b', () => {})", "const s = 'test(';", 'const s = "it(";', "const s = `\n${n} test('b', () => {})`;",
-    "const s = `${`}`} test('b')`;", "const r = /[/'\"]/; // test('b')", "if (ok) /'/.test(s); // test('b', () => {})",
+    "const s = `${`}`} test('b')`;", "const r = /[/'\"]/; // test('b')",
     "const r = x ? /'/ : y; // test('b')", "return typeof /'/; // test('b')", "const half = total! / 2; const r = /'/; // test('b')"]) {
     const head = `test('a', () => {});\n${after}\n`;
     assert.deepEqual(await testChange(path, two, head), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]}, after);
@@ -219,6 +219,20 @@ test('where the scanner cannot tell code from text, the declarations there count
   assert.deepEqual(await testChange(tsx, generic, generic.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
   const mismatched = "const e = <div>text</span>;\ntest('a', () => {});\ntest('b', () => {});\n// </div>\n";
   assert.deepEqual(await testChange(tsx, mismatched, mismatched.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
+  // A / or < whose meaning hangs on the token before it is unsure unless that token is clearly an operator, or clearly
+  // an operand on the same line: a ! at a line's start may follow an inserted semicolon, a } may end a block, and the )
+  // of an if may start a statement.
+  const hidden = [
+    [spec, "const ok = 1\n!/[test(]/.exec('x'); test('b', () => {});"],
+    [spec, "const ok = x\n/[test(]/.exec('x'); test('b', () => {});"],
+    [spec, "if (ok) /'/.test(s); // test('b', () => {})"],
+    [tsx, "if (x) {}\n<p>test('b', () => {})</p>;"],
+    [tsx, "const ok = x\n<p>test('b', () => {})</p>;"],
+    ['src/web/src/x.test.js', "if (x) {}\n<p>test('b', () => {})</p>;"],
+  ];
+  for (const [path, line] of hidden) {
+    assert.deepEqual(await testChange(path, two, `test('a', () => {});\n${line}\n`), unread(path, 2, 1), line);
+  }
   const path = 'tests/X/PricingTests.cs';
   const facts = 'class PricingTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'const string S = """\n[Fact] void B')), unread(path, 2, 1));
@@ -256,6 +270,7 @@ test('division, JSX text with quotes and literals holding quotes or slashes keep
   const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it(</p>;\n"
     + "const f = <><Ui.Row><b>it(</b><br/></ Ui.Row ></>;\n"
     + "const s = `it's ${'}'} ${`${n}`}`;\nconst r = /[/]\\/'/g;\nconst q = a++ / 2;\nconst o = {a: 1};\n"
+    + "expect(a < b).toBe(arr[0] / 2 < f(x));\nif (!/'/.test(s) && x) {}\nconst l = items.map(i => <li>{i}</li>);\n"
     + "test('a', () => {});\ntest('b', () => {});\n";
   assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
   const csharp = 'class PricingTests{\n#region don\'t\n#endregion\nchar Q = \'\\\'\';\nstring S = $"{{ {N} }}";\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
