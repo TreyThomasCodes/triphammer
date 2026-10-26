@@ -60,10 +60,30 @@ A project describes itself in two files in its own repository:
 - `.triphammer/risk-tier.json` decides, from the paths a change touches, whether the change merges by itself, waits
   for your approval or is refused. CI reads these rules from the base branch, so a pull request can't loosen its own.
 
-Then protect the default branch with three required checks: `closing-issue`, `owner-approval` and your tests. Copy
-[`.github/workflows/risk-tier.yml`](.github/workflows/risk-tier.yml) into the project for the first two. If an
-organization owns the repository, set the variable `TRIPHAMMER_OWNER` to your own login, on the repository or the
-organization.
+Then protect the default branch with three required checks: `closing-issue`, `owner-approval` and your tests. Add
+this workflow to the project as `.github/workflows/risk-tier.yml` for the first two:
+
+```yaml
+name: risk-tier
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+  statuses: write
+jobs:
+  risk-tier:
+    uses: TreyThomasDotCodes/triphammer/.github/workflows/risk-tier.yml@<commit>
+```
+
+Replace `<commit>` with the full SHA of a commit on Triphammer's `main`. The workflow runs Triphammer's checks from
+that commit, with the rules from your default branch, and nothing from the pull request. To pick up a change to the
+checks, move the pin to a newer commit. If an organization owns the repository, set the variable `TRIPHAMMER_OWNER`
+to your own login, on the repository or the organization.
 
 A pull request you open yourself, such as a change under `.github/workflows/` that the App can't push, needs no
 approval: `owner-approval` passes at any commit you pushed. If someone else pushes to its branch, it waits for you as

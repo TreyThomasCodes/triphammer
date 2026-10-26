@@ -1,0 +1,7 @@
+# actionlint up to 1.7.12, the latest release, does not know job.workflow_repository and job.workflow_sha, which GitHub
+# documents in the job context (docs.github.com, Contexts reference) and risk-tier.yml reads to find Triphammer's commit
+# when a project calls it. Support is rhysd/actionlint#707 (issue #705); remove this file once a release has it.
+paths:
+  .github/workflows/risk-tier.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
