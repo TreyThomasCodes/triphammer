@@ -46,3 +46,12 @@ Production code that no production code reaches (no caller, registration, entry 
 - Did removing a caller (a feature, a desktop view, an endpoint) orphan the code it called, and that code's own helpers in turn?
 
 Found in: #507 (the desktop removal left a session loader, a comparison-export writer, a portable replay loader and other members only tests reached).
+
+## 9. Shell checks that ignore quoting
+
+A check that reads command text before tokenizing it (a line-based heredoc scan, a split on `;` or `|`) takes text inside a quoted value as shell syntax. The parse then fails, and a fallback that drops the command lets it through unchecked.
+
+- For any hook or parser change, feed a quoted value that holds shell syntax (`-b '... <<EOF ...'`, `;`, `|`, `$(`, a quote left open across lines). Is the command still checked?
+- Does a parse failure mean "allow" in a rule that refuses? It must refuse, or check the raw text instead.
+
+Found in: a guard hook's heredoc scan, which read `<<EOF` inside a quoted pull request body as a heredoc and let the command past its rule.
