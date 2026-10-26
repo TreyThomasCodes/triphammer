@@ -96,6 +96,7 @@ The runner gives the session it starts the owner as the environment variable `TR
 the repository's owner. The `risk-tier` workflow, which decides whose approval releases an escalated pull request, reads
 its owner from the repository variable `TRIPHAMMER_OWNER`, falling back to the repository's owner; in a repository an
 organization owns, set that variable to the login `OWNER` gives (`gh variable set TRIPHAMMER_OWNER --body <owner-login>`).
+The workflow matches that login in any case, as GitHub does.
 
 These settings are optional, and only `status/` reads them (its README, "Run"). Every project's config may
 give them; two configs that give one different values stop the status page with exit 2:
