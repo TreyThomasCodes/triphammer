@@ -301,8 +301,9 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
   logins compared case-insensitively: the runner takes no one
   else's issue, and their `Slice k of #N` declarations neither hold back nor close anything. An issue without an
   author counts as no one's. Each skipped open issue is printed to standard error.
-- Only the owner's `CHANGES_REQUESTED` review newer than the pull request's last commit starts a
-  `changes-requested` repair; anyone else's review, or one without an author, starts nothing. The repair session's
+- A `changes-requested` repair starts only when the owner's latest review that is not a comment is
+  `CHANGES_REQUESTED` and newer than the pull request's last commit, the rule of the `owner-approval` brake: a later
+  approval or dismissal withdraws it. Anyone else's review, or one without an author, counts for nothing. The repair session's
   prompt names the owner, whose reviews alone it reads.
 - Several issues may claim the same `Slice k of #N`. Any open one keeps parent `#N` open and holds back slice `k+1`.
   A parent labelled `hold`, `needs-owner` or `stop-agents` stays open after its last slice closes, and the reason is

@@ -153,6 +153,19 @@ test('only the owner\'s changes requested start a repair', t => {
   }
 });
 
+test('the owner\'s latest review that is not a comment decides whether changes are requested', t => {
+  const reviews = (...rs) => pr(40, 30, {reviews: rs});
+  const withdrawn = reviews(['CHANGES_REQUESTED', '2026-10-16T12:00:00Z'], ['APPROVED', '2026-10-16T13:00:00Z']);
+  assert.equal(decide(t, [issue(30)], [withdrawn]).action, '');
+  const requested = reviews(['APPROVED', '2026-10-16T12:00:00Z'], ['CHANGES_REQUESTED', '2026-10-16T13:00:00Z']);
+  assert.equal(decide(t, [issue(30)], [requested]).action, 'repair 40 30 changes-requested');
+  const commented = reviews(['CHANGES_REQUESTED', '2026-10-16T12:00:00Z'], ['COMMENTED', '2026-10-16T13:00:00Z']);
+  assert.equal(decide(t, [issue(30)], [commented]).action, 'repair 40 30 changes-requested');
+  const approvedByOther = reviews(['CHANGES_REQUESTED', '2026-10-16T12:00:00Z'],
+    ['APPROVED', '2026-10-16T13:00:00Z', 'stranger']);
+  assert.equal(decide(t, [issue(30)], [approvedByOther]).action, 'repair 40 30 changes-requested');
+});
+
 // A repository an organization owns: the organization's login is the repository's owner, and the owner the runner acts
 // for is a person, the Triphammer config's OWNER.
 const org = 'Example-Org/example-project';
