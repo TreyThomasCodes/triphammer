@@ -10,10 +10,10 @@
 # clone's bin/provision-project as root through sudo with the arguments given, removes the clone, creates the labels
 # Triphammer reads and sets that the repository lacks (ticket-runner --labels, as the service user, whose gh acts as the
 # App; a failure is reported and undoes nothing), and then runs the doctor for the project with --before-start, which
-# leaves out the units start enables. Running a fresh clone keeps root from running code in a checkout the service user
-# can write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start enables and
-# starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's only
-# project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
+# leaves out the units start enables. Running a fresh clone, from /, keeps root from running code in a checkout the
+# service user can write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start
+# enables and starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's
+# only project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
 #
 # sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
@@ -150,6 +150,7 @@ add() {
   for arg; do [ "$arg" != --dry-run ] || dry_run=1; done
   if [ $# -eq 0 ] || [[ "$1" == -* ]]; then usage_error "add needs a repository, owner/name"; fi
   read_machine
+  cd /  # nothing add runs, as root above all, starts in the caller's directory
   if [ -n "$sudo" ]; then
     echo "triphammer add installs the project's toolchains as root and writes its files as $user; sudo asks for your password once."
     sudo -v

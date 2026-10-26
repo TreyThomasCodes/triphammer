@@ -44,8 +44,8 @@ export const readdir = path => run('ls', ['-A', path]).split('\n').filter(Boolea
 // dotnet-install and Claude Code installers, which install fakes, and GitHub's GET /app, whose slug is example-agents).
 // With `privateOrigins`, a fake git clones only when git's credential helpers give github.com credentials, and GitHub's
 // App API answers github-app-token for the installation on `example`. `provision` and `project` run the branch's
-// bin/provision and bin/provision-project on it; `placeApp` puts App files with a fresh key in the user's
-// ~/.config/github-app.
+// bin/provision and bin/provision-project on it (`projectFrom` from a working directory given; the fake npx records its
+// own in npx-cwds); `placeApp` puts App files with a fresh key in the user's ~/.config/github-app.
 export function machine(t, origins, {dockerRepo = true, ghRepo = true, privateOrigins = false} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'provision-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -85,6 +85,7 @@ export function machine(t, origins, {dockerRepo = true, ghRepo = true, privateOr
   writeFileSync(join(node, 'node'), '#!/bin/sh\n[ "$1" = --version ] && echo v24.19.0\n', {mode: 0o755});
   writeFileSync(join(node, 'npx'), `#!/bin/sh
 echo "$*" >> '${state}/npx-calls'
+echo "$(pwd) $*" >> '${state}/npx-cwds'
 b="$HOME/.cache/ms-playwright"
 case "$*" in
   *"install --dry-run chromium") printf '  Install location:    %s\\n' "$b/chromium-1243" "$b/chromium_headless_shell-1243" ;;
@@ -135,9 +136,9 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
   const env = {...toolingEnv, PATH: `${bin}:${process.env.PATH}`, TRIPHAMMER_PROVISION_ROOT: sys,
     TRIPHAMMER_PROVISION_GIT_BASE: `file://${root}/origins/`};
   const calls = () => lines(join(state, 'calls')).map(line => JSON.parse(line));
-  const script = name => (...args) => {
+  const script = (name, cwd) => (...args) => {
     const before = calls().length;
-    const result = spawnSync(join(here, name), args, {env, encoding: 'utf8'});
+    const result = spawnSync(join(here, name), args, {env, cwd, encoding: 'utf8'});
     return {status: result.status, stdout: result.stdout, stderr: result.stderr, output: result.stdout + result.stderr,
       calls: calls().slice(before)};
   };
@@ -146,6 +147,7 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
     machine: () => JSON.parse(readFileSync(join(state, 'machine.json'), 'utf8')),
     provision: script('provision'),
     project: script('provision-project'),
+    projectFrom: (cwd, ...args) => script('provision-project', cwd)(...args),
     placeApp() {
       const app = join(home, '.config/github-app');
       mkdirSync(app, {recursive: true, mode: 0o700});
