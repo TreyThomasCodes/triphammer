@@ -143,9 +143,9 @@ is on.`), and the `triphammer:ticket-run` and `triphammer:upkeep` skills skip th
 | `QWEN_MODEL` | `qwen-audit`, required | The model name the server serves | letters, digits and `._:/-` |
 | `CODEX_AUDIT_MODEL` | `codex`, required by `local-audit --model codex` without `--codex-model` | The model of upkeep's Codex audit | letters, digits and `._:/-` |
 | `CODEX_SECURITY_MODEL` | `codex`, required by `security-review` | The model of the security reviews | letters, digits and `._:/-` |
-| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 25) | a whole number |
-| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 10) | a whole number from 0 to 100 |
-| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 5) | a whole number from 0 to 100 |
+| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 25) | a whole number, no leading zero |
+| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 10) | a whole number from 0 to 100, no leading zero |
+| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 5) | a whole number from 0 to 100, no leading zero |
 
 A module's settings may stay in the file while the module is off. A script that needs a module that is off, or a
 required setting the config leaves out, exits 2 naming the module or the setting (`the codex module is off; add it to
