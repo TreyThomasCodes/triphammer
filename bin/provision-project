@@ -3,13 +3,20 @@
 # Triphammer, and it may run again whenever the owner likes, since a second run changes nothing that is already right.
 # See bin/README.md ("On a machine of its own").
 #
-#   provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>]
-#                     [--dry-run]
+#   provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--unset KEY]...
+#                     [--app-author <login>] [--dry-run]
 #
 # The machine file /etc/triphammer.conf (bin/provision-lib.sh) names the service user and Triphammer's checkout. The
 # project's checkout defaults to /srv/<name>, or Triphammer's own checkout when the project is Triphammer's repository.
 # The config's APP_AUTHOR is --app-author, or else app/<slug> with the App's slug, which github-app-token app-slug reads
 # once the owner has placed the App's files.
+#
+# A project that has a config already, the one in ~/.config/triphammer that names its repository, keeps each setting it
+# holds (its checkout, APP_AUTHOR, STATE_DIR, MODULES and the rest, unknown keys too) unless this run gives another:
+# <checkout>, --set, --modules or --app-author replaces one, --unset removes one, and --modules '' turns every module
+# off. The file is read as KEY=VALUE lines, never run. A config's checks and a module's needs apply to the settings that
+# result. It prints each setting it adds, keeps, changes or removes (`config: OWNER kept (<login>)`), with its value
+# unless the key's name looks like a secret's.
 #
 # It installs, each only when it is not there already: the project's checkout, cloned as the service user; the .NET SDK
 # its global.json pins, through dotnet-install into ~/.dotnet, with the drop-in that puts it on ticket-runner@.service's
@@ -36,8 +43,8 @@ here="$(dirname "$(readlink -f "$0")")"
 cd /  # nothing root runs starts in the caller's directory, which may be a checkout the service user can write
 usage() {
   cat >&2 <<'EOF'
-usage: provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--app-author <login>]
-                         [--dry-run]
+usage: provision-project <owner/name> [<checkout>] [--modules <m,...>] [--set KEY=VALUE]... [--unset KEY]...
+                         [--app-author <login>] [--dry-run]
 EOF
 }
 # shellcheck source=bin/provision-lib.sh
@@ -52,15 +59,26 @@ for key in "${optional_settings[@]}"; do [ "$key" = MODULES ] || settable+=("$ke
 declare -A module_needs=([demo]="DEMO_GALLERY_DIR DEMO_URL" [qwen-audit]="QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL"
   [codex]="CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL")
 
-repo="" checkout="" modules="" modules_given="" sets="" app_author="" dry_run=""
+repo="" checkout="" modules="" modules_given="" sets="" unsets=" " app_author="" dry_run=""
 need_value() { [ "$1" -gt "$2" ] || usage_error "$3 needs $4"; }
+given() { [[ $'\n'"$sets" == *$'\n'"$1="* ]]; }
+unsetting() { [[ "$unsets" == *" $1 "* ]]; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --modules)
       need_value $# 1 "$1" "a value"
       [ -z "$modules_given" ] || usage_error "--modules is given twice"
-      [ -n "$2" ] || usage_error "--modules needs a value"
       modules="$2" modules_given=1
+      shift 2 ;;
+    --unset)
+      need_value $# 1 "$1" "a setting's name"
+      [[ "$2" =~ ^[A-Z][A-Z0-9_]*$ ]] || usage_error "--unset takes a setting's name, not $2"
+      case "$2" in
+        REPO|CHECKOUT) usage_error "--unset cannot remove $2; every config has it, from the arguments before the options" ;;
+        APP_AUTHOR) usage_error "--unset cannot remove APP_AUTHOR; every config has it, and --app-author gives another" ;;
+      esac
+      ! unsetting "$2" || usage_error "--unset names $2 twice"
+      unsets+="$2 "
       shift 2 ;;
     --set)
       need_value $# 1 "$1" "a value"
@@ -73,7 +91,7 @@ while [ $# -gt 0 ]; do
       esac
       [[ " ${settable[*]} " == *" $key "* ]] || usage_error "--set names $key, which is not a setting --set may give (${settable[*]})"
       [[ "$2" != *$'\n'* ]] || usage_error "--set $key: the value may not hold a line break"
-      [[ $'\n'"$sets" != *$'\n'"$key="* ]] || usage_error "--set gives $key twice"
+      ! given "$key" || usage_error "--set gives $key twice"
       sets="${sets:+$sets$'\n'}$2"
       shift 2 ;;
     --app-author)
@@ -95,47 +113,110 @@ done
 [[ "$repo" =~ $repo_pattern ]] || usage_error "the repository must be owner/name, not $repo"
 [ -z "$app_author" ] || [[ "$app_author" =~ ^(app/)?[A-Za-z0-9][A-Za-z0-9-]*$ ]] \
   || usage_error "--app-author must be a login or app/<slug>, not $app_author"
+for key in $unsets; do
+  ! given "$key" || usage_error "--set and --unset both name $key"
+  [ "$key" != MODULES ] || [ -z "$modules_given" ] || usage_error "--modules and --unset MODULES are both given"
+done
 
-# setting <key>: the value --set gave, or nothing.
-setting() {
-  local line
+# The existing config's settings, in its order (old_keys, old), once it is read; none until then.
+old_keys=()
+declare -A old=()
+# merge <checkout> <app author> <default state dir>: sets conf_keys and conf to the settings the config is to hold: the
+# required four, MODULES, then the existing config's others in its order and the new ones in --set's, each the value
+# this run gives, or else the existing one, unless --unset removes it.
+conf_keys=()
+declare -A conf=()
+merge() {
+  local key line
+  conf_keys=() conf=()
+  put() { [ -n "${conf[$1]+set}" ] || conf_keys+=("$1"); conf[$1]="$2"; }
+  put REPO "$repo"
+  put CHECKOUT "$1"
+  put APP_AUTHOR "$2"
+  if [ -n "${old[STATE_DIR]:-}" ] && ! unsetting STATE_DIR; then put STATE_DIR "${old[STATE_DIR]}"
+  else put STATE_DIR "$3"
+  fi
+  if [ -n "$modules_given" ]; then [ -z "$modules" ] || put MODULES "$modules"
+  elif [ -n "${old[MODULES]+set}" ] && ! unsetting MODULES; then put MODULES "${old[MODULES]}"
+  fi
+  for key in "${old_keys[@]}"; do
+    case "$key" in REPO|CHECKOUT|APP_AUTHOR|STATE_DIR|MODULES) continue ;; esac
+    unsetting "$key" || put "$key" "${old[$key]}"
+  done
+  # --set's values last: one replaces a kept value in its place, and a new key goes at the end.
   while IFS= read -r line; do
-    [[ "$line" != "$1="* ]] || { printf '%s' "${line#*=}"; return 0; }
+    [ -z "$line" ] || put "${line%%=*}" "${line#*=}"
   done <<< "$sets"
 }
-module() { [[ ",$modules," == *",$1,"* ]]; }
-# config_text <app author> <state dir>: the project's config file.
+module() { [[ ",${conf[MODULES]:-}," == *",$1,"* ]]; }
+# config_text: the project's config file, from conf.
 config_text() {
+  local key
   printf '# Written by bin/provision-project; bin/README.md (Configuration) describes each setting.\n'
-  printf 'REPO=%s\nCHECKOUT=%s\nAPP_AUTHOR=%s\n' "$repo" "$checkout" "$1"
-  [ -n "$(setting STATE_DIR)" ] || printf 'STATE_DIR=%s\n' "$2"
-  [ -z "$modules" ] || printf 'MODULES=%s\n' "$modules"
-  [ -z "$sets" ] || printf '%s\n' "$sets"
+  for key in "${conf_keys[@]}"; do printf '%s=%s\n' "$key" "${conf[$key]}"; done
 }
-# The settings go through config.sh's own reader before anything changes, so a config this writes is one the scripts
-# accept. An APP_AUTHOR not given yet is checked once it is read from GitHub.
-[ -z "$checkout" ] || check_place "triphammer add" "$repo" "$checkout"
-scratch="$(mktemp)"
-checkout_given="$checkout"
-checkout="${checkout:-/srv/checked-later}"
-config_text "${app_author:-app/example}" /nonexistent/state > "$scratch"
-checkout="$checkout_given"
-if ! problem="$( (
-    export TRIPHAMMER_CONFIG="$scratch"
-    unset TRIPHAMMER_PROJECT
-    load_config "$prog" /
-    # shellcheck disable=SC2154  # set by load_config
-    for name in $cfg_modules; do
-      # shellcheck disable=SC2086  # the settings are words
-      module_needs "$prog" "$name" ${module_needs[$name]}
-    done
-  ) 2>&1)"; then
+# check_settings [needs]: the settings merge gives go through config.sh's own reader before anything changes, so a
+# config this writes is one the scripts accept; with `needs`, each module's settings must be there too. A checkout or
+# an APP_AUTHOR not known yet is checked once it is.
+check_settings() {
+  local scratch problem
+  scratch="$(mktemp)"
+  merge "${checkout:-/srv/checked-later}" "${app_author:-app/example}" /nonexistent/state
+  config_text > "$scratch"
+  if ! problem="$( (
+      export TRIPHAMMER_CONFIG="$scratch"
+      unset TRIPHAMMER_PROJECT
+      load_config "$prog" /
+      [ -n "${1:-}" ] || exit 0
+      # shellcheck disable=SC2154  # set by load_config
+      for name in $cfg_modules; do
+        # shellcheck disable=SC2086  # the settings are words
+        module_needs "$prog" "$name" ${module_needs[$name]}
+      done
+    ) 2>&1)"; then
+    rm -f "$scratch"
+    usage_error "$repo: ${problem//"$prog: $scratch"/its settings}"
+  fi
   rm -f "$scratch"
-  usage_error "$repo: ${problem//"$prog: $scratch"/its settings}"
-fi
-rm -f "$scratch"
+}
+# This run's flags alone first, before the machine is read; the settings they give with the existing config's below.
+[ -z "$checkout" ] || check_place "triphammer add" "$repo" "$checkout"
+check_settings
 
 read_machine
+check_ubuntu
+user_exists || fail "the user $user that $machine_file names does not exist; run bin/provision again"
+home="$(getent passwd "$user" | cut -d: -f6)"
+app_dir="$home/.config/github-app"
+
+# The existing config: the one that names this repository, read as the user. Two that name it are the owner's to sort
+# out, as is a line that is not KEY=VALUE, a key given twice or one that is not a setting.
+configs="$home/.config/triphammer"
+existing=""
+for other in "$configs"/*.conf; do
+  [ -f "$other" ] || continue
+  grep -qixF "REPO=$repo" "$other" || continue
+  [ -z "$existing" ] || fail "$existing and $other both name $repo; remove the one it does not use"
+  existing="$other"
+done
+if [ -n "$existing" ]; then
+  text="$(as_user cat -- "$existing")" || fail "could not read $existing"
+  n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    [[ ! "$line" =~ ^[[:space:]]*(#.*)?$ ]] || continue
+    [[ "$line" =~ ^([A-Z][A-Z0-9_]*)=(.*)$ ]] || fail "$existing line $n is not KEY=VALUE; correct it or remove the line"
+    key="${BASH_REMATCH[1]}"
+    [ -z "${old[$key]+set}" ] || fail "$existing sets $key a second time; remove one of the lines"
+    old_keys+=("$key") old[$key]="${BASH_REMATCH[2]}"
+    if [[ " REPO CHECKOUT APP_AUTHOR STATE_DIR ${optional_settings[*]} " != *" $key "* ]] && ! unsetting "$key"; then
+      usage_error "$existing sets $key, which is not a config setting; --unset $key removes it"
+    fi
+  done <<< "$text"
+  [ -n "$checkout" ] || checkout="${old[CHECKOUT]:-}"
+  [ -n "$app_author" ] || app_author="${old[APP_AUTHOR]:-}"
+fi
+
 if [ -z "$checkout" ]; then
   if [ "${repo,,}" = "${tri_repo,,}" ]; then checkout="$tri_checkout"; else checkout="/srv/${repo#*/}"; fi
 fi
@@ -143,14 +224,9 @@ check_place "triphammer add" "$repo" "$checkout"
 if [ "$checkout" = "$tri_checkout" ] && [ "${repo,,}" != "${tri_repo,,}" ]; then
   usage_error "$repo would use Triphammer's checkout $tri_checkout, which holds $tri_repo"
 fi
-
-check_ubuntu
-user_exists || fail "the user $user that $machine_file names does not exist; run bin/provision again"
-home="$(getent passwd "$user" | cut -d: -f6)"
-app_dir="$home/.config/github-app"
+check_settings needs
 
 # Another config on this machine for the same checkout but another repository is the owner's to sort out.
-configs="$home/.config/triphammer"
 for other in "$configs"/*.conf; do
   [ -f "$other" ] || continue
   if grep -qxF "CHECKOUT=$checkout" "$other" && ! grep -qixF "REPO=$repo" "$other"; then
@@ -159,8 +235,8 @@ for other in "$configs"/*.conf; do
 done
 [ "$checkout" = "$tri_checkout" ] || checkout_state "$repo" "$checkout" >/dev/null
 
-# APP_AUTHOR: as given, or the App's slug, read with a copy of the github-app-token beside this script, as the user,
-# from the App's files.
+# APP_AUTHOR: as given or as the existing config has it, or else the App's slug, read with a copy of the
+# github-app-token beside this script, as the user, from the App's files.
 if [ -z "$app_author" ]; then
   slug=""
   if bootstrap_helper && slug="$(as_user "$bootstrap/github-app-token" app-slug 2> "$bootstrap/error")"; then
@@ -206,6 +282,9 @@ if cloned "$repo" "$checkout"; then
   config="$configs/$name.conf"
   if [ -f "$config" ] && ! grep -qixF "REPO=$repo" "$config"; then
     fail "$config is the config of another repository named $name; remove it, or rename one of the projects"
+  fi
+  if [ -n "$existing" ] && [ "$existing" != "$config" ]; then
+    fail "$existing holds the settings of $repo, whose project file names it $name; rename it to $config"
   fi
 
   if as_user test -f "$checkout/.node-version"; then
@@ -309,9 +388,29 @@ for pin in "${playwright_pins[@]}"; do
   fi
 done
 
-# The project's config file.
+# The project's config file, and what each setting does in it.
+merge "$checkout" "$app_author" "$home/.local/state/triphammer/projects/${name:-<its project name>}"
+# shown <key> <value>: the value, unless the key's name looks like a secret's (a path to one, *_FILE, is shown).
+shown() {
+  if [[ "$1" != *_FILE && "$1" =~ (TOKEN|SECRET|PASSWORD|PASSPHRASE|CREDENTIAL|KEY|PEM) ]]; then printf '<not shown>'
+  else printf '%s' "$2"
+  fi
+}
+for key in "${conf_keys[@]}"; do
+  value="$(shown "$key" "${conf[$key]}")"
+  if [ -z "${old[$key]+set}" ]; then note "config: $key added ($value)"
+  elif [ "${old[$key]}" = "${conf[$key]}" ]; then note "config: $key kept ($value)"
+  else note "config: $key changed ($(shown "$key" "${old[$key]}"), now $value)"
+  fi
+done
+for key in "${old_keys[@]}"; do
+  [ -n "${conf[$key]+set}" ] || note "config: $key removed (it was $(shown "$key" "${old[$key]}"))"
+done
+for key in $unsets; do
+  [ -n "${old[$key]+set}" ] || note "config: $key is not set, so --unset removes nothing"
+done
 if [ -n "$name" ]; then
-  user_file "$config" 600 "$(config_text "$app_author" "$home/.local/state/triphammer/projects/$name")"$'\n'
+  user_file "$config" 600 "$(config_text)"$'\n'
 else
   change "write the config file of $repo, named after its project file, once it is cloned" true
 fi
@@ -350,7 +449,7 @@ fi
 
 summary
 steps=()
-! module qwen-audit || steps+=("Put the Qwen server's API key in $(setting QWEN_KEY_FILE), owned by $user and mode 600.")
+! module qwen-audit || steps+=("Put the Qwen server's API key in ${conf[QWEN_KEY_FILE]:-}, owned by $user and mode 600.")
 ! module codex || steps+=("Log Codex in: sudo -iu $user codex login.")
 if [ ${#steps[@]} -gt 0 ]; then
   echo
