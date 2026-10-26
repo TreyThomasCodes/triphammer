@@ -6,6 +6,7 @@
 #   triphammer doctor [<project>]
 #   triphammer plan [<project>]
 #   triphammer start [<project>]
+#   triphammer update [--dry-run]
 #
 # add clones Triphammer's repository (from the machine file) into a temporary directory as the caller, runs that
 # clone's bin/provision-project as root through sudo with the arguments given (which keeps the settings a project's
@@ -15,18 +16,30 @@
 # leaves out the units start enables. Running a fresh clone, from /, keeps root from running code in a checkout the
 # service user can write. doctor and plan run ticket-runner --doctor or --plan for a project as the service user; start
 # enables and starts the project's timers, and its gallery with the demo module. A <project> left out is the machine's
-# only project. The service user, its home and Triphammer's repository come from the machine file /etc/triphammer.conf,
+# only project.
+#
+# update brings what the runner cannot update by itself up to date: it clones Triphammer's repository as add does and
+# runs that clone's bin/provision as root with the machine file's repository, checkout, user and home (which also
+# replaces /usr/local/bin/triphammer), then the clone's provision-project for each project that has a config, with its
+# REPO (read as data, never run) and no setting, so each keeps its settings. When systemd says one of the Triphammer
+# units the projects use changed on disk (NeedDaemonReload), or cannot say, it reloads the service user's units; it
+# enables, starts and stops no unit. It ends with a line saying whether anything changed, and then runs the doctor for
+# each project. --dry-run passes --dry-run to each script, prints `would: reload ...` for the reload, runs no doctor and
+# changes nothing. A provision that fails stops it; a provision-project that fails does not stop the other projects,
+# and update then exits with its status. A doctor that finds a problem makes it exit 1. Nothing runs it on a timer.
+#
+# The service user, its home and Triphammer's repository and checkout come from the machine file /etc/triphammer.conf,
 # which root owns; provision installs this script as /usr/local/bin/triphammer, a copy root owns too.
 #
-# sudo asks for the password once (sudo -v) before add changes anything, and it is not used when the caller is root
-# (add, start) or the service user (doctor, plan, start). provision-project and ticket-runner run in a session of their
-# own with nothing on stdin, as install.sh runs provision: their output still reaches the terminal, but no command under
-# them can be stopped for touching it. So Ctrl-C at the terminal reaches this script and the bash that runs the step
+# sudo asks for the password once (sudo -v) before add or update changes anything, and it is not used when the caller
+# is root (add, start, update) or the service user (doctor, plan, start). provision, provision-project and ticket-runner
+# run in a session of their own with nothing on stdin, as install.sh runs provision: their output still reaches the
+# terminal, but no command under them can be stopped for touching it. So Ctrl-C at the terminal reaches this script and the bash that runs the step
 # (directly or through sudo), but not the step. As in install.sh, on an INT, TERM or HUP the script sends TERM to that
 # bash (from a session of its own, since some sudo versions do not relay a signal sent from the process group the
 # command runs in); on any of the three that bash sends TERM to the step's whole process group and waits for the step
-# to end; and only then does the script end, by the signal it got. Exit status: the step's own, 2 for a usage error, 1
-# when the machine file is missing or malformed.
+# to end; and only then does the script end, by the signal it got. Exit status: the step's own (update's, above), 2 for
+# a usage error, 1 when the machine file is missing or malformed.
 #
 # Tests (triphammer.test.mjs) use TRIPHAMMER_PROVISION_ROOT for where /etc lies and TRIPHAMMER_PROVISION_GIT_BASE for
 # where repositories are cloned from, as provision does.
@@ -43,6 +56,7 @@ usage: triphammer add <owner>/<repo> [<checkout>] [--modules <m,...>] [--set KEY
        triphammer doctor [<project>]
        triphammer plan [<project>]
        triphammer start [<project>]
+       triphammer update [--dry-run]
 EOF
 }
 usage_error() {
@@ -55,16 +69,17 @@ fail() {
   exit 1
 }
 
-# The machine file: Triphammer's repository, the service user and its home.
+# The machine file: Triphammer's repository and checkout, the service user and its home.
 read_machine() {
   local line key value
-  tri_repo="" user="" home=""
+  tri_repo="" tri_checkout="" user="" home=""
   [ -r "$machine_file" ] || fail "$machine_file is missing; set the machine up first with install.sh"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
     key="${line%%=*}" value="${line#*=}"
     case "$key" in
       TRIPHAMMER_REPO) tri_repo="$value" ;;
+      TRIPHAMMER_CHECKOUT) tri_checkout="$value" ;;
       TRIPHAMMER_USER) user="$value" ;;
       TRIPHAMMER_HOME) home="$value" ;;
     esac
@@ -129,18 +144,25 @@ service_runner() {
   detached "${service[@]}" -- env TRIPHAMMER_PROJECT="$1" "$home/.local/bin/ticket-runner" "${@:2}"
 }
 
+# config_names: sets `names` to the projects that have a config in the service user's ~/.config/triphammer.
+config_names() {
+  local configs name
+  names=()
+  configs="$(as_service ls -1 "$home/.config/triphammer" 2>/dev/null || true)"
+  while IFS= read -r name; do
+    [[ "$name" != *.conf ]] || names+=("${name%.conf}")
+  done <<< "$configs"
+}
+
 # project <name or nothing>: sets `project` to the name given, or to the machine's only project.
 project() {
-  local configs names=()
+  local names
   if [ -n "${1:-}" ]; then
     [[ "$1" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*$ ]] || usage_error "$1 is not a project name"
     project="$1"
     return 0
   fi
-  configs="$(as_service ls -1 "$home/.config/triphammer" 2>/dev/null || true)"
-  while IFS= read -r name; do
-    [[ "$name" == *.conf ]] && names+=("${name%.conf}")
-  done <<< "$configs"
+  config_names
   case ${#names[@]} in
     1) project="${names[0]}" ;;
     0) fail "no project is set up yet; add one with triphammer add <owner>/<repo>" ;;
@@ -148,27 +170,40 @@ project() {
   esac
 }
 
+# fresh_clone <what it does as root> <what the clone is for>: from /, asks sudo for the password once (unless the caller
+# is root), and clones Triphammer's repository into $work/triphammer, a temporary directory the EXIT trap removes.
+fresh_clone() {
+  cd /  # nothing root runs starts in the caller's directory
+  if [ -n "$sudo" ]; then
+    echo "$1; sudo asks for your password once."
+    sudo -v
+  fi
+  work="$(mktemp -d)"  # global: the EXIT trap runs after the caller has returned
+  trap 'rm -rf -- "$work"' EXIT
+  git clone -q --depth 1 -- "$git_base$tri_repo.git" "$work/triphammer" \
+    || fail "could not clone $tri_repo, whose $2"
+  mkfifo "$work/pipe"
+}
+# as_root <script> <args...>: runs the clone's bin/<script> as root, detached, its output both on the terminal and in
+# $work/output; returns its status. Through a FIFO rather than a pipeline, so that detached runs in this shell and
+# catches its signals.
+as_root() {
+  local status=0 tee_pid
+  tee "$work/output" < "$work/pipe" &
+  tee_pid=$!
+  detached $sudo -- bash "$work/triphammer/bin/$1" "${@:2}" > "$work/pipe" || status=$?
+  wait "$tee_pid"
+  return "$status"
+}
+
 add() {
-  local arg dry_run="" status name tee_pid
+  local arg dry_run="" status=0 name
   for arg; do [ "$arg" != --dry-run ] || dry_run=1; done
   if [ $# -eq 0 ] || [[ "$1" == -* ]]; then usage_error "add needs a repository, owner/name"; fi
   read_machine
-  cd /  # nothing add runs, as root above all, starts in the caller's directory
-  if [ -n "$sudo" ]; then
-    echo "triphammer add installs the project's toolchains as root and writes its files as $user; sudo asks for your password once."
-    sudo -v
-  fi
-  work="$(mktemp -d)"  # global: the EXIT trap runs after add has returned
-  trap 'rm -rf -- "$work"' EXIT
-  git clone -q --depth 1 -- "$git_base$tri_repo.git" "$work/triphammer" \
-    || fail "could not clone $tri_repo, whose bin/provision-project sets the project up"
-  # Through a FIFO rather than a pipeline, so that detached runs in this shell and catches its signals.
-  mkfifo "$work/pipe"
-  tee "$work/output" < "$work/pipe" &
-  tee_pid=$!
-  status=0
-  detached $sudo -- bash "$work/triphammer/bin/provision-project" "$@" > "$work/pipe" || status=$?
-  wait "$tee_pid"
+  fresh_clone "triphammer add installs the project's toolchains as root and writes its files as $user" \
+    "bin/provision-project sets the project up"
+  as_root provision-project "$@" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
   name="$(sed -n 's/^project: //p' "$work/output" | tail -n 1)"
   [ -z "$dry_run" ] || return 0
@@ -202,12 +237,91 @@ start() {
   modules="$(as_service sed -n 's/^MODULES=//p' "$config")"
   units=("ticket-runner@$project.timer" "merge-when-ready@$project.timer")
   [[ ",$modules," != *,demo,* ]] || units+=("demo-gallery@$project.service")
-  if [ "$(id -un)" = "$user" ]; then
-    as_service systemctl --user enable --now "${units[@]}"
-  else
-    $sudo systemctl --machine="$user@" --user enable --now "${units[@]}"
-  fi
+  user_systemctl enable --now "${units[@]}"
   echo "Started ${units[*]}."
+}
+
+# user_systemctl <args...>: systemctl --user for the service user, through its own user manager.
+user_systemctl() {
+  if [ "$(id -un)" = "$user" ]; then
+    as_service systemctl --user "$@"
+  else
+    $sudo systemctl --machine="$user@" --user "$@"
+  fi
+}
+
+update() {
+  local arg dry=() names repos=() name repo i step=0 status=0 changed="" units shown doctor_failed=""
+  for arg; do
+    case "$arg" in
+      --dry-run) dry=(--dry-run) ;;
+      *) usage_error "update takes no argument but --dry-run, not $arg" ;;
+    esac
+  done
+  read_machine
+  [[ "$tri_checkout" == /* ]] || fail "$machine_file names no TRIPHAMMER_CHECKOUT; run install.sh again"
+  fresh_clone "triphammer update installs the machine's and each project's toolchains as root" \
+    "bin/provision updates the machine"
+  # Every project's repository, read from its config as data before anything changes.
+  config_names
+  for name in "${names[@]}"; do
+    repo="$(as_service sed -n 's/^REPO=//p' "$home/.config/triphammer/$name.conf")"
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] \
+      || fail "$home/.config/triphammer/$name.conf names no repository as one REPO=<owner>/<name> line"
+    repos+=("$repo")
+  done
+
+  echo "The machine:"
+  as_root provision --triphammer "$tri_repo" "$tri_checkout" --user "$user" --home "$home" "${dry[@]}" || exit $?
+  grep -qx 'Nothing to change: the machine is as asked.' "$work/output" || changed=1
+  for i in "${!names[@]}"; do
+    echo
+    echo "The project ${names[i]}:"
+    step=0
+    as_root provision-project "${repos[i]}" "${dry[@]}" || step=$?
+    if [ "$step" -ne 0 ]; then
+      printf 'triphammer: provision-project %s failed (exit %s)\n' "${repos[i]}" "$step" >&2
+      status=$step
+    fi
+    grep -qx 'Nothing to change: the machine is as asked.' "$work/output" || changed=1
+  done
+
+  # The units are links into Triphammer's checkout, which each tick updates without reloading them: reload when systemd
+  # says a unit file changed under it, or when it cannot say.
+  echo
+  units=(triphammer-status.service)
+  for name in "${names[@]}"; do
+    units+=("ticket-runner@$name.service" "ticket-runner@$name.timer" "merge-when-ready@$name.service"
+      "merge-when-ready@$name.timer" "demo-gallery@$name.service")
+  done
+  if ! shown="$(user_systemctl show --property=NeedDaemonReload -- "${units[@]}")" \
+      || grep -qx 'NeedDaemonReload=yes' <<< "$shown"; then
+    changed=1
+    if [ ${#dry[@]} -gt 0 ]; then
+      echo "would: reload $user's systemd units"
+    else
+      echo "+ reload $user's systemd units"
+      user_systemctl daemon-reload || { echo "triphammer: systemctl could not reload $user's units" >&2; status=1; }
+    fi
+  fi
+  if [ "$status" -ne 0 ]; then
+    echo "triphammer: not every step of the update succeeded; the errors above say which" >&2
+  elif [ -z "$changed" ]; then
+    echo "Nothing to change: the machine and every project are as asked."
+  elif [ ${#dry[@]} -gt 0 ]; then
+    echo "The changes above would be made; nothing was changed."
+  else
+    echo "The changes above were made."
+  fi
+  [ ${#dry[@]} -eq 0 ] || exit "$status"
+
+  for name in "${names[@]}"; do
+    echo
+    echo "The doctor's check of $name:"
+    service_runner "$name" --doctor || doctor_failed=1
+  done
+  [ "$status" -ne 0 ] || [ -z "$doctor_failed" ] || status=1
+  exit "$status"
 }
 
 case "${1:-}" in
@@ -215,6 +329,7 @@ case "${1:-}" in
   doctor) shift; runner --doctor "$@" ;;
   plan) shift; runner --plan "$@" ;;
   start) shift; start "$@" ;;
+  update) shift; update "$@" ;;
   ''|-h|--help|help) usage; [ -n "${1:-}" ] || exit 2 ;;
   *) usage_error "unknown command $1" ;;
 esac

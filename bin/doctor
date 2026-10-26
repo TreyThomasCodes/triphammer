@@ -109,7 +109,7 @@ if [ -n "$jq_ok" ] && [ -f "$checkout/global.json" ]; then
       done <<< "$sdks"
     fi
     [ -n "$found" ] || problem "no .NET SDK matches $pin (rollForward $roll) from $checkout/global.json" \
-      "install the .NET SDK $pin or a later one global.json accepts (https://dotnet.microsoft.com/download) $units_path (~/.dotnet, with the drop-in of bin/README.md, Install, A project's toolchain)"
+      "run triphammer update, which installs it on a machine of its own; elsewhere install the .NET SDK $pin or a later one global.json accepts (https://dotnet.microsoft.com/download) $units_path (~/.dotnet, with the drop-in of bin/README.md, Install, A project's toolchain)"
   else
     problem "$checkout/global.json pins no SDK version this doctor can read" "give sdk.version as major.minor.patch"
   fi
@@ -184,7 +184,7 @@ if [ -z "$pins_playwright" ]; then
   :  # no Playwright, so no browser to check
 elif ! compgen -G "$browsers/chromium*-[0-9]*" >/dev/null; then
   problem "Playwright's Chromium is not installed in $browsers" \
-    "run npx playwright install chromium in the checkout's web app, as this user"
+    "run triphammer update, which installs it on a machine of its own; elsewhere run npx playwright install chromium in the checkout's web app, as this user"
 else
   # Each kind of Chromium Playwright installed, newest revision first, must print a blank page headless, as
   # Playwright starts it (no sandbox); one that cannot lacks its system libraries.
@@ -193,7 +193,7 @@ else
     [ -n "$browser" ] || continue
     if ! timeout 60 "$browser" --headless --no-sandbox --disable-gpu --dump-dom about:blank 2>/dev/null | grep -q '<html'; then
       problem "Chromium does not start headless ($browser)" \
-        "install its system libraries: as root, npx playwright install-deps chromium in the checkout's web app, or run triphammer add for the project again (bin/README.md, On a machine of its own)"
+        "install its system libraries: as root, npx playwright install-deps chromium in the checkout's web app, or run triphammer update (bin/README.md, On a machine of its own)"
     fi
   done
 fi

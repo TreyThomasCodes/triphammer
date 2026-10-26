@@ -50,6 +50,18 @@ it, but for the timers. Run again for a project that has a config, it keeps each
 `--set KEY=VALUE`, `--modules` or `--app-author`, or remove one with `--unset KEY`, and it prints what each setting
 became. `triphammer start` turns on its timers.
 
+Triphammer keeps its own code current: each run fast-forwards Triphammer's checkout and the project's, and loads the
+plugin from Triphammer's checkout. What was installed as root stays as it was: the packages and Node, the `triphammer`
+command in `/usr/local/bin`, the plugins at user scope and each project's toolchains. When a project pins a new .NET SDK
+or Playwright, or Triphammer's setup changes, run:
+
+```sh
+triphammer update             # or triphammer update --dry-run, to see what it would change
+```
+
+It runs the setup again for the machine and for each project, keeping each project's settings, reloads the units when
+one changed, and ends with each project's doctor. Nothing runs it on a schedule; changes as root stay yours.
+
 [`bin/README.md`](bin/README.md) covers every option, the configuration, and running Triphammer on a machine you also
 use for other things.
 

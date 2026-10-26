@@ -35,7 +35,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | File | What it does |
 | --- | --- |
 | `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the worktrees and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share a lock, a backoff and a stop file and take turns (see Several projects). |
-| `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers; see On a machine of its own below. |
+| `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers, `update` runs a fresh clone's `provision` and each project's `provision-project` again for what the runner does not update by itself; see On a machine of its own below. |
 | `provision` | Run as root (by `install.sh`, through sudo) on a fresh Ubuntu server, turns it into a machine of Triphammer's own with no project yet: the shared toolchain, the service user, Triphammer's checkout, the links, the plugin, the machine file and the `triphammer` command; see On a machine of its own below. |
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
@@ -498,6 +498,12 @@ descriptor 9 (the shared lock is taken later, on file descriptor 8). The rest of
 copy. The copy it re-executes is always the one next to the running script, in Triphammer's checkout, which every
 project's tick updates.
 
+The self-update reaches only what the service user owns: the checkouts, and with them the linked scripts, units and the
+plugin that sessions load from Triphammer's checkout. It reloads no unit. On a machine of its own, `triphammer update`
+installs what root does (packages, Node, `/usr/local/bin/triphammer`, the user-scope plugins, each project's
+toolchains) when it is missing or a pin changed, and reloads the units when one changed (On a machine of its own,
+Update).
+
 Tests (`npm run test:tooling`) run the scripts against throwaway git repositories, never the real checkout:
 `TRIPHAMMER_CONFIG` names a Triphammer config in the test's temporary directory (`checkoutSetup` and `runnerSetup` in `fixture.mjs`
 write one, with the example project's repository and App author and the throwaway checkout, and copy the project file of the
@@ -664,7 +670,8 @@ logs are readable only by the service user; `ticket-runner` also makes its state
 700 on every start, and the shared directory and its `waiting/` once it has decided what to do. `demo-publish` sets its
 own umask of 022, so the gallery stays readable when something running as another user, such as a proxy, serves it
 instead of `demo-gallery`. Run
-`systemctl --user daemon-reload` after pulling changed units, since the units are linked from the checkout.
+`systemctl --user daemon-reload` after pulling changed units, since the units are linked from the checkout (on a
+machine of its own, `triphammer update` does).
 
 The units name no checkout: they run the `~/.local/bin` symlinks, which point into Triphammer's checkout. The symlinks
 also keep `ticket-runner`, `merge-when-ready`, `land-pr`, `github-app-token`, `gh` and `demo-gallery` on `PATH` for agents and for
@@ -805,6 +812,23 @@ are started; the doctor `add` runs leaves them out. `start` runs
 `sudo systemctl --machine=triphammer@ --user enable --now ...`. The status page is
 `sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service`. The status page and the gallery
 listen where the configs say (`STATUS_HOST`, `DEMO_GALLERY_HOST`).
+
+**Update.** The runner keeps what the service user owns current by itself: each tick fast-forwards Triphammer's
+checkout and the project's (Self-update), and sessions load the plugin from Triphammer's checkout. What `provision`
+and `provision-project` install as root does not follow by itself: a package a newer `provision` needs, the Node that
+Triphammer's `.node-version` pins, `/usr/local/bin/triphammer`, a plugin missing at user scope, and each project's
+toolchains (the .NET SDK and Playwright's Chromium its checkout pins). The owner runs `triphammer update [--dry-run]`
+for those, as `add` is run; nothing runs it on a timer. Like the scripts it runs, it installs what is missing or
+different and upgrades no package or plugin that is installed already. It asks sudo for the password
+once, clones Triphammer's repository into a temporary directory and runs that clone's `provision` as root with the
+machine file's repository, checkout, user and home, then the clone's `provision-project` for each project that has a
+config, with the `REPO` its config names and no setting, so each keeps its settings. When systemd reports that a unit
+the projects use changed on disk (`NeedDaemonReload`), or cannot say, it runs
+`sudo systemctl --machine=triphammer@ --user daemon-reload`; it enables, starts and stops no unit. It says whether
+anything changed, then runs the doctor for each project and exits 1 when a doctor finds a problem. A failing
+`provision` stops it; a failing `provision-project` does not stop the other projects, and `update` exits with its
+status. `--dry-run` passes `--dry-run` to each script, prints `would: reload ...` for the reload, runs no doctor and
+changes nothing.
 
 **Moving an existing install.** Two machines must never run the same project at once. On the old machine, stop its
 timers (`systemctl --user disable --now 'ticket-runner@*.timer' 'merge-when-ready@*.timer'`, or the non-template
