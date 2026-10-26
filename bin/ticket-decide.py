@@ -135,9 +135,11 @@ for pr in sorted(prs, key=lambda pr: pr["number"]):
               if (c.get("name") or c.get("context")) != "owner-approval"]
     last_commit = pr["commits"][-1]["committedDate"] if pr["commits"] else ""
     # Only the owner's change requests start a repair, since the repair session acts on the review's text; GitHub
-    # logins compare case-insensitively, and a review without an author is no one's.
-    requested = [r for r in pr["reviews"] if r["state"] == "CHANGES_REQUESTED" and r["submittedAt"] > last_commit
-                 and (author(r) or "").lower() == owner.lower()]
+    # logins compare case-insensitively, and a review without an author is no one's. As in the owner-approval brake,
+    # the owner's latest review that is not a comment decides: a later approval or dismissal withdraws the request.
+    answers = sorted((r for r in pr["reviews"] if r["state"] != "COMMENTED"
+                      and (author(r) or "").lower() == owner.lower()), key=lambda r: r["submittedAt"])
+    requested = answers and answers[-1]["state"] == "CHANGES_REQUESTED" and answers[-1]["submittedAt"] > last_commit
     reason = ("conflicts" if pr["mergeStateStatus"] == "DIRTY"
               else "failing-checks" if any((c.get("conclusion") or c.get("state")) in failing for c in checks)
               else "changes-requested" if requested
