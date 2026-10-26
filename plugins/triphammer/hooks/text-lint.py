@@ -12,10 +12,10 @@
 # or after `=`, and when an option repeats its last value counts, as gh reads it (git joins its -m values). A `<<WORD`
 # inside quotes or a comment is text, not a heredoc. A quote that never closes makes bash refuse the whole command, but
 # the commands are still checked as if it closed at the end. A command with -h or --help, and `git commit --amend
-# --no-edit` with no -m, -F, -c or -C (it keeps the message it has), post nothing new and are not checked. A --body-file that does not exist is refused, so the check
-# cannot be skipped by writing the file in the same command. Not covered: a command run by bash -c, eval, xargs, a
-# script or a gh alias, git's abbreviated long options (--mess), and a value given by an unquoted substitution
-# (--body $(cat f)) or computed when it runs.
+# --no-edit` with no -m, -F, -c or -C (it keeps the message it has), post nothing new and are not checked. A
+# --body-file that does not exist is refused, so the check cannot be skipped by writing the file in the same command.
+# Not covered: a command run by bash -c, eval, xargs, a script or a gh alias, git's abbreviated long options (--mess),
+# and a value given by an unquoted substitution (--body $(cat f)) or computed when it runs.
 # Text that breaks a rule is refused with every rule it breaks:
 #
 #   upstream    DASH, TEST_PLAN, WORTH_KNOWING, CONTEXT_SOLUTION, FIX_FRAMING (not for issues, nor for a title or
