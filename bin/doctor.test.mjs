@@ -318,8 +318,35 @@ test('Codex is checked only when the codex module is on: installed and logged in
 test('gh that does not act as the App is reported', t => {
   const r = doctorSetup(t);
   r.gh.respond({'api installation/repositories': {exit: 1, stderr: 'HTTP 403\n'}});
-  assertOneProblem(r.doctor(), /^gh does not act as the agents' GitHub App.*Fix: link bin\/gh and github-app-token/);
+  assertOneProblem(r.doctor(), /^gh does not act as the agents' GitHub App on Example-Owner, the owner of Example-Owner\/example-project .*Fix: install the App on Example-Owner, link bin\/gh and github-app-token/);
   assert.ok(!r.gh.calls().some(call => call[0] === 'label'), 'the labels were looked up without the App');
+});
+
+test('the App check gets its token for the owner of REPO, not the owner file\'s account', t => {
+  // The real gh wrapper and github-app-token, ahead of the fake gh (moved to ~/.dotnet, later on the units' PATH), with
+  // the App installed on acct-a only, the account the owner file names.
+  const r = doctorSetup(t, {config: {REPO: 'acct-b/example-project'}});
+  const fake = readFileSync(join(r.bin, 'gh'), 'utf8');
+  writeFileSync(join(r.home, '.dotnet/gh'), fake, {mode: 0o755});
+  rmSync(join(r.bin, 'gh'));
+  symlinkSync(join(here, 'gh'), join(r.bin, 'gh'));
+  writeFileSync(join(r.app, 'app-id'), '12345\n');
+  writeFileSync(join(r.app, 'owner'), 'acct-a\n');
+  rmSync(join(r.app, 'agents.pem'));
+  run('openssl', ['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', join(r.app, 'agents.pem')]);
+  chmodSync(join(r.app, 'agents.pem'), 0o600);
+  const installations = 'GET https://api.github.com/app/installations';
+  const token = {stdout: JSON.stringify({token: 'ghs_acct_a', expires_at: '2999-01-01T00:00:00Z'})};
+  r.curlRoutes({[`GET ${qwenUrl}`]: {}, [installations]: {stdout: JSON.stringify([{id: 41, account: {login: 'acct-a'}}])},
+    'POST https://api.github.com/app/installations/41/access_tokens': token});
+  assertOneProblem(r.doctor({XDG_CACHE_HOME: join(r.root, 'cache')}),
+    /^gh does not act as the agents' GitHub App on acct-b, the owner of acct-b\/example-project \(gh api installation\/repositories fails\)\. Fix: install the App on acct-b, /);
+  assert.deepEqual(r.gh.calls(), [['--version']], 'gh ran with a token of another account\'s installation');
+  // Installed on acct-b as well, the check passes as acct-b.
+  r.curlRoutes({[`GET ${qwenUrl}`]: {}, [installations]: {stdout: JSON.stringify([{id: 41, account: {login: 'acct-b'}}])},
+    'POST https://api.github.com/app/installations/41/access_tokens': token});
+  const result = r.doctor({XDG_CACHE_HOME: join(r.root, 'cache')});
+  assert.equal(result.status, 0, result.output);
 });
 
 test('each label Triphammer uses that the repository lacks is reported, with triphammer add as the fix', t => {
