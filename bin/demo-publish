@@ -5,12 +5,13 @@
                                                <folder> for <pr>, with a one-line summary; videos become H.264 MP4
   demo-publish --reindex                        refresh pull request states and rebuild the page
 
-Publishing <pr> again replaces its media. Symlinks inside the folder, and a folder argument that is itself a symlink,
-are never followed, and a file whose real path leaves the folder is never copied; each one is named in the output as
-skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
+Publishing <pr> again replaces its media once every new file is copied or converted; a publish that fails exits
+nonzero with one line on stderr and leaves the earlier demo as it was. Symlinks inside the folder, and a folder
+argument that is itself a symlink, are never followed, and a file whose real path leaves the folder is never copied;
+each one is named in the output as skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
 DEMO_URL; with the demo module off, or either setting missing, it exits 2 (bin/README.md, "Configuration").
 """
-import html, json, os, shutil, stat, subprocess, sys
+import html, json, os, secrets, shutil, stat, subprocess, sys, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -93,39 +94,79 @@ def open_inside(path, root):
 
 
 def publish(number, summary, source):
-    # Every file is checked and opened before the old entry is removed, so a run where nothing survives leaves it intact.
+    # Every file is checked and opened first, and the new entry is built in a hidden folder beside the gallery's entries
+    # (a name entries() never reads), which takes the old entry's place only once every file and meta.json are written.
+    # A run where nothing survives, a file that cannot be copied or converted, or a failed swap leaves the earlier demo.
     media = []
     try:
         for index, (path, root) in enumerate(collect(source)):
             suffix = path.suffix.lower()
             if suffix in (".png", ".webm", ".mp4") and (fd := open_inside(path, root)) is not None:
-                media.append((f"{index:02d}-{path.parent.name[:40]}-{path.stem}".replace(" ", "-"), suffix, fd))
+                media.append((path, f"{index:02d}-{path.parent.name[:40]}-{path.stem}".replace(" ", "-"), suffix, fd))
         if not media:
             sys.exit("demo-publish: no .png, .webm or .mp4 files found")
         info = pr_info(number)  # fails before anything is written when the pull request does not exist
-        folder = ROOT / f"pr-{number}"
-        shutil.rmtree(folder, ignore_errors=True)
-        folder.mkdir(parents=True)
-        images, videos = [], []
-        for name, suffix, fd in media:
-            # Media is read only through the descriptor checked above, so the path cannot be swapped for a symlink first.
-            if suffix == ".png":
-                with open(fd, "rb", closefd=False) as source, open(folder / f"{name}.png", "wb") as target:
-                    shutil.copyfileobj(source, target)
-                images.append(f"{name}.png")
-            else:
-                subprocess.run(
-                    ["ffmpeg", "-loglevel", "error", "-y", "-i", f"/dev/fd/{fd}", "-c:v", "libx264", "-pix_fmt",
-                     "yuv420p", "-movflags", "+faststart", "-an", str(folder / f"{name}.mp4")],
-                    check=True, pass_fds=(fd,))
-                videos.append(f"{name}.mp4")
+        staging = None
+        try:
+            staging = Path(tempfile.mkdtemp(prefix=f".pr-{number}.new-", dir=ROOT))
+            os.chmod(staging, 0o755)  # mkdtemp makes it 0700, and a server running as another user may serve it
+            images, videos = build(staging, media)
+            meta = {"pr": number, "summary": summary, "images": images, "videos": videos,
+                    "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **info}
+            (staging / "meta.json").write_text(json.dumps(meta, indent=2))
+            swap(ROOT / f"pr-{number}", staging)
+        except (OSError, ConversionError) as error:
+            sys.exit(f"demo-publish: {error}; the earlier demo of PR #{number}, if any, is unchanged")
+        finally:
+            if staging:
+                shutil.rmtree(staging, ignore_errors=True)  # already gone once swap() has renamed it into place
     finally:
-        for _, _, fd in media:
+        for _, _, _, fd in media:
             os.close(fd)
-    meta = {"pr": number, "summary": summary, "images": images, "videos": videos,
-            "published_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **info}
-    (folder / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"published PR #{number} to {URL}: {len(videos)} video(s), {len(images)} screenshot(s)")
+
+
+class ConversionError(Exception):
+    pass
+
+
+def build(folder, media):
+    """Copies each screenshot and converts each video into folder; returns the screenshots' and the videos' names."""
+    images, videos = [], []
+    for path, name, suffix, fd in media:
+        # Media is read only through the descriptor checked above, so the path cannot be swapped for a symlink first.
+        if suffix == ".png":
+            with open(fd, "rb", closefd=False) as source, open(folder / f"{name}.png", "wb") as target:
+                shutil.copyfileobj(source, target)
+            images.append(f"{name}.png")
+        else:
+            result = subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-y", "-i", f"/dev/fd/{fd}", "-c:v", "libx264", "-pix_fmt",
+                 "yuv420p", "-movflags", "+faststart", "-an", str(folder / f"{name}.mp4")],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                errors="replace", pass_fds=(fd,))
+            if result.returncode != 0:
+                said = (result.stderr.strip().splitlines() or [f"exit {result.returncode}"])[-1]
+                raise ConversionError(f"ffmpeg could not convert {path}: {said}")
+            videos.append(f"{name}.mp4")
+    return images, videos
+
+
+def swap(folder, staging):
+    """Puts staging in folder's place: the old entry moves aside under a hidden name, staging is renamed in and the old
+    entry removed; when staging cannot be renamed in, the old entry is put back."""
+    aside = None
+    if os.path.lexists(folder):
+        aside = ROOT / f".{folder.name}.old-{secrets.token_hex(8)}"
+        os.rename(folder, aside)
+    try:
+        os.rename(staging, folder)
+    except OSError:
+        if aside:
+            os.rename(aside, folder)
+        raise
+    if aside:
+        shutil.rmtree(aside, ignore_errors=True)
 
 
 def entries():
