@@ -213,6 +213,12 @@ test('where the scanner cannot tell code from text, the declarations there count
   const two = "test('a', () => {});\ntest('b', () => {});\n";
   assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = 'open;\ntest('b', () => {});\n"), unread(spec, 2, 1));
   assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = `${x;\ntest('b', () => {});\n"), unread(spec, 2, 1));
+  // In TSX a generic arrow's <T extends U> is no JSX element, and a closing tag naming another element ends none.
+  const tsx = 'src/web/src/x.test.tsx';
+  const generic = "const id = <T extends unknown>(x: T) => x;\ntest('a', () => {});\ntest('b', () => {});\n// renders </p>\n";
+  assert.deepEqual(await testChange(tsx, generic, generic.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
+  const mismatched = "const e = <div>text</span>;\ntest('a', () => {});\ntest('b', () => {});\n// </div>\n";
+  assert.deepEqual(await testChange(tsx, mismatched, mismatched.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
   const path = 'tests/X/PricingTests.cs';
   const facts = 'class PricingTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'const string S = """\n[Fact] void B')), unread(path, 2, 1));
@@ -222,6 +228,7 @@ test('where the scanner cannot tell code from text, the declarations there count
 test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {
   const path = 'src/web/src/x.test.tsx';
   const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it(</p>;\n"
+    + "const f = <><Ui.Row><b>it(</b><br/></ Ui.Row ></>;\n"
     + "const s = `it's ${'}'} ${`${n}`}`;\nconst r = /[/]\\/'/g;\nconst q = a++ / 2;\nconst o = {a: 1};\n"
     + "test('a', () => {});\ntest('b', () => {});\n";
   assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});

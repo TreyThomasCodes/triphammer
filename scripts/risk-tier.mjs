@@ -517,17 +517,19 @@ function scan(text, {csharp, jsx: readsJsx}) {
     blank(from, i - 1);
   }
   // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
-  // arrow (<T,>() => ...) read as one does not parse, so it is unsure.
+  // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends is taken for one
+  // (<T extends U>() => ...), so both are unsure.
   function jsx() {
     i++;
     if (text[i] === '>') {
       i++;
-      children();
+      children('');
       return;
     }
     const tag = match(/[\w$.:-]+/y);
     if (!tag) fail();
     i += tag.length;
+    if (match(/\s+extends\b/y)) fail();
     for (;;) {
       while (/\s/.test(text[i] ?? '')) i++;
       const c = text[i];
@@ -538,7 +540,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       }
       if (c === '>') {
         i++;
-        children();
+        children(tag);
         return;
       }
       if (c === '{') {
@@ -563,8 +565,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
       else fail();
     }
   }
-  // A JSX element's children, up to and past its closing tag.
-  function children() {
+  // A JSX element's children, up to and past its closing tag, which must name tag ('' for a fragment). Any other
+  // closing tag means the < that opened the element was not JSX, so it is unsure.
+  function children(tag) {
     let from = i;
     for (;;) {
       const c = text[i];
@@ -576,9 +579,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
       } else if (c === '<') {
         blank(from, i);
         if (text[i + 1] === '/') {
-          const end = text.indexOf('>', i);
-          if (end < 0) fail();
-          i = end + 1;
+          const closing = match(/<\/\s*([\w$.:-]*)\s*>/y);
+          if (!closing || closing.slice(2, -1).trim() !== tag) fail();
+          i += closing.length;
           return;
         }
         jsx();
