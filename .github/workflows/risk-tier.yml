@@ -8,10 +8,16 @@ name: risk-tier
 # owner pushed to it, since GitHub lets no one approve their own pull request; a commit anyone else pushed to it, such
 # as an agent's, still needs the owner, by the same rules as an approval. A hold label or the owner's latest review
 # requesting changes keeps any tier pending.
-# The same job posts the required `closing-issue` status from the default branch's validate-pr-contract.sh, here
-# because this workflow already runs on every event that can change it (a push, an edited description, a retarget).
-# Agents cannot edit this file (their GitHub App has no workflows permission) or post statuses (no statuses permission).
+# The same job posts the required `closing-issue` status from validate-pr-contract.sh, here because this workflow
+# already runs on every event that can change it (a push, an edited description, a retarget).
+# A project calls this workflow from its own (README, "Set up a project"), pinned to a Triphammer commit; then the
+# validator, the classifier and its Node version come from Triphammer at that commit, and the rules from the project's
+# default branch. In Triphammer's own pull requests they all come from Triphammer's default branch. Either way, nothing
+# runs from the pull request.
+# Agents cannot edit this file or a project's caller (their GitHub App has no workflows permission), or post statuses
+# (no statuses permission).
 on:
+  workflow_call:
   pull_request:
     types:
       - opened
@@ -53,6 +59,28 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Called from a project, job.workflow_repository and job.workflow_sha name Triphammer at the pinned commit; in
+      # Triphammer's own runs they name this repository, at a commit the pull request can change, so its default
+      # branch is used instead.
+      - name: Find Triphammer's scripts
+        env:
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+          REPOSITORY: ${{ github.repository }}
+          BASE: refs/remotes/origin/${{ github.event.repository.default_branch }}
+        run: |
+          if [ -z "$WORKFLOW_REPOSITORY" ] || [ -z "$WORKFLOW_SHA" ]; then
+            echo "job.workflow_repository or job.workflow_sha is empty, so Triphammer's commit is unknown" >&2
+            exit 1
+          fi
+          if [ "$WORKFLOW_REPOSITORY" = "$REPOSITORY" ]; then
+            { echo "TRIPHAMMER_DIR=."; echo "TRIPHAMMER_AT=$BASE"; } >> "$GITHUB_ENV"
+          else
+            { echo "TRIPHAMMER_DIR=$RUNNER_TEMP/triphammer"; echo "TRIPHAMMER_AT=$WORKFLOW_SHA"; } >> "$GITHUB_ENV"
+            git init -q "$RUNNER_TEMP/triphammer"
+            git -C "$RUNNER_TEMP/triphammer" fetch -q --depth 1 "https://github.com/$WORKFLOW_REPOSITORY.git" "$WORKFLOW_SHA"
+          fi
+
       - name: Post the closing-issue status
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,10 +89,10 @@ jobs:
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          BASE: refs/remotes/origin/${{ github.event.repository.default_branch }}
         run: |
-          # The default branch's validator, never the pull request's. Its last line says why it failed.
-          git show "$BASE:.github/scripts/validate-pr-contract.sh" > "$RUNNER_TEMP/validate-pr-contract.sh"
+          # Triphammer's validator, never the pull request's. Its last line says why it failed.
+          git -C "$TRIPHAMMER_DIR" show "$TRIPHAMMER_AT:.github/scripts/validate-pr-contract.sh" \
+            > "$RUNNER_TEMP/validate-pr-contract.sh"
           code=0
           message="$(bash "$RUNNER_TEMP/validate-pr-contract.sh" 2>&1)" || code=$?
           printf '%s\n' "$message"
@@ -74,8 +102,8 @@ jobs:
             -f description="$description" -f target_url="$RUN_URL" > /dev/null
           echo "closing-issue: $state: $description" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Read the default branch's Node version
-        run: git show "refs/remotes/origin/${{ github.event.repository.default_branch }}:.node-version" > "$RUNNER_TEMP/node-version"
+      - name: Read Triphammer's Node version
+        run: git -C "$TRIPHAMMER_DIR" show "$TRIPHAMMER_AT:.node-version" > "$RUNNER_TEMP/node-version"
 
       - name: Set up Node
         uses: actions/setup-node@v7
@@ -119,12 +147,15 @@ jobs:
           gh api -X POST "repos/$REPOSITORY/statuses/$HEAD_SHA" -f context=owner-approval -f state=pending \
             -f description="Classifying the change" -f target_url="$RUN_URL" > /dev/null
           set +e
-          # Wrapper and classifier both come from the default branch, never from the pull request.
-          if git cat-file -e "$BASE:scripts/risk-tier-base.sh" 2>/dev/null; then
-            git show "$BASE:scripts/risk-tier-base.sh" | bash -s -- "$BASE" > tier.json
+          # Wrapper and classifier both come from Triphammer, never from the pull request; the rules from $BASE.
+          if [ "$TRIPHAMMER_DIR" != . ]; then
+            export TRIPHAMMER_CHECKOUT="$TRIPHAMMER_DIR" TRIPHAMMER_REF="$TRIPHAMMER_AT"
+          fi
+          if git -C "$TRIPHAMMER_DIR" cat-file -e "$TRIPHAMMER_AT:scripts/risk-tier-base.sh" 2>/dev/null; then
+            git -C "$TRIPHAMMER_DIR" show "$TRIPHAMMER_AT:scripts/risk-tier-base.sh" | bash -s -- "$BASE" > tier.json
             code=${PIPESTATUS[1]}
           else
-            printf '{\n  "tier": "escalate",\n  "reasons": ["%s has no risk classifier yet"]\n}\n' "$BASE" > tier.json
+            printf '{\n  "tier": "escalate",\n  "reasons": ["%s has no risk classifier yet"]\n}\n' "$TRIPHAMMER_AT" > tier.json
             code=2
           fi
           set -e

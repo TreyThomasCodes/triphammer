@@ -406,7 +406,8 @@ const engine = readFileSync(new URL('./risk-tier.mjs', import.meta.url), 'utf8')
 const sampleRules = JSON.stringify({rules: [{tier: 'escalate', paths: ['^tools/'], reason: 'tooling'}, {tier: 'auto', paths: ['^lib/']}],
   unmatchedReason: 'unmatched'});
 // files: {path: text or null (delete)} committed on main, then on the pr branch; returns the wrapper's exit code and output.
-function tierInRepo(mainFiles, prFiles) {
+// `env` adds to the wrapper's environment.
+function tierInRepo(mainFiles, prFiles, env = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'risk-tier-'));
   try {
     const git = (...args) => {
@@ -428,7 +429,7 @@ function tierInRepo(mainFiles, prFiles) {
     commit({'lib/a.txt': 'a', ...mainFiles});
     git('checkout', '-q', '-b', 'pr');
     commit(prFiles);
-    const run = spawnSync('bash', [baseScript, 'main'], {cwd: dir, env: gitEnv, encoding: 'utf8'});
+    const run = spawnSync('bash', [baseScript, 'main'], {cwd: dir, env: {...gitEnv, ...env}, encoding: 'utf8'});
     return {code: run.status, output: run.stdout, error: run.stderr};
   } finally {
     rmSync(dir, {recursive: true, force: true});
@@ -466,4 +467,29 @@ test('a base without the engine escalates every change', () => {
   const result = tierInRepo({}, {'lib/b.txt': 'b'});
   assert.equal(result.code, 2, result.error);
   assert.deepEqual(JSON.parse(result.output), {tier: 'escalate', reasons: ['main has no scripts/risk-tier.mjs yet']});
+});
+
+test("called from a project, Triphammer's engine at the pinned commit classifies with the project's base rules", t => {
+  // Triphammer's repository: the engine at the pinned commit, and a later commit whose engine says auto to everything.
+  const triphammer = mkdtempSync(join(tmpdir(), 'risk-tier-triphammer-'));
+  t.after(() => rmSync(triphammer, {recursive: true, force: true}));
+  const git = (...args) => spawnSync('git', args, {cwd: triphammer, env: gitEnv, encoding: 'utf8'}).stdout.trim();
+  git('init', '-q', '-b', 'main');
+  mkdirSync(join(triphammer, 'scripts'));
+  writeFileSync(join(triphammer, 'scripts/risk-tier.mjs'), engine);
+  git('add', '-A');
+  git('commit', '-q', '-m', 'engine');
+  const pinned = git('rev-parse', 'HEAD');
+  writeFileSync(join(triphammer, 'scripts/risk-tier.mjs'), 'console.log(JSON.stringify({tier: "auto", reasons: []}));\n');
+  git('commit', '-q', '-am', 'later');
+
+  // The project has no engine of its own; its base rules escalate tools/.
+  const env = {TRIPHAMMER_CHECKOUT: triphammer, TRIPHAMMER_REF: pinned};
+  const result = tierInRepo({'.triphammer/risk-tier.json': sampleRules}, {'tools/run.sh': 'x'}, env);
+  assert.equal(result.code, 2, result.error);
+  assert.deepEqual(JSON.parse(result.output), {tier: 'escalate', reasons: ['tools/run.sh: tooling']});
+  const unknown = '0'.repeat(40);
+  const missing = tierInRepo({'.triphammer/risk-tier.json': sampleRules}, {'lib/b.txt': 'b'}, {...env, TRIPHAMMER_REF: unknown});
+  assert.equal(missing.code, 2, missing.error);
+  assert.deepEqual(JSON.parse(missing.output), {tier: 'escalate', reasons: [`${unknown} has no scripts/risk-tier.mjs yet`]});
 });
