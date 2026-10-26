@@ -9,8 +9,10 @@
 # by its name or any path to it, quoted or escaped, with gh's -R/--repo and git's options (-C, -c, --no-pager...)
 # before the subcommand. The text comes from --title/-t and --body/-b (glab: --description/-d), git's -m/--message,
 # a heredoc the command reads, or a --body-file/-F file; a value may be the next word, attached (`-b'text'`, `-am msg`)
-# or after `=`, and when an option repeats its last value counts, as gh reads it (git joins its -m values). A command
-# with -h or --help posts nothing and is not checked. A --body-file that does not exist is refused, so the check
+# or after `=`, and when an option repeats its last value counts, as gh reads it (git joins its -m values). A `<<WORD`
+# inside quotes or a comment is text, not a heredoc. A quote that never closes makes bash refuse the whole command, but
+# the commands are still checked as if it closed at the end. A command with -h or --help, and `git commit --amend
+# --no-edit` with no -m, -F, -c or -C (it keeps the message it has), post nothing new and are not checked. A --body-file that does not exist is refused, so the check
 # cannot be skipped by writing the file in the same command. Not covered: a command run by bash -c, eval, xargs, a
 # script or a gh alias, git's abbreviated long options (--mess), and a value given by an unquoted substitution
 # (--body $(cat f)) or computed when it runs.
@@ -86,6 +88,8 @@ TOOLS = {"gh": GH, "glab": GLAB}
 COMMIT_OPTIONS = ("mFcCt", {"--message", "--file", "--author", "--date", "--cleanup", "--trailer", "--fixup",
                             "--squash", "--reuse-message", "--reedit-message", "--template", "--pathspec-from-file"})
 ATTACHED_ONLY = {"git": "Su"}
+# git commit --amend --no-edit keeps the commit's message unless one of these gives another.
+MESSAGE_SOURCES = {"-m", "--message", "-F", "--file", "-c", "-C", "--reuse-message", "--reedit-message"}
 MARKER = re.compile(r"\x00(\d+)\x00")  # agent-guard's mark of a heredoc body, also inside a word: "$(cat <<EOF ...)"
 
 FIX_PHRASES = [r"until now", r"previously", r"never reached", r"was missing", r"were missing",
@@ -155,7 +159,7 @@ def humanizer_gap(session_id):
 
 
 def load_guard():
-    """agent-guard.py beside this hook, whose shell parsing (strip_heredocs, tokenize, pipelines, strip_prefix) finds
+    """agent-guard.py beside this hook, whose shell parsing (HEREDOC, tokenize, pipelines, strip_prefix) finds
     the commands here."""
     sys.dont_write_bytecode = True  # no __pycache__ in the plugin's directory
     spec = importlib.util.spec_from_file_location(
@@ -198,18 +202,105 @@ def read_options(args, short_values, long_values, attached_only=""):
     return pairs, False
 
 
+def strip_heredocs(cmd, heredoc):
+    """agent-guard's strip_heredocs, minding quotes: a `<<WORD` (agent-guard's HEREDOC pattern) counts only outside
+    quotes and comments, also inside a $( ) or backquotes in a double-quoted word, and its body starts after the next
+    unquoted newline. Each becomes `<<` and a marker word naming its body; returns (text, bodies)."""
+    out, bodies, pending, stack, i, n = [], [], [], ["code"], 0, len(cmd)
+    while i < n:
+        c, top = cmd[i], stack[-1]
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if cmd.startswith("$((", i):
+            stack.append("((")
+            out.append("$((")
+            i += 3
+            continue
+        if cmd.startswith("$(", i):
+            stack.append("(")
+            out.append("$(")
+            i += 2
+            continue
+        if c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif top == '"':
+            if c == '"':
+                stack.pop()
+        elif top == "((":
+            if cmd.startswith("))", i):
+                stack.pop()
+                out.append("))")
+                i += 2
+                continue
+            if c == "(":
+                stack.append("(")
+        elif c in "'\"":
+            stack.append(c)
+        elif c == "(":
+            stack.append("(")
+        elif c == ")" and top == "(":
+            stack.pop()
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()<>"):
+            end = cmd.find("\n", i)
+            end = n if end < 0 else end
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif c == "<" and (match := heredoc.match(cmd, i)):
+            pending.append((match.group(1), match.group(3)))
+            out.append(f"<< \x00{len(bodies) + len(pending) - 1}\x00")
+            i = match.end()
+            continue
+        elif c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for dash, word in pending:
+                body = []
+                while i < n:
+                    end = cmd.find("\n", i)
+                    end = n if end < 0 else end
+                    line, i = cmd[i:end], end + 1
+                    if (line.lstrip("\t") if dash else line) == word:
+                        break
+                    body.append(line)
+                bodies.append("\n".join(body))
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    bodies += [""] * len(pending)  # a heredoc on the command's last line has an empty body
+    return "".join(out), bodies
+
+
+def recover_tokens(guard, text):
+    """text's tokens. When a quote never closes, bash stops with a syntax error and runs no command of that list;
+    its commands are still read, as if the quote closed at the end, so a stray quote cannot hide one from the check."""
+    for _ in range(8):
+        try:
+            return guard.tokenize(text)
+        except guard.Unbalanced as error:
+            text += text[error.start]
+    return guard.tokenize(text[:max(text.rfind("\n", 0, error.start), 0)])
+
+
 def posting_commands(cmd, cwd):
     """(tool, kind, verb, options, heredoc, directory) for each command in cmd that posts text, found by its words
     after any assignments and wrappers: options as read_options returns them, heredoc the first heredoc body it reads
     (also one inside a word, as in --body "$(cat <<'EOF' ...)"), directory the one its relative files are read from."""
     guard = load_guard()
-    text, bodies = guard.strip_heredocs(cmd)
-    try:
-        tokens = guard.tokenize(text)
-    except guard.Unbalanced as error:
-        # bash runs every line before the one where the quote opens, then stops with a syntax error.
-        tokens = guard.tokenize(text[:max(text.rfind("\n", 0, error.start), 0)])
-    for pipeline, _ in guard.pipelines(tokens):
+    text, bodies = strip_heredocs(cmd, guard.HEREDOC)
+    for pipeline, _ in guard.pipelines(recover_tokens(guard, text)):
         for command in pipeline:
             words = guard.strip_prefix(command.words)
             if not words:
@@ -237,8 +328,7 @@ def posting_commands(cmd, cwd):
                     i += 2 if value in guard.GIT_VALUE_OPTIONS else 1
                 if i >= len(args) or args[i].value != "commit":
                     continue
-                if {"--amend", "--no-edit"} <= {w.value for w in args[i + 1:]}:
-                    continue  # keeps the message it has
+                amend_as_is = {"--amend", "--no-edit"} <= {w.value for w in args[i + 1:]}
                 kind, verb, (short, long) = "commit", "commit", COMMIT_OPTIONS
                 i += 1
             else:
@@ -246,6 +336,8 @@ def posting_commands(cmd, cwd):
             options, helped = read_options(args[i:], short, long, ATTACHED_ONLY.get(tool, ""))
             if helped:
                 continue  # prints help and posts nothing
+            if kind == "commit" and amend_as_is and not {name for name, _ in options} & MESSAGE_SOURCES:
+                continue  # keeps the message it has
             marks = list(command.heredocs) + [int(k) for w in words for k in MARKER.findall(w.value)]
             heredoc = next((bodies[k] for k in marks if k < len(bodies)), None)
             yield tool, kind, verb, options, heredoc, directory

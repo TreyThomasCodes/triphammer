@@ -262,6 +262,37 @@ test('commands that post no text are allowed', t => {
   }
 });
 
+test('git commit --amend --no-edit is checked when it is given a message', t => {
+  const s = humanized(t);
+  for (const command of [`git commit --amend -m 'x — y' --no-edit`, `git commit --amend --no-edit --message='x — y'`,
+    `git commit --no-edit --amend -m'Add x' -m 'x — y'`]) {
+    assertRefused(bash(s, command), 'DASH');
+  }
+  writeFileSync(join(s.cwd, 'message.txt'), 'Add x\n\nx — y\n');
+  assertRefused(bash(s, 'git commit --amend --no-edit -F message.txt'), 'DASH');
+  assert.equal(bash(s, 'git commit --amend --no-edit -C HEAD'), null);
+});
+
+test('a quoted <<WORD is text, not a heredoc', t => {
+  const s = humanized(t);
+  assertRefused(bash(s, "gh pr create -t 'Adds x' -b 'Reads `<<EOF` heredocs. x — y\n\nCloses #1'"), 'DASH');
+  assertRefused(bash(s, "git commit -m 'Read cat <<EOF bodies\n\nx — y'"), 'DASH');
+  assertRefused(bash(s, "git commit -m \"Read <<EOF\nx — y\nEOF\nmore\""), 'DASH');
+  assertRefused(bash(s, "gh pr create -t 'Adds x' -b \"$(echo '<<EOF')\nx — y\nEOF\n\nCloses #1\""), 'DASH');
+  assertRefused(bash(scratch(t), "gh pr create -t 'Adds x' -b 'Reads `<<EOF` heredocs.\n\nCloses #1'"), 'HUMANIZER');
+  // A real heredoc after a quoted mention, and one in arithmetic or a comment before it, are still read.
+  assertRefused(bash(s, "echo '<<X' && git commit -F - <<'X'\nAdd x\n\nx — y\nX"), 'DASH');
+  assertRefused(bash(s, "echo $((1<<2)) # it's <<X\ngit commit -F - <<X\nAdd x\n\nx — y\nX"), 'DASH');
+  assert.equal(bash(s, "git commit -m 'Read <<EOF bodies' -m 'Adds it.'"), null);
+});
+
+test('a quote that never closes does not hide the command from the check', t => {
+  const s = humanized(t);
+  assertRefused(bash(s, "gh pr create -t 'Adds x' -b 'x — y\n\nCloses #1"), 'DASH');
+  assertRefused(bash(s, "git commit -m \"x — y"), 'DASH');
+  assertRefused(bash(scratch(t), "gh pr create -t 'Adds x' -b 'Adds it.\n\nCloses #1"), 'HUMANIZER');
+});
+
 test('glab reads -d as the description, and -b as its target branch', t => {
   const s = humanized(t);
   assertRefused(bash(s, `glab mr create -t 'Adds x' -d 'a — b\n\nCloses #1'`), 'DASH');
