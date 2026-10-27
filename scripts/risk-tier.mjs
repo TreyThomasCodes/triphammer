@@ -380,7 +380,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
       const name = match(word);
       if (name) {
         i += name.length;
-        const property = text[i - name.length - 1] === '.';
+        // A name after one member-access dot (a.b, a?.b) is a property, never a keyword; after a spread's ... it is not.
+        const start = i - name.length;
+        const property = text[start - 1] === '.' && text[start - 2] !== '.';
         previous = property ? 'operand' : operatorWords.has(name) ? 'operator' : unsureWords.has(name) ? 'unsure' : 'operand';
         // for await ( opens a condition as for ( does.
         if (!property) lastWord = name === 'await' && after === 'for' ? 'for' : name;
@@ -614,6 +616,12 @@ function scan(text, {csharp, jsx: readsJsx}) {
   }
 
   try {
+    // A #! line at the very start of a JavaScript file, after any byte order mark, is a comment.
+    const hashbang = text.startsWith('﻿') ? 1 : 0;
+    if (!csharp && text.startsWith('#!', hashbang)) {
+      i = endOfLine(hashbang);
+      blank(hashbang, i);
+    }
     code(false);
     return {code: out.join(''), unsure: ''};
   } catch (error) {

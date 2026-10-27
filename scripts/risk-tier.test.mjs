@@ -203,6 +203,31 @@ test('a JavaScript test case named only inside a string, template, regex, commen
     {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
 });
 
+test('a keyword after a spread and a hashbang line hide no removed test', async () => {
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  const ts = 'src/web/src/x.test.ts', tsx = 'src/web/src/x.test.tsx';
+  // After ... a keyword stays a keyword, so the / or < after it opens a regex or a JSX element, or, after await or
+  // yield (names outside an async function or generator), is unsure.
+  for (const [path, line] of [
+    [ts, "const s = [...typeof / test('b', () => {}) /];"],
+    [ts, "async function g() { return [...await / test('b', () => {}) /]; }"],
+    [ts, "function* g() { yield [...yield / test('b', () => {}) /]; }"],
+    [ts, "f(...void / test('b', () => {}) /);"],
+    [tsx, "const s = [...typeof <p> test('b', () => {}) </p>];"],
+  ]) {
+    const result = await testChange(path, two, `test('a', () => {});\n${line}\n`);
+    assert.equal(result.tier, 'escalate', line);
+    assert.match(result.reasons.join('\n'), /^src\/web\/src\/x\.test\.tsx?: removes test cases \(2 before, 1 after/, line);
+  }
+  // A #! line at the start of the file, after any byte order mark, is a comment.
+  for (const head of ["#!/usr/bin/env node test('b', () => {})\ntest('a', () => {});\n", "﻿#!/usr/bin/env node test('b')\ntest('a', () => {});\n"]) {
+    assert.deepEqual(await testChange(ts, two, head), {tier: 'escalate', reasons: [`${ts}: removes test cases (2 before, 1 after)`]}, head);
+  }
+  // A keyword after a member-access dot is still a property, so the / after it divides.
+  const spec = "const q = a.typeof / 2 / b?.void / 3;\ntest('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(ts, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+});
+
 test('where the scanner cannot tell code from text, the declarations there count on the base only', async () => {
   const unread = (path, before, after) => ({tier: 'escalate',
     reasons: [`${path}: removes test cases (${before} before, ${after} after, counting those in text it cannot read on the base only)`]});
