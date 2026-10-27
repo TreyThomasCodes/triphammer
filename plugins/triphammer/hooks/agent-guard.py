@@ -159,13 +159,13 @@
 # command after it. Without a LINE (or runuser -u's command) each runs a shell that reads its script from stdin,
 # which script passes through, so it is judged as sh is: its piped or here-string input as its script. flock's lock
 # file counts as a file it creates, and script's typescript (its operand, else ./typescript) and its -I, -O, -B and
-# -T log files as files it writes; su's login shell (su -, -l) starts in another directory, so the worktree-only
+# -T log files, and GNU time's -o or --output file (also abbreviated, --out), as files they write; su's login shell (su -, -l) starts in another directory, so the worktree-only
 # rule loses track of the directory for its LINE. xargs's command is judged as
 # written, and in a Triphammer session xargs running one of the worktree-only rule's writers (tee, cp, rm, touch and
 # the rest), sed or perl with or without -i (GNU sed and perl read an -i the input adds after the script), a shell (also through script, su, runuser or flock -c), eval, source, python or
 # node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
 # write), git with -I's string in a word up to and including its subcommand (the subcommand, a git -c value, an
-# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, xargs
+# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript, time's -o file) the input can give, xargs
 # itself (GNU xargs gives its command /dev/null as stdin, so an inner xargs runs the outer one's words as its command),
 # kill, pkill, pgrep or killall (see the self-kill rule), or a command
 # the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
@@ -173,7 +173,8 @@
 # what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
 # which may take the next word and move the command. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
-# options the hook does not list (an abbreviated long option other than xargs's, script -t with its file attached),
+# options the hook does not list (an abbreviated long option other than xargs's and time's, script -t or --timing
+# with its file attached, -tFILE or --timing=FILE),
 # busybox --install,
 # a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
 # from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
@@ -288,6 +289,10 @@ WRAPPER_VALUE_OPTIONS = {
     "ionice": ("cnpPu", {"--class", "--classdata", "--pid", "--pgid", "--uid"}),
     "chrt": ("TPD", {"--sched-runtime", "--sched-period", "--sched-deadline"}),
 }
+# Every long option of the wrappers whose abbreviations the hook resolves, as getopt does an unambiguous prefix:
+# GNU time's, since its --output names a file it writes.
+WRAPPER_LONG_OPTIONS = {"time": {"--append", "--format", "--output", "--portability", "--quiet", "--verbose",
+                                 "--help", "--version"}}
 # Wrappers that take an operand before the command, matching the pattern: timeout's duration, flock's lock file,
 # taskset's mask or CPU list and chrt's priority (a number, so a chrt that leaves it out still has its command read).
 ANY_OPERAND = re.compile(r".*", re.DOTALL)
@@ -659,7 +664,7 @@ def strip_prefix(words, chdirs=None, writes=None):
     """Drops variable assignments and wrappers such as sudo or env before the command name. With chdirs, appends to
     it each directory a wrapper option changes to (env -C or --chdir, sudo -D or --chdir), as a word, or None for one
     whose value is missing or that the hook does not follow (su's login). With writes, appends to it each file a
-    wrapper creates or writes itself (flock's lock file, script's typescript and logs). A wrapper that runs a shell
+    wrapper creates or writes itself (flock's lock file, script's typescript and logs, time's -o file). A wrapper that runs a shell
     command line (flock FILE -c, script -c, su -c) gives the words `sh -c <line>` in its place."""
     i, wrapper, operand, locked = 0, None, None, False
     while i < len(words):
@@ -678,8 +683,12 @@ def strip_prefix(words, chdirs=None, writes=None):
             i += 1  # env reads a bare - as -i, even after --; no command is named -
         elif wrapper is not None and value.startswith("-"):
             taken = takes_value(wrapper, value)
+            following = words[i + 1] if taken and i + 1 < len(words) else None
             if chdirs is not None and chdir_option(wrapper, value):
-                chdirs.append(chdir_value(wrapper, words[i], words[i + 1] if taken and i + 1 < len(words) else None))
+                chdirs.append(chdir_value(wrapper, words[i], following))
+            output = time_output(words[i], following) if wrapper == "time" and writes is not None else None
+            if output is not None:
+                writes.append((output, True))  # GNU time writes its report to -o's file
             i += 1 + taken
         elif operand is not None and operand[1].fullmatch(value):
             if operand[0] == "flock":
@@ -785,11 +794,35 @@ def chdir_value(wrapper, word, following):
     return derived(word, rest) if rest else following
 
 
+def long_name(wrapper, option):
+    """The long option an option word names, without its `=value`: the one it abbreviates when the wrapper's long
+    options are known (WRAPPER_LONG_OPTIONS) and it is a prefix of exactly one, else as written."""
+    name = option.partition("=")[0]
+    matches = [full for full in WRAPPER_LONG_OPTIONS.get(wrapper, ()) if full.startswith(name)]
+    return matches[0] if len(matches) == 1 and len(name) > 2 else name
+
+
+def time_output(word, following):
+    """The file GNU time's option word writes its report to (-o or --output, abbreviated or not): attached, or the
+    following word; None for any other option."""
+    option = word.value
+    if option.startswith("--"):
+        if long_name("time", option) != "--output":
+            return None
+        _, eq, attached = option.partition("=")
+        return derived(word, attached) if eq else following
+    for j, letter in enumerate(option[1:]):
+        if letter in WRAPPER_VALUE_OPTIONS["time"][0]:  # the first letter that takes a value ends the group
+            rest = option[j + 2:]
+            return None if letter == "f" else derived(word, rest) if rest else following
+    return None
+
+
 def takes_value(wrapper, option):
     """Whether the wrapper's option word leaves its value to the next word."""
     short, long = WRAPPER_VALUE_OPTIONS.get(wrapper, ("", set()))
     if option.startswith("--"):
-        return option in long or "=" not in option and chdir_option(wrapper, option)
+        return "=" not in option and (long_name(wrapper, option) in long or chdir_option(wrapper, option))
     letters = option[1:]
     for j, letter in enumerate(letters):
         if letter in short:
@@ -1303,7 +1336,7 @@ def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
     rule reads, sed or perl (whose -i the input can add), a shell, eval, source or an interpreter's inline script, git
-    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, xargs
+    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript, time's -o file) the input can give, xargs
     itself, kill, pkill, pgrep or killall, or a command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
     gives it."""
     i, replace, unknown = 0, None, []

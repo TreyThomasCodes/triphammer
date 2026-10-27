@@ -251,3 +251,23 @@ test('in a Triphammer session those wrappers writing inside its worktree, and xa
       assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
     }
   });
+
+test('in a Triphammer session GNU time writing its -o or --output file outside the worktree is refused', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of ['nice time -o ~/.bashrc true', 'command time -o ~/.bashrc true',
+    'env time --output=$HOME/.bashrc true', '/usr/bin/time -o ~/.bashrc true',
+    '/usr/bin/time --output=$HOME/.bashrc true', 'nice time --output ~/.bashrc true', 'nice time -ao ~/.bashrc true',
+    'nice time -a -o ~/.bashrc true', 'nice time -o~/.bashrc true', 'nice time --append --output ~/.bashrc true',
+    'nice time --out ~/.bashrc true', 'nice time --outp=$HOME/.bashrc true', 'nice time -f %e -o ~/.bashrc true',
+    'nice time --form %e -o ~/.bashrc true', 'nice time -p -v -q -o ~/.bashrc true',
+    'nice time -o /tmp/t --fo %e touch ~/.bashrc', 'echo ~/.bashrc | xargs time -o',
+    'echo ~/.bashrc | xargs -I{} nice time -o {} true']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['nice time -o build/time.txt true', '/usr/bin/time --output=/tmp/time.txt true',
+    'nice time -ao /tmp/time.txt true', 'nice time -f -o true', 'nice time -fo true',
+    'nice time --format -o true', 'nice time --form=-o true']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
