@@ -138,8 +138,9 @@
 #   scheduler   crontab other than -l, at, batch and systemd-run.
 #
 # These rules judge only the paths and keys a command names: the caches dotnet, npm or npx playwright write, git's
-# own writes for a commit, a fetch or a worktree, and every other write a program the session runs makes are not
-# covered, nor are writes by interpreters (python -c, node -e) beyond the script writes above, nor symlinks that a
+# own writes for a commit, a fetch, a worktree or an init (git -C ~ init), and every other write a program the
+# session runs makes are not covered, nor are writes by interpreters (python -c, node -e, perl -e, ruby -e) beyond
+# the script writes above, nor symlinks that a
 # program other than ln and cp makes (tar -x, unzip, git checkout of a tracked symlink, an interpreter) and the
 # same command then writes through, nor a cd made by an alias or function the session's shell already defines (its
 # profile snapshot), nor a directory change by any wrapper other than those above, nor git settings that reach the
@@ -151,16 +152,19 @@
 # timeout, setsid, flock, ionice, taskset, chrt and busybox (whose applet is the command), past their options and
 # the operand timeout, flock, taskset and chrt take before it. flock FILE -c LINE, script -c LINE and su or runuser
 # -c LINE (or --command, and su's --session-command) have LINE judged as a sh -c script, and runuser -u USER the
-# command after it. flock's lock file counts as a file it creates, and script's typescript (its operand, else
-# ./typescript) and its -I, -O, -B and -T log files as files it writes; su's login shell (su -, -l) starts in another
-# directory, so the worktree-only rule loses track of the directory for its LINE. xargs's command is judged as
+# command after it. Without a LINE (or runuser -u's command) each runs a shell that reads its script from stdin,
+# which script passes through, so it is judged as sh is: its piped or here-string input as its script. flock's lock
+# file counts as a file it creates, and script's typescript (its operand, else ./typescript) and its -I, -O, -B and
+# -T log files as files it writes; su's login shell (su -, -l) starts in another directory, so the worktree-only
+# rule loses track of the directory for its LINE. xargs's command is judged as
 # written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
 # cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, or python or
 # node with an inline script is refused, since the hook cannot read the operands xargs adds from its input, nor
 # what -I's string becomes inside a script. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
 # options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
-# a LINE run by a shell that reads it differently from sh (su -s), and outside a Triphammer session the operands
+# a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
+# from its input (xargs systemctl --user enable, or -I{} ... {}), and outside a Triphammer session the operands
 # xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
 # and every round of review has found another shell feature this parser misses: this hook is the only line.
 #
@@ -689,9 +693,10 @@ def shell_words(line):
 
 def script_runner_words(name, args, chdirs, writes):
     """The words a script, su or runuser with the arguments args stands for: `sh -c <line>` and, for su, the operands
-    after the user, which go to the shell; just `sh` and those operands when no line is given, and none for a script
-    without one, whose shell reads the terminal. Appends script's typescript and log files to writes, as (word, True)
-    pairs, and a None to chdirs for su's login shell, which starts in the user's home directory."""
+    after the user, which go to the shell; just `sh` and those operands when no line is given, since that shell reads
+    its script from stdin (script passes its own stdin through), which a pipeline or here-string can supply. Appends
+    script's typescript and log files to writes, as (word, True) pairs, and a None to chdirs for su's login shell,
+    which starts in the user's home directory."""
     files, options = split_options(args, *SCRIPT_RUNNERS[name])
     given = {option for option, _ in options}
     line = [value for option, value in options
@@ -703,16 +708,17 @@ def script_runner_words(name, args, chdirs, writes):
             if not files and not given & {"-I", "-O", "-B", "--log-in", "--log-out", "--log-io"}:
                 files = [literal_word("typescript")]  # script's default log, in the current directory
             writes += [(value, True) for value in logs + files[:1] if value is not None]
-        return shell_words(line) if line else []
+        return shell_words(line) if line else [literal_word("sh")]
     login = bool(files) and files[0].value == "-"
     if login or given & {"-l", "--login"}:
         if chdirs is not None:
             chdirs.append(None)
         files = files[1:] if login else files
     if given & {"-u", "--user"}:
-        return shell_words(line) + files if line else files  # runuser -u USER COMMAND runs it directly
+        # runuser -u USER COMMAND runs it directly, and without one a shell
+        return shell_words(line) + files if line else files or [literal_word("sh")]
     rest = files[1:]  # the operands after the user
-    return shell_words(line) + rest if line else [literal_word("sh")] + rest if rest else []
+    return (shell_words(line) if line else [literal_word("sh")]) + rest
 
 
 def split_string(words, i):

@@ -103,6 +103,22 @@ test('in a Triphammer session a write behind setsid, flock, ionice, taskset, chr
     }
   });
 
+test('in a Triphammer session script, su or runuser without -c have the shell script on their stdin read, as sh does',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of [`echo 'touch ~/.bashrc' | script -q /dev/null`, `script -q /dev/null <<< 'touch ~/.bashrc'`,
+      `echo 'touch ~/.bashrc' | su someone`, `echo 'touch ~/.bashrc' | su - someone`,
+      `echo 'touch ~/.bashrc' | sudo su`, `echo 'touch ~/.bashrc' | runuser someone`,
+      `printf 'touch ~/.bashrc' | script`]) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['sh', 'script -q /dev/null', 'su someone', 'sudo su',
+      `echo 'touch build/x' | script -q /dev/null`, `echo 'touch build/x' | su someone`]) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session xargs running a shell, eval, source or an inline script is refused, since -I puts its input in the script',
   t => {
     const s = triphammerSession(t);
