@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {git, lines, run} from './fixture.mjs';
 import {changingCalls, machine, projectFiles, readdir, triphammerFiles} from './provision-fixture.mjs';
@@ -153,6 +153,7 @@ test('two projects, with their modules, get one config and their own extras each
   const one = ['example/example-project', join(m.root, 'example-project'), '--modules', 'codex,demo',
     '--set', 'DEMO_GALLERY_DIR=/srv/gallery', '--set', 'DEMO_URL=http://gallery.example.invalid/'];
   const two = ['example/other', join(m.root, 'srv/other'), '--set', 'STATE_DIR=/srv/state/other', '--set', 'OWNER=example-person'];
+  writeFileSync(join(m.state, 'codex/login-exit'), '1');
   const first = m.project(...one);
   assert.equal(first.status, 0, first.output);
   const other = m.project(...two);
@@ -172,14 +173,17 @@ test('two projects, with their modules, get one config and their own extras each
   assert.deepEqual(lines(join(m.state, 'npm-calls')), [`install -g -q --prefix ${m.home}/.local @openai/codex`]);
   assert.match(readFileSync(join(m.sys, 'etc/apparmor.d/bwrap'), 'utf8'), /^profile bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,$/m);
   assert.deepEqual(loaded, ['bwrap']);
-  assert.match(first.stdout, /Log Codex in: sudo -iu triphammer codex login/);
+  assert.match(first.stdout, /Log Codex in: sudo -iu triphammer codex login --device-auth/);
   assert.doesNotMatch(other.stdout, /Log Codex in/);
   assert.match(other.stdout, /\nproject: other\n$/);
 
+  // Once Codex is logged in, the step is left out.
+  rmSync(join(m.state, 'codex/login-exit'));
   for (const args of [one, two]) {
     const again = m.project(...args);
     assert.equal(again.status, 0, again.output);
     assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+    assert.doesNotMatch(again.stdout, /Log Codex in/);
     assert.deepEqual(changingCalls(again.calls), []);
   }
 });

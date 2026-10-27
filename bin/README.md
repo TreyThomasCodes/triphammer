@@ -410,7 +410,7 @@ The session is `codex exec -c model_reasoning_effort="medium" --sandbox workspac
 `agents/reviewer.md`, without its frontmatter, followed by the same area prompt Qwen gets; Codex
 reads `AGENTS.md` and the skills it names by itself. Its sandbox blocks the network and lets commands write only in the clone and `/tmp`.
 
-Prerequisites on the machine: `/usr/bin/bwrap` with the AppArmor profile at `/etc/apparmor.d/bwrap`, and `codex login` on
+Prerequisites on the machine: `/usr/bin/bwrap` with the AppArmor profile at `/etc/apparmor.d/bwrap`, and `codex login --device-auth` on
 the owner's ChatGPT account. The script uses only the exit status of `codex login status`, and never reads, copies or
 prints Codex's auth files.
 
@@ -848,7 +848,8 @@ mode 600:
   `~/.config/environment.d/`, which the user's systemd manager reads when it starts, and the doctor's login check needs
   it in the shell it runs in too;
 - with `qwen-audit`, the Qwen server's key in the file `QWEN_KEY_FILE` names;
-- with `codex`, `sudo -iu triphammer codex login`.
+- with `codex`, `sudo -iu triphammer codex login --device-auth`, which prints a URL and a code to enter on any machine;
+  `provision-project` leaves this step out once Codex is logged in.
 
 **Check and start.** `triphammer doctor [<project>]` lists what is still missing (Doctor), `triphammer plan
 [<project>]` prints what the next tick would do, and `triphammer start [<project>]` enables and starts
