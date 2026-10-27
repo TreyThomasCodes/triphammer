@@ -339,6 +339,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       if (text.startsWith('/*', i)) {
         const end = text.indexOf('*/', i + 2);
         if (end < 0) fail();
+        spansConditional(i, end);
         if (endOfLine(i) < end) broke = true;
         blank(i, end + 2);
         i = end + 2;
@@ -352,6 +353,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       if (opener) {
         // A run of three or more quotes opens a raw string, unless verbatim, where "" is an escaped quote.
         const [all, before, verbatim, between, run] = opener;
+        const start = i;
         const dollars = before.length + between.length;
         if (!verbatim && run.length >= 3) {
           i += all.length;
@@ -361,6 +363,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
           if (verbatim) doubled(dollars > 0);
           else escaped('"', dollars > 0);
         }
+        spansConditional(start, i);
         previous = 'operand';
         continue;
       }
@@ -411,6 +414,12 @@ function scan(text, {csharp, jsx: readsJsx}) {
       } else previous = 'operator';
     }
     if (nested) fail();
+  }
+  // A C# string or block comment from from to to that runs over a line which, read as code, is an #if, #elif, #else or
+  // #endif: whether that line is text or a directive depends on whether the branch the literal opened in compiles (one
+  // opened in a branch that may not compile can swallow the directives and code after it), so it is unsure.
+  function spansConditional(from, to) {
+    if (csharp && /\n[^\S\n]*#[^\S\n]*(?:if|elif|else|endif)\b/.test(text.slice(from, to))) fail();
   }
   // A C# directive line: #if, #elif, #else and #endif stay for withoutDisabledRegions (less any comment), others go.
   // Where a branch never compiles, the compiler reads only the directive lines up to the one that ends it, and the

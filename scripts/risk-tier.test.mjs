@@ -86,6 +86,17 @@ test('a literal or comment opened in a C# region that never compiles ends with i
   assert.deepEqual(await testChange(path, indented, indented.replace('A(){}', 'A2(){}')), {tier: 'auto', reasons: []});
 });
 
+test('a C# literal or comment that runs over an #if, #elif, #else or #endif line is unsure, and its test cases count on the base only', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const unsure = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after, counting those in text it cannot read on the base only)`]};
+  // Opened in a branch under an unknown symbol, the literal swallows the #endif and the live test after it only if that
+  // branch compiles, which the scanner cannot know.
+  for (const [open, close] of [['@"', '"'], ['/*', '*/'], ['"""', '"""']]) {
+    const base = `class PricingTests{\n[Fact] void A(){}\n#if NEVER\n${open}\n#endif\n[Fact] void B(){}\n#if NEVER\n${close}\n#endif\n}\n`;
+    assert.deepEqual(await testChange(path, base, base.replace('[Fact] void B(){}\n', '')), unsure, open);
+  }
+});
+
 test('a test case moved under an #if on an undefined symbol, or a later branch of one, no longer counts', async () => {
   const before = csharpTests(['[Fact]', 'Prices'], ['[Fact]', 'Rounds']);
   for (const after of [wrapped('#if NEVER'), wrapped('#if !NEVER'), wrapped('#if NEVER // off'), wrapped('#if false', '#elif NEVER'),
