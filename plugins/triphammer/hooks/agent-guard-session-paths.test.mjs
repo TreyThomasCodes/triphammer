@@ -222,6 +222,25 @@ test('in a Triphammer session a `..` after a symlink, and a cd, are judged where
   assert.equal(decide('cd ./src && touch z', s.worktree, {env: {...s.env, CDPATH: s.base}}), null);
 });
 
+test('in a Triphammer session a cd behind a wrapper or script runner leaves the directory unknown', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of [`cd ~; runuser -u someone cd ${s.temp}; touch .bashrc`,
+    `cd ~; runuser -u someone -- cd ${s.temp}; touch .bashrc`,
+    `cd ~; runuser -u someone pushd ${s.temp}; touch .bashrc`,
+    `cd ~; runuser -u someone eval 'cd ${s.temp}'; touch .bashrc`, `cd ~; setsid eval 'cd ${s.temp}'; touch .bashrc`,
+    `cd ~; flock ${s.temp}/lock eval 'cd ${s.temp}'; touch .bashrc`, `cd ~; ionice eval 'cd ${s.temp}'; touch .bashrc`,
+    `cd ~; taskset 1 eval 'cd ${s.temp}'; touch .bashrc`, `cd ~; chrt 1 eval 'cd ${s.temp}'; touch .bashrc`,
+    `cd ~; busybox eval 'cd ${s.temp}'; touch .bashrc`, `cd ~; nohup eval 'cd ${s.temp}'; touch .bashrc`]) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  // A cd or eval in this shell, or after an assignment or `command`, still moves the directory the hook tracks.
+  for (const command of [`cd ${s.temp}; touch x`, `cd ~; eval 'cd ${s.temp}'; touch .bashrc`,
+    `cd ~; command cd ${s.temp}; touch .bashrc`, `cd ~; X=1 eval 'cd ${s.temp}'; touch .bashrc`]) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
 test('every triphammer-session refusal is allowed with the override token appended', t => {
   const s = triphammerSession(t);
   if (!s) return;

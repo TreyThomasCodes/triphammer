@@ -1164,8 +1164,15 @@ def session_cd(words, arg, cwd, findings):
     return logical if real is not None and physical(logical) == real and "P" not in options else None
 
 
-# Wrappers that run a command in another process, where a cd does not move the shell.
-FOREIGN_WRAPPERS = WRAPPERS - {"command", "builtin", "time"} | {"coproc"}
+# Wrappers and script runners that run a command in another process, where a cd does not move the shell: every
+# one strip_prefix drops but the three that run it in this shell.
+FOREIGN_WRAPPERS = (WRAPPERS | set(SCRIPT_RUNNERS)) - {"command", "builtin", "time"} | {"coproc"}
+
+
+def runs_elsewhere(whole, words):
+    """Whether the words strip_prefix dropped from whole before words name a wrapper or script runner that runs the
+    command in another process (`env cd`, `runuser -u USER cd`, `nohup eval 'cd x'`)."""
+    return bool({os.path.basename(w.value) for w in prefix_of(whole, words)} & FOREIGN_WRAPPERS)
 
 
 # What analyze returns for a command that leaves the shell's directory as it was.
@@ -1318,7 +1325,11 @@ def analyze(command, cwd, findings, depth):
         if script is None or depth >= MAX_DEPTH:
             findings.unreadable.append(f"`eval {' '.join(values)}`, whose text is computed when it runs")
         elif script:
-            return walk(script, cwd, findings, depth + 1)  # eval runs in this shell, so its cd counts
+            after = walk(script, cwd, findings, depth + 1)
+            if not (triphammer_sessions() and runs_elsewhere(command.words, words)):
+                return after  # eval runs in this shell, so its cd counts
+            if after != cwd:
+                return None  # `nohup eval 'cd x'`: another process, so where the shell is is not known
     elif name in ("source", "."):
         files = [w for w in args if w.value != "--"]
         if files:
@@ -2017,8 +2028,8 @@ def walk(cmd, cwd, findings, depth=0):
         words = strip_prefix(pipeline[0].words) if len(pipeline) == 1 else []
         last = strip_prefix(pipeline[-1].words)
         if words and words[0].value in ("cd", "pushd"):
-            if in_session and {os.path.basename(w.value) for w in prefix_of(pipeline[0].words, words)} & FOREIGN_WRAPPERS:
-                cwd = None  # `env cd`, `coproc cd`: another process, so where the shell is is not known
+            if in_session and runs_elsewhere(pipeline[0].words, words):
+                cwd = None  # `env cd`, `runuser -u USER cd`: another process, so where the shell is is not known
             else:
                 cwd = resolve_cd(words, cwd, findings)
         elif words and words[0].value == "popd" and in_session:
