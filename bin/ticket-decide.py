@@ -1,11 +1,13 @@
 # Decides the ticket runner's next action from what `gh` returned; bin/ticket-runner runs it each tick.
 #
-#   python3 -I ticket-decide.py issues.json prs.json app-author now owner/repo [owner-login]
+#   python3 -I ticket-decide.py issues.json prs.json app-author now owner/repo [owner-login [state-dir]]
 #   python3 -I ticket-decide.py --closed prs.json owner/repo
 #   python3 -I ticket-decide.py --declarations issues.json
 #
 # `now` is the tick's time in UTC (2026-10-17T12:00:00Z), and `owner-login` the person the runner acts for (Triphammer
-# config's OWNER), by default the owner part of owner/repo. Prints one action, "close <issue>",
+# config's OWNER), by default the owner part of owner/repo, and `state-dir` the runner's state directory, whose
+# `security-findings` and `security-followed-up` records say which pull request heads wait for a security-findings
+# repair (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
 # or an issue labelled `next`, waits, and on why a parent whose slices are all closed stays open (a brake label), go
 # to stderr. With --closed it prints, one per line, the issues of owner/repo that the pull requests close
@@ -86,6 +88,21 @@ owner = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else repo.split("/")[0]
 trusted = {app.lower(), owner.lower()}
 is_trusted = lambda item: (author(item) or "").lower() in trusted
 is_open = lambda n: n in issues and issues[n]["state"] == "OPEN"
+
+def records(name):
+    """The lines of the state directory's record `name`; a missing record, or no state directory, has none."""
+    if len(sys.argv) <= 7 or not sys.argv[7]:
+        return set()
+    try:
+        with open(f"{sys.argv[7]}/{name}") as f:
+            return set(f.read().splitlines())
+    except FileNotFoundError:
+        return set()
+
+# The heads whose security review returned findings (bin/security-review --pr writes `<repo> <pr> <head>`) and whose
+# security-findings repair session has not ended normally yet (ticket-runner then writes the same line). Only whole
+# lines match, so a record of an older head starts nothing.
+pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
 
 slices = {}  # parent -> {k: [issues claiming slice k]}; several issues may claim the same k
@@ -143,6 +160,7 @@ for pr in sorted(prs, key=lambda pr: pr["number"]):
     reason = ("conflicts" if pr["mergeStateStatus"] == "DIRTY"
               else "failing-checks" if any((c.get("conclusion") or c.get("state")) in failing for c in checks)
               else "changes-requested" if requested
+              else "security-findings" if f"{repo} {pr['number']} {pr.get('headRefOid')}" in pending_follow_up
               else None)
     if reason:
         print(f"repair {pr['number']} {issue} {reason}"); sys.exit()
