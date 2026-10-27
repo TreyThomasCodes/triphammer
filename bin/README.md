@@ -13,6 +13,13 @@ are linked into `~/.local/bin` (see Install); the App's id, owner and private ke
 outside any repository, and no script prints or copies the key. The units put `~/.local/bin` on `PATH`, so every
 script that runs `gh` gets the wrapper.
 
+The App has no Workflows permission, so GitHub refuses its push of a commit that creates, changes or deletes a file
+under `.github/workflows/`. A session therefore builds nothing for an issue whose work has to touch such a file: it
+comments on the issue naming the missing permission, adds `needs-owner` and ends (the `triphammer:ticket-run` skill,
+Workflow files). The owner either pushes the branch themselves, or grants the App the Workflows permission, deletes
+that skill section and this paragraph, and then removes `needs-owner`; only then does the runner take the issue again,
+since while the section stands every run stops on it.
+
 ## Which checkout each file comes from
 
 Triphammer's checkout is the one the running script lives in (through the `~/.local/bin` links); the project's
