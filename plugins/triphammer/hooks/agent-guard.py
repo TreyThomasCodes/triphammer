@@ -53,7 +53,9 @@
 #               repository whose project file is missing or unreadable, leaves the field out, or gives anything but
 #               a list of relative paths inside the repository gets no shell-edit rule.
 #   self-kill   pkill -f or pgrep -f with a pattern not written in '[p]attern' form, which also matches the command
-#               line of the shell running it; kill of $$, $PPID or the PID of the session or one of its parents.
+#               line of the shell running it; kill of $$, $PPID or the PID of the session or one of its parents. In
+#               a Triphammer session, xargs running kill, pkill, pgrep or killall, whose targets its input gives.
+#               killall written out, and kill by a PID read at run time other than $$ and $PPID, are not covered.
 #
 # A session Triphammer started is one whose environment holds $TRIPHAMMER_SESSION, the path of the run's worktree
 # (bin/ticket-runner sets it for ticket and repair runs, local-audit for the Qwen audit; subagents inherit it).
@@ -163,7 +165,9 @@
 # the rest), sed or perl with or without -i (GNU sed and perl read an -i the input adds after the script), a shell (also through script, su, runuser or flock -c), eval, source, python or
 # node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
 # write), git with -I's string in a word up to and including its subcommand (the subcommand, a git -c value, an
-# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, or a command
+# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, xargs
+# itself (GNU xargs gives its command /dev/null as stdin, so an inner xargs runs the outer one's words as its command),
+# kill, pkill, pgrep or killall (see the self-kill rule), or a command
 # the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
 # or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
 # what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
@@ -339,6 +343,10 @@ SCRIPT_WRITES = [
 # `name = 'path'`, `name = Path('path')`, `const name = "path"`: a plain variable bound to a path literal.
 SCRIPT_BINDING = re.compile(rf"(?:\b(?:const|let|var)\s+)?\b([A-Za-z_]\w*)\s*=(?!=)\s*{_PATH}\s*\)?\s*(?:[;\n#]|$)",
                             re.MULTILINE)
+# The commands xargs may not run in a Triphammer session, since the self-kill rule judges them by the operands its input
+# gives (killall, which the rule does not judge, names its targets the same way).
+XARGS_SIGNALLERS = {"kill", "pkill", "pgrep", "killall"}
+
 # pgrep/pkill options that take a value as the next word.
 KILL_VALUE_OPTIONS = {"-d", "-g", "-G", "-P", "-s", "-t", "-u", "-U", "-F", "-r", "--delimiter", "--pgroup",
                       "--group", "--parent", "--session", "--terminal", "--euid", "--uid", "--pidfile", "--runstates",
@@ -809,6 +817,7 @@ class Findings:
         self.edits = []  # (absolute path, cwd whose repository it is checked against, whether every file under it)
         self.kills = []  # (command name, pattern)
         self.signals = []  # (kill operand, the process it names)
+        self.xargs_signals = []  # kill, pkill, pgrep or killall run by xargs in a Triphammer session
         self.persistence_paths = []  # (absolute path written, linked or removed, whether every file under it)
         self.units = []  # systemctl --user invocations that change Triphammer's units, as their text
         self.written = set()  # every path written, linked or removed, as its spellings (see spellings)
@@ -1294,8 +1303,8 @@ def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
     rule reads, sed or perl (whose -i the input can add), a shell, eval, source or an interpreter's inline script, git
-    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, or a
-    command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
+    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, xargs
+    itself, kill, pkill, pgrep or killall, or a command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
     gives it."""
     i, replace, unknown = 0, None, []
     short, optional, long = XARGS_VALUE_OPTIONS
@@ -1348,7 +1357,14 @@ def analyze_xargs(command, args, cwd, findings, depth):
         return
     words = [w for w in words if w.value != XARGS_INPUT]
     name = os.path.basename(words[0].value)
-    if name in ("sed", "gsed", "perl") or name in SUBSTITUTION_WRITERS:
+    if name == "xargs":
+        # GNU xargs gives its command /dev/null as stdin, so an inner xargs with no written command runs the words the
+        # outer one appends as its command.
+        findings.unresolved.append("the command a nested xargs runs, which the input of the outer one can give")
+    elif name in XARGS_SIGNALLERS:
+        # The self-kill rule judges these by their operands, which the input gives.
+        findings.xargs_signals.append(name)
+    elif name in ("sed", "gsed", "perl") or name in SUBSTITUTION_WRITERS:
         # GNU sed and perl read -i after the script too, and the input can give it (or -I's string stand for it).
         findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
     elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
@@ -2471,6 +2487,13 @@ def decide(cmd, cwd):
         return (f"agent-guard self-kill rule: `kill {target}` signals {process}, so it ends the command or the "
                 f"session itself. Kill the PID you saved when you started the process (`kill \"$pid\"`), or use "
                 f"`kill %1` for a job this shell started. If the target really is right, {OVERRIDE_HINT}.")
+    if findings.xargs_signals:
+        name = findings.xargs_signals[0]
+        return (f"agent-guard self-kill rule: `xargs {name}` takes what it signals or lists from its input, which the "
+                f"hook cannot read, so it may end the command or the session itself. Write the target out: kill the "
+                f"PID you saved when you started the process (`kill \"$pid\"`), use `kill %1` for a job this shell "
+                f"started, or give pkill -f or pgrep -f a pattern in bracket form (`'[p]attern'`). If it really is "
+                f"safe, {OVERRIDE_HINT}.")
     files = tracked_edits(findings.edits)
     if files:
         return (f"agent-guard shell-edit rule: this command rewrites git-tracked {listed(files, 5, ', ')} through the "

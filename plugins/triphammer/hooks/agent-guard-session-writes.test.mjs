@@ -215,6 +215,20 @@ test('in a Triphammer session xargs running sed or perl is refused, since its in
     }
   });
 
+test('in a Triphammer session xargs running xargs is refused, since the outer input gives the inner command', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  // GNU xargs gives its command /dev/null as stdin, so the inner xargs runs the words the outer one appends.
+  for (const command of ['echo touch ~/.bashrc | xargs xargs', 'echo rm ~/.bashrc | xargs xargs',
+    'echo touch ~/.bashrc | xargs -r xargs -r', 'xargs xargs <<< "touch ~/.bashrc"',
+    'echo touch ~/.bashrc | xargs sudo xargs', 'echo touch ~/.bashrc | xargs xargs -n 2']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs -r wc -l']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
 test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
   const s = triphammerSession(t);
   if (!s) return;
