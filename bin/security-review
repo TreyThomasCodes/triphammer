@@ -11,8 +11,9 @@
 # paths and the area are the project's securityReviewPaths and securityReviewArea, from <repo>/.triphammer/project.json.
 #
 # --pr reviews pull request <n> when it is open and changes a path the securityReviewPaths regular expression matches,
-# counting a renamed file's old path as well as its new one; a project that declares none has nothing reviewed. The file filter alone decides; labels are not read. It fetches the
-# head into <repo>, audits the changed files and what they call as one Codex run, and posts one comment headed
+# counting a renamed file's old path as well as its new one; a project that declares none has nothing reviewed. The
+# file filter alone decides; labels are not read. It fetches the head into <repo>, audits the changed files and what
+# they call as one Codex run, and posts one comment headed
 # "Security review (<model>)", the model's name without a trailing "-latest", naming the head: the findings, or why the review was skipped or failed.
 # Once the comment is posted it appends "<REPO> <n> <head>" to security-reviewed in the Triphammer config's STATE_DIR, which
 # agent-guard.py keeps agents from writing. It does nothing for any other pull request, or for a head that file already
