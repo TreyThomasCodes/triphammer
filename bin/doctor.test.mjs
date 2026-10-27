@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {fakeAnswers, fakeCommand, git, here, lines, run, runnerSetup} from './fixture.mjs';
+import {fakeAnswers, fakeCommand, git, here, lines, projectJson, run, runnerSetup} from './fixture.mjs';
 
 // What a credential file holds in these tests; it must never reach the doctor's output.
 const sentinel = 'SENTINEL-CREDENTIAL-CONTENT-4c1f';
@@ -212,6 +212,53 @@ test('Docker that does not answer the user, and Docker without Compose v2, are r
   const result = r.doctor();
   assert.equal(result.status, 1);
   assert.match(result.problems[0], /^Docker Engine does not answer this user.*Fix: start the Docker daemon and add this user to the docker group/);
+});
+
+// otherProject(r, name, pattern): a second project on the machine, with a config in the service user's
+// ~/.config/triphammer and a checkout whose project file gives `pattern` as its composeProjectPattern (none when null).
+function otherProject(r, name, pattern) {
+  const checkout = join(r.root, `checkout-${name}`);
+  mkdirSync(join(checkout, '.triphammer'), {recursive: true});
+  const project = {...JSON.parse(projectJson), name, composeProjectPattern: pattern ?? undefined};
+  writeFileSync(join(checkout, '.triphammer/project.json'), JSON.stringify(project));
+  mkdirSync(join(r.home, '.config/triphammer'), {recursive: true});
+  writeFileSync(join(r.home, `.config/triphammer/${name}.conf`),
+    `REPO=Example-Owner/${name}\nCHECKOUT=${checkout}\nAPP_AUTHOR=app/example-agents\nSTATE_DIR=${join(r.root, `state-${name}`)}\n`);
+}
+
+test('two projects whose composeProjectPatterns can match the same Compose name are reported, naming both', t => {
+  for (const pattern of ['^example-project-(local|it)-[0-9]+$', '^example-', '^example-project-local-[0-9]+$', 'local-[0-9]+',
+    '^widgets-db|^example', '^e*xample', '^(widgets|example)-project-it-[0-9]+$', 'project-(local|it)', '^ex[ae]mple-']) {
+    const r = doctorSetup(t);
+    otherProject(r, 'other-project', pattern);
+    assertOneProblem(r.doctor(), new RegExp(`^the composeProjectPattern of triphammer \\(\\^example-project-\\(local\\|it\\)-\\[0-9\\]\\+\\$\\) and that of other-project \\(${pattern.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}\\) can match the same Compose project name.*Fix: give each project's .*such as \\^triphammer- and \\^other-project-$`));
+  }
+});
+
+test('projects whose composeProjectPatterns cannot match the same Compose name, or that give none, pass', t => {
+  const r = doctorSetup(t);
+  otherProject(r, 'other-project', '^widgets-db-[0-9]+$');
+  otherProject(r, 'third-project', '^example-projects(x|y)[0-9]+$');
+  otherProject(r, 'fourth-project', null);
+  // A config whose checkout has no project file runs no sweep.
+  writeFileSync(join(r.home, '.config/triphammer/fifth-project.conf'), `REPO=Example-Owner/fifth\nCHECKOUT=${join(r.root, 'nowhere')}\n`);
+  // The project's own config, by name, is not another project.
+  otherProject(r, 'triphammer', '^example-project-(local|it)-[0-9]+$');
+  const result = r.doctor();
+  assert.equal(result.status, 0, result.output);
+  assert.equal(result.output, 'all good\n');
+});
+
+test('without a composeProjectPattern of its own, the project is not compared with others', t => {
+  const r = doctorSetup(t);
+  const project = JSON.parse(projectJson);
+  delete project.composeProjectPattern;
+  writeFileSync(join(r.checkout, '.triphammer/project.json'), JSON.stringify(project));
+  git(r.checkout, 'commit', '-qam', 'no pattern');
+  git(r.checkout, 'push', '-q', 'origin', 'main');
+  otherProject(r, 'other-project', '^example-');
+  const result = r.doctor();
+  assert.equal(result.status, 0, result.output);
 });
 
 test('missing Playwright browsers are reported', t => {
