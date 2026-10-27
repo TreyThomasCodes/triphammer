@@ -737,6 +737,7 @@ def script_runner_words(name, args, chdirs, writes):
     given = {option for option, _ in options}
     line = [value for option, value in options
             if option in ("-c", "--command", "--session-command") and value is not None][-1:]
+    shell = shell_words(line) if line else [literal_word("sh")]
     if name == "script":
         if writes is not None:
             logs = [value for option, value in options if option in ("-I", "-O", "-B", "-T", "--log-in",
@@ -744,7 +745,7 @@ def script_runner_words(name, args, chdirs, writes):
             if not files and not given & {"-I", "-O", "-B", "--log-in", "--log-out", "--log-io"}:
                 files = [literal_word("typescript")]  # script's default log, in the current directory
             writes += [(value, True) for value in logs + files[:1] if value is not None]
-        return shell_words(line) if line else [literal_word("sh")]
+        return shell
     login = bool(files) and files[0].value == "-"
     if login or given & {"-l", "--login"}:
         if chdirs is not None:
@@ -752,9 +753,8 @@ def script_runner_words(name, args, chdirs, writes):
         files = files[1:] if login else files
     if given & {"-u", "--user"}:
         # runuser -u USER COMMAND runs it directly, and without one a shell
-        return shell_words(line) + files if line else files or [literal_word("sh")]
-    rest = files[1:]  # the operands after the user
-    return (shell_words(line) if line else [literal_word("sh")]) + rest
+        return shell + files if line else files or shell
+    return shell + files[1:]  # the operands after the user go to the shell
 
 
 def split_string(words, i):
@@ -814,11 +814,10 @@ def time_output(word, following):
             return None
         _, eq, attached = option.partition("=")
         return derived(word, attached) if eq else following
-    for j, letter in enumerate(option[1:]):
-        if letter in WRAPPER_VALUE_OPTIONS["time"][0]:  # the first letter that takes a value ends the group
-            rest = option[j + 2:]
-            return None if letter == "f" else derived(word, rest) if rest else following
-    return None
+    end = value_letter(option, WRAPPER_VALUE_OPTIONS["time"][0])
+    if end is None or option[end] == "f":
+        return None
+    return derived(word, option[end + 1:]) if option[end + 1:] else following
 
 
 def takes_value(wrapper, option):
