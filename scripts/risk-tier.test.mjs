@@ -9,7 +9,8 @@ import {classify as classifyWith, compareVersions, minimumReleaseAgeDays, parseR
 import {gitEnv} from './test-git-repo.mjs';
 
 // The rules of Triphammer's example project (bin/test-fixtures/example-project), which the engine tests run on.
-const rules = parseRules(readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8'));
+const exampleRules = readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8');
+const rules = parseRules(exampleRules);
 const classify = (changes, source) => classifyWith(changes, source, rules);
 
 // Paths judged by path alone: every file reads as empty on both sides, so no test file loses a test.
@@ -704,7 +705,6 @@ test("called from a project, Triphammer's engine at the pinned commit classifies
 });
 
 test('rules match a non-ASCII path as written, not as git quotes it, and a renamed migration keeps both sides', () => {
-  const exampleRules = readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8');
   const migration = 'database/migrations/V0001__café.sql';
   const base = {'scripts/risk-tier.mjs': engine, '.triphammer/risk-tier.json': exampleRules, [migration]: 'create table t;\n'};
   const immutable = 'applied migrations are immutable; add a new migration';
