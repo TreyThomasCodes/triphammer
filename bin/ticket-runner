@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Runs the backlog of the repository the Triphammer config names (bin/README.md, "Configuration") unattended, one fresh
-# Claude Code session at a time across every project of Triphammer. The ticket-runner systemd user timer (or, one per
-# project, ticket-runner@<project>.timer) starts it every ten minutes; a run of this project already in progress makes
-# later starts exit at once.
+# Claude Code session at a time per project, and at most `max-sessions` at once across every project of Triphammer.
+# The ticket-runner systemd user timer (or, one per project, ticket-runner@<project>.timer) starts it every ten minutes;
+# a run of this project already in progress makes later starts exit at once.
 #
-# The projects share the shared directory (config.sh): its `lock` is held from the decision to start a run until the
-# run ends, so a run in any project makes the others' ticks exit before they claim anything; its `backoff`, written
-# when a session hits a usage or rate limit, pauses every project; its `stop` stops every project. Projects take
-# turns: a tick that has a run to start marks its project in `waiting/`, and the project that ran last (`last`) yields
-# its tick, starting nothing, while another project's mark is fresher than 30 minutes.
+# The projects share the shared directory (config.sh). It holds N slots, N from its `max-sessions` (1 when the file is
+# missing or is not a whole number of at least 1): a tick that has a run to start holds one slot (`lock`, `lock.2`,
+# ...) from the decision until the run ends, so at most N projects run sessions at once and a tick that finds every
+# slot taken exits before it claims anything. Its `backoff`, written when a session hits a usage or rate limit, pauses
+# every project; its `stop` stops every project. Projects take turns when the slots run out: a tick that has a run to
+# start marks its project in `waiting/`, and when it took the last free slot, the project that ran last (`last`)
+# yields its tick, starting nothing, while another project's mark is fresher than 30 minutes.
 #
 # Each start first fast-forwards Triphammer's checkout (the one this script lives in) to origin/main
 # (bin/update-checkout), and the project's main checkout too when that is another repository, and runs the
@@ -340,12 +342,34 @@ if [ "$kind" = close ]; then
   exit 0
 fi
 
-# This project has a run to start: it waits for its turn until it starts one. The shared lock, taken after this project's
-# own (fd 9) and never waited for, is held until the run ends, so no two projects run sessions at once.
+# This project has a run to start: it waits for its turn until it starts one. It takes the first free of the shared
+# slots after this project's own lock (fd 9), waiting for neither, and holds it on fd 8 until the run ends, so at most
+# max_sessions projects run sessions at once; the kernel frees the slot once the run's processes end, however they
+# end. The owner writes `max-sessions`, and no script does; anything but a whole number of at least 1 means one slot.
 replace_file "$shared/waiting/$project" "$(date +%s)"
-exec 8>"$shared/lock"
-flock -n 8 || exit 0
-if [ "$(cat "$shared/last" 2>/dev/null || true)" = "$project" ]; then
+max_sessions=1
+if [ -e "$shared/max-sessions" ]; then
+  if setting="$(cat "$shared/max-sessions" 2>/dev/null)" && [[ "$setting" =~ ^[1-9][0-9]{0,8}$ ]]; then
+    max_sessions="$setting"
+  else
+    log "ignored $shared/max-sessions, which is not a whole number of at least 1; running one session at a time"
+  fi
+fi
+# slot_file <k>: the lock file of slot k; the first is `lock`, the one slot of a machine without `max-sessions`.
+slot_file() { if [ "$1" -eq 1 ]; then echo "$shared/lock"; else echo "$shared/lock.$1"; fi; }
+slot=""
+for ((k = 1; k <= max_sessions; k++)); do
+  exec 8>"$(slot_file "$k")"
+  if flock -n 8; then slot="$k"; break; fi
+done
+[ -n "$slot" ] || exit 0
+# Projects take turns only when this tick took the last free slot: while another is free, a waiting project can take
+# that one, so no project yields.
+free_slot=""
+for ((k = 1; k <= max_sessions; k++)); do
+  if [ "$k" != "$slot" ] && flock -n "$(slot_file "$k")" true; then free_slot=1; break; fi
+done
+if [ -z "$free_slot" ] && [ "$(cat "$shared/last" 2>/dev/null || true)" = "$project" ]; then
   now="$(date +%s)"
   for mark in "$shared"/waiting/*; do
     other="${mark##*/}"
@@ -596,7 +620,9 @@ rm -f "$brake_file"
 (cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
-brake_watch &
+# The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep
+# a slot taken.
+brake_watch 8>&- 9>&- &
 watcher=$!
 wait "$session" || status=$?
 session=""

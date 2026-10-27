@@ -34,7 +34,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 
 | File | What it does |
 | --- | --- |
-| `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the worktrees and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share a lock, a backoff and a stop file and take turns (see Several projects). |
+| `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the worktrees and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share the session slots (`max-sessions`, by default one), a backoff and a stop file, and take turns when the slots run out (see Several projects). |
 | `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers, `update` runs a fresh clone's `provision` and each project's `provision-project` again for what the runner does not update by itself; see On a machine of its own below. |
 | `provision` | Run as root (by `install.sh`, through sudo) on a fresh Ubuntu server, turns it into a machine of Triphammer's own with no project yet: the shared toolchain, the service user, Triphammer's checkout, the links, the plugin, the machine file and the `triphammer` command; see On a machine of its own below. |
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
@@ -185,24 +185,31 @@ exists.
 
 ## Several projects
 
-Triphammer runs the backlog of every project that has a config file, one session at a time: `ticket-runner@<project>`
-and `merge-when-ready@<project>` run once per project, and each project keeps its own state directory, log, attempts,
+Triphammer runs the backlog of every project that has a config file, at most one session per project and at most
+`max-sessions` sessions at once across them (one unless the owner raises it): `ticket-runner@<project>` and
+`merge-when-ready@<project>` run once per project, and each project keeps its own state directory, log, attempts,
 `current` file and merge-queue log (`merge-when-ready-<project>.log`, with its `.brakes` and `.skips`). The projects
 share the shared directory, `$TRIPHAMMER_SHARED_DIR` or else `${XDG_STATE_HOME:-~/.local/state}/triphammer`:
 
 | File | What it does |
 | --- | --- |
-| `lock` | Held by the tick that starts a run, from its decision until the run ends. A tick takes its project's own `lock` first and then this one, both without waiting, so a run in any project makes every other tick that has a run to start exit without claiming anything; two ticks that race cannot deadlock. A tick that only closes a parent issue does not take it. |
+| `max-sessions` | The number of slots, N: how many sessions may run at once across the machine's projects, one whole number. The owner writes it, and no script creates it. Without it N is 1. A file that does not hold a whole number of at least 1 (`0`, `-1`, `two`, an empty line) also means 1, and each tick that reads it logs that it ignored it. |
+| `lock`, `lock.2`, ... `lock.N` | The slots. A tick that has a run to start takes its project's own `lock` first, so a second tick of a project whose run is in progress never starts one, and then the first free slot, both without waiting; it holds the slot from its decision until the run ends. When every slot is taken it exits without claiming anything; two ticks that race cannot deadlock. The kernel frees a slot once the run's processes end, however they end, so a killed run leaves it free for a later tick. A tick that only closes a parent issue takes no slot. |
 | `backoff` | Written when a session stops at a usage or rate limit: the epoch second until which every project pauses (an hour). A `backoff` left in a project's state directory still pauses that project. |
 | `stop` | The owner's shared brake: while it exists no project's runner or merge queue does anything. The `stop` file in a project's state directory stops only that project. |
 | `last` | The project whose run started last. |
 | `waiting/<project>` | The time a tick of that project last had a run to start; removed when it starts one or has nothing to do. |
 
-Projects take turns: once a tick holds the shared lock and has a run to start, it yields when its project is the one in
+Projects take turns when the slots run out: a tick that took the last free slot yields when its project is the one in
 `last` and another project's `waiting` mark is at most 30 minutes old (three ticks). It logs `<project> ran last and
-<other> is waiting; yielding this turn to it` and exits, starting nothing. An older mark, from a project that is stopped
-or removed, is ignored, so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes
-nothing.
+<other> is waiting; yielding this turn to it` and exits, starting nothing. While another slot is free, the waiting
+project can take that one, so no project yields. An older mark, from a project that is stopped or removed, is ignored,
+so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes nothing.
+
+Sessions of several projects running at once share the machine's Docker. Each tick's database sweep prunes the Compose
+projects its `composeProjectPattern` matches whose worktree is gone, so when two projects' patterns can match the same
+Compose project name, one project's sweep could prune the other's containers while both run; `triphammer doctor`
+warns about such a pair.
 
 `merge-when-ready@<project>` merges and updates only the pull requests of that project's repository, keeps off the
 branches its own runner's `current` file names, and after a merge starts `ticket-runner@<project>.service`. Without
@@ -497,7 +504,7 @@ Bash reads a script while it runs it, so a pull that rewrites `ticket-runner` mu
 self-update is one `if` block, which bash reads whole before running any of it. When the update changed
 `ticket-runner`, the block ends by re-executing the updated copy from its start with `TICKET_RUNNER_UPDATED=1`, which
 skips the self-update (so it happens at most once per tick) and keeps the project's lock already held on file
-descriptor 9 (the shared lock is taken later, on file descriptor 8). The rest of the tick then runs entirely from the new
+descriptor 9 (a shared slot is taken later, on file descriptor 8). The rest of the tick then runs entirely from the new
 copy. The copy it re-executes is always the one next to the running script, in Triphammer's checkout, which every
 project's tick updates.
 
@@ -554,6 +561,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | .NET SDK | `dotnet --list-sdks` lists an SDK the checkout's `global.json` accepts: with `rollForward` `disable` the pinned version only; `patch`, `latestPatch` or none, the same feature band at or after it; `feature` or `latestFeature`, the same major.minor; `minor` or `latestMinor`, the same major; `major` or `latestMajor`, any later one. A prerelease counts only with `allowPrerelease` true. A checkout without `global.json` is not checked. |
 | Node | `node --version` is within the checkout's `package.json` `engines.node` when its comparators are `>=`, `>`, `<=`, `<`, `=` or bare versions of one to three parts, blank-separated; other forms (`^`, `~`, `\|\|`) only need `node` to run. A partial version is a range as in semver: `24` is `24.x`, `<=24` is `<25.0.0`, `>24` is `>=25.0.0`, `<24` is `<24.0.0`, and `24.1` is `24.1.x`. |
 | Docker | `docker info` answers the user running the doctor, and `docker compose version` is 2 or later. |
+| Compose names | Checked only when the project's `.triphammer/project.json` gives a `composeProjectPattern`. For each other project with a config in `${XDG_CONFIG_HOME:-~/.config}/triphammer` whose project file gives one too, the two patterns can match no common Compose project name, so neither project's database sweep prunes the other's containers (Several projects). Two patterns count as disjoint only when each starts with `^` and a literal prefix, has no `\|` outside parentheses, and neither prefix starts the other; any other pair is a problem. An other project whose project file is missing or malformed runs no sweep and is left out. |
 | Playwright | Checked only when the checkout pins Playwright as `provision-project` reads it: a `package.json` that `git ls-files` lists names `@playwright/test` or `playwright` in `dependencies` or `devDependencies`. When the doctor cannot tell (no `jq`, no git checkout, a `package.json` that is not JSON), it checks. `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
 | Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node`, Claude Code login and plugin checks are skipped, and only `jq` is reported. |
@@ -652,7 +660,8 @@ repository variable `TRIPHAMMER_OWNER` (Configuration).
 
 Another project on the same machine needs only its config file, `<name>.conf` with its own `REPO`, `CHECKOUT` and
 `STATE_DIR`, and `systemctl --user enable --now ticket-runner@<name>.timer merge-when-ready@<name>.timer`; the projects
-then run one session at a time between them (Several projects).
+then run one session at a time between them, or up to the number in the shared directory's `max-sessions` when the
+owner writes one (Several projects).
 
 A machine that runs the non-template units (`ticket-runner.timer` and `merge-when-ready.timer`, which serve the project of
 the checkout the scripts live in) cuts over by linking the template units as above, checking that the project's
@@ -664,7 +673,7 @@ systemctl --user daemon-reload
 systemctl --user enable --now "ticket-runner@$project.timer" "merge-when-ready@$project.timer"
 ```
 
-A run already in progress under `ticket-runner.service` finishes; it holds the shared lock, so the template unit's ticks
+A run already in progress under `ticket-runner.service` finishes; it holds the project's lock, so the template unit's ticks
 start nothing until it ends. The merge queue's log becomes `merge-when-ready-<project>.log`.
 
 All the services set `UMask=0077`, and `ticket-runner` and `merge-when-ready` set `umask 077` themselves, so the state
@@ -697,7 +706,10 @@ and the GitHub CLI come from their vendors' apt repositories, or from Ubuntu's o
 **Size.** It depends on the projects' checks. For a project whose ticket run builds and tests .NET, runs a full gate
 with a database container per worktree and web end-to-end tests in Chromium, one session at a time, 4 vCPUs and 16 GB of memory are a working minimum (8 vCPUs make
 the gate noticeably quicker), and 100 GB of disk holds the Docker images and gate databases, the worktrees, the .NET
-SDK and NuGet cache, the npm cache, Playwright's browsers (about 1 GB per version) and the session transcripts.
+SDK and NuGet cache, the npm cache, Playwright's browsers (about 1 GB per version) and the session transcripts. Those
+figures are for one session. With `max-sessions` at N (Several projects), up to N sessions run their builds, gates and
+databases at once, so the vCPUs and memory scale with N, and the disk grows by each further project's checkout,
+worktrees and caches.
 
 **Set the machine up.** The owner runs `install.sh` as an ordinary user who may use sudo, or as root. It asks sudo for
 the password once, clones Triphammer into a temporary directory, runs that clone's `provision` as root with the
