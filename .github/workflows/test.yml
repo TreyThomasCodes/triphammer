@@ -2,7 +2,8 @@ name: test
 
 # The node tests run in three shards side by side (node deals the sorted test files out in turn), and the pull request
 # contract tests and shellcheck in a job of their own. The branch rules require a check named `test`, so the last job,
-# which passes only when every other one passed, carries that name.
+# which passes only when every other one passed, carries that name. Each job has a time limit, so a hung test fails
+# its job instead of running for GitHub's six hours; a shard takes two to three minutes.
 on:
   pull_request:
   push:
@@ -19,6 +20,7 @@ jobs:
   node:
     name: node (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -36,6 +38,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Pull request contract tests
@@ -50,6 +53,7 @@ jobs:
     needs: [node, lint]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every job passed
         env:

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {here, lines} from './fixture.mjs';
+import {fakeSudo, here, lines} from './fixture.mjs';
 import {changingCalls, machine, projectFiles, readdir, triphammerFiles} from './provision-fixture.mjs';
 
 // `triphammer update` on the fake machine of provision-fixture.mjs, running the real provision and provision-project
@@ -30,7 +30,7 @@ function setUp(t) {
     assert.equal(added.status, 0, added.output);
   }
   chmodSync(join(checkout, 'bin/ticket-runner'), 0o755);
-  writeFileSync(join(m.root, 'bin/sudo'), '#!/bin/sh\n[ "$1" != -iu ] || shift 2\nexec "$@"\n', {mode: 0o755});
+  fakeSudo(join(m.root, 'bin'));
   const tmp = join(m.root, 'update-tmp');
   mkdirSync(tmp);
   const config = name => readFileSync(join(m.home, '.config/triphammer', `${name}.conf`));
