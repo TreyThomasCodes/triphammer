@@ -168,8 +168,10 @@
 # text to carry it, so its refusals have no override: the owner makes that change. Heredoc bodies, here-strings
 # and quoted arguments (a PR --body, a commit -m) are prose, not commands, unless a shell or interpreter reads them:
 # as its -c script, as env -S's command line, or on its stdin from a heredoc, a here-string or an echo or printf in
-# the same pipeline. Every line bash would run is judged: the lines after a heredoc whose terminator turns up early in
-# its text, and the lines before one that opens an unbalanced quote (bash runs those, then stops at the quote).
+# the same pipeline. A `<<WORD` inside quotes, a comment or $(( )) is text, not a heredoc, and a heredoc's body
+# starts after the next unquoted newline. Every line bash would run is judged: the lines after a heredoc whose
+# terminator turns up early in its text, and the lines before one that opens an unbalanced quote (bash runs those,
+# then stops at the quote).
 # Anything else the hook cannot work out (malformed input, no git, a cwd outside a repository, a path computed at run
 # time, a Triphammer config it cannot read, running out of time) allows the command, apart from the eval, source and
 # shell-script cases above, a Triphammer session's write target and a Triphammer session's command the hook runs out
@@ -376,27 +378,84 @@ class Word:
 
 
 def strip_heredocs(cmd):
-    """Removes heredoc bodies; each `<<WORD` becomes `<<` and a marker word naming its body."""
-    lines = cmd.split("\n")
-    out, bodies, i = [], [], 0
-    while i < len(lines):
-        line, i = lines[i], i + 1
-        pending = []
-
-        def mark(match):
+    """Removes heredoc bodies, minding quotes (text-lint.py uses it too): a `<<WORD` counts only outside quotes,
+    comments and $(( )), also inside a $( ) or backquotes in a double-quoted word, and its body starts after the next
+    unquoted newline. Each becomes `<<` and a marker word naming its body; returns (text, bodies)."""
+    out, bodies, pending, stack, i, n = [], [], [], ["code"], 0, len(cmd)
+    while i < n:
+        c, top = cmd[i], stack[-1]
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\":
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if cmd.startswith("$((", i):
+            stack.append("((")
+            out.append("$((")
+            i += 3
+            continue
+        if cmd.startswith("$(", i):
+            stack.append("(")
+            out.append("$(")
+            i += 2
+            continue
+        if c == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+        elif top == '"':
+            if c == '"':
+                stack.pop()
+        elif top == "((":
+            if cmd.startswith("))", i):
+                stack.pop()
+                out.append("))")
+                i += 2
+                continue
+            if c == "(":
+                stack.append("(")
+        elif c in "'\"":
+            stack.append(c)
+        elif c == "(":
+            stack.append("(")
+        elif c == ")" and top == "(":
+            stack.pop()
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()<>"):
+            end = cmd.find("\n", i)
+            end = n if end < 0 else end
+            out.append(cmd[i:end])
+            i = end
+            continue
+        elif c == "<" and (match := HEREDOC.match(cmd, i)):
             pending.append((match.group(1), match.group(3)))
-            return f"<< \x00{len(bodies) + len(pending) - 1}\x00"
-
-        out.append(HEREDOC.sub(mark, line))
-        for dash, word in pending:
-            body = []
-            while i < len(lines):
-                body_line, i = lines[i], i + 1
-                if (body_line.lstrip("\t") if dash else body_line) == word:
-                    break
-                body.append(body_line)
-            bodies.append("\n".join(body))
-    return "\n".join(out), bodies
+            out.append(f"<< \x00{len(bodies) + len(pending) - 1}\x00")
+            i = match.end()
+            continue
+        elif c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for dash, word in pending:
+                body = []
+                while i < n:
+                    end = cmd.find("\n", i)
+                    end = n if end < 0 else end
+                    line, i = cmd[i:end], end + 1
+                    if (line.lstrip("\t") if dash else line) == word:
+                        break
+                    body.append(line)
+                bodies.append("\n".join(body))
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    bodies += [""] * len(pending)  # a heredoc on the command's last line has an empty body
+    return "".join(out), bodies
 
 
 class Unbalanced(ValueError):

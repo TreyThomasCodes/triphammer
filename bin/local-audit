@@ -97,13 +97,15 @@ output="$(cd -- "$output_dir" && pwd)/$(basename -- "$output")"
 time_limit="${LOCAL_AUDIT_TIMEOUT:-1h}"
 
 # Codex's limits, checked before anything runs. Each setting comes from its environment variable, else the settings
-# file, else the Triphammer config, else the default. A run is counted when its session starts, whatever its outcome.
+# file, else the Triphammer config, else its default (config.sh's codex_defaults). A run is counted when its session
+# starts, whatever its outcome.
 if [ "$model" = codex ]; then
   state="${XDG_STATE_HOME:-$HOME/.local/state}/local-audit"
   settings="$state/codex-settings"
   runs_file="$state/codex-runs"
-  weekly_cap="${cfg[CODEX_WEEKLY_CAP]:-25}" floor_percent="${cfg[CODEX_FLOOR_PERCENT]:-10}"
-  run_percent="${cfg[CODEX_RUN_PERCENT]:-5}"
+  weekly_cap="${cfg[CODEX_WEEKLY_CAP]:-${codex_defaults[CODEX_WEEKLY_CAP]}}"
+  floor_percent="${cfg[CODEX_FLOOR_PERCENT]:-${codex_defaults[CODEX_FLOOR_PERCENT]}}"
+  run_percent="${cfg[CODEX_RUN_PERCENT]:-${codex_defaults[CODEX_RUN_PERCENT]}}"
   if [ -f "$settings" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line%%#*}"

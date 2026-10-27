@@ -354,7 +354,7 @@ if tool claude "Claude Code" "install Claude Code (https://docs.anthropic.com/en
 fi
 
 if module_on codex && tool codex Codex "install the Codex CLI (npm install -g @openai/codex) $units_path"; then
-  codex login status >/dev/null 2>&1 || problem "Codex is not logged in" "run codex login as this user"
+  codex login status >/dev/null 2>&1 || problem "Codex is not logged in" "run codex login --device-auth as this user"
 fi
 # Codex's sandbox is bwrap, which needs unprivileged user namespaces; Ubuntu restricts them with AppArmor.
 if module_on codex && tool bwrap bubblewrap "install bubblewrap (apt-get install bubblewrap) $units_path"; then

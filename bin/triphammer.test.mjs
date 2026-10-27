@@ -4,7 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {git, here, interrupt, lines, toolingEnv} from './fixture.mjs';
+import {fakeSudo, git, here, interrupt, lines, toolingEnv} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
 // A machine provision has set up, in a temporary directory: the machine file, Triphammer's repository under origins/
@@ -74,19 +74,7 @@ ${session('ticket-runner')}
 ${slowStep('runner')}
 [ ! -e '${root}/runner-fails' ] || exit "$(cat '${root}/runner-fails')"
 `, {mode: 0o755});
-  // sudo -iu hands its command to the login shell as sudo does: each character escaped but alphanumerics, _, - and $.
-  writeFileSync(join(bin, 'sudo'), `#!/bin/sh
-echo "sudo $*" >> '${record}'
-[ "$1" = -v ] && exit 0
-if [ "$1" = -iu ]; then
-  shift 2
-  command=""
-  for arg; do command="$command $(printf '%s' "$arg" | sed 's/[^A-Za-z0-9_$-]/\\\\&/g')"; done
-  UNDER_SUDO=yes exec bash -c "$command"
-fi
-[ "$1" != -u ] || shift 2
-UNDER_SUDO=yes exec "$@"
-`, {mode: 0o755});
+  fakeSudo(bin, {log: record, prefix: 'sudo ', loginShell: true});
   writeFileSync(join(bin, 'id'), `#!/bin/sh
 case "$*" in
   "-u") echo "$FAKE_UID" ;;

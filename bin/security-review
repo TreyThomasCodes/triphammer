@@ -10,9 +10,10 @@
 # The repository is the Triphammer config's REPO and <repo> defaults to its CHECKOUT (bin/config.sh). The trigger
 # paths and the area are the project's securityReviewPaths and securityReviewArea, from <repo>/.triphammer/project.json.
 #
-# --pr reviews pull request <n> when it is open and changes a path the securityReviewPaths regular expression matches;
-# a project that declares none has nothing reviewed. The file filter alone decides; labels are not read. It fetches the
-# head into <repo>, audits the changed files and what they call as one Codex run, and posts one comment headed
+# --pr reviews pull request <n> when it is open and changes a path the securityReviewPaths regular expression matches,
+# counting a renamed file's old path as well as its new one; a project that declares none has nothing reviewed. The
+# file filter alone decides; labels are not read. It fetches the head into <repo>, audits the changed files and what
+# they call as one Codex run, and posts one comment headed
 # "Security review (<model>)", the model's name without a trailing "-latest", naming the head: the findings, or why the review was skipped or failed.
 # Once the comment is posted it appends "<REPO> <n> <head>" to security-reviewed in the Triphammer config's STATE_DIR, which
 # agent-guard.py keeps agents from writing. It does nothing for any other pull request, or for a head that file already
@@ -71,8 +72,9 @@ state="$(jq -r .state <<< "$view")"
 head="$(jq -r .headRefOid <<< "$view")"
 [ "$state" = OPEN ] || exit 0
 # gh pr view's `files` stops at the first 100 in path order, which would drop bin/ behind 100 src/ files; the
-# paginated REST list has them all.
-files="$(gh api --paginate "repos/$repo_name/pulls/$pr/files" --jq '.[].filename')" \
+# paginated REST list has them all. It names a renamed file by its new path and its previous_filename, so moving a
+# file out of a trigger path still triggers.
+files="$(gh api --paginate "repos/$repo_name/pulls/$pr/files" --jq '.[] | .filename, (.previous_filename // empty)')" \
   || fail "cannot read the files of pull request #$pr"
 grep -qE -- "$paths" <<< "$files" || exit 0
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || fail "pull request #$pr has no head commit"

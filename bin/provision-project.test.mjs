@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {git, lines, run} from './fixture.mjs';
 import {changingCalls, machine, projectFiles, readdir, triphammerFiles} from './provision-fixture.mjs';
@@ -16,6 +16,9 @@ function ready(t, origins = {}, {ownProject = false, app = true, ...options} = {
   if (app && !options.privateOrigins) m.placeApp();
   return m;
 }
+// The codex module's settings as provisioning writes them into a config that lacks them all, in this order.
+const codexDefaults = 'CODEX_AUDIT_MODEL=gpt-6.1-sol\nCODEX_SECURITY_MODEL=gpt-daybreak-blue-latest\n'
+  + 'CODEX_WEEKLY_CAP=500\nCODEX_FLOOR_PERCENT=0\nCODEX_RUN_PERCENT=1\n';
 const gitConfig = (m, key) => run('git', ['config', '--file', join(m.home, '.gitconfig'), '--get', key]).trim();
 
 const project = ['example/example-project', '/CHECKOUT'];
@@ -148,9 +151,9 @@ test('two projects, with their modules, get one config and their own extras each
     'example/other': {'.triphammer/project.json': JSON.stringify({name: 'other'})},
   });
   const one = ['example/example-project', join(m.root, 'example-project'), '--modules', 'codex,demo',
-    '--set', 'CODEX_AUDIT_MODEL=gpt-test', '--set', 'CODEX_SECURITY_MODEL=gpt-test',
     '--set', 'DEMO_GALLERY_DIR=/srv/gallery', '--set', 'DEMO_URL=http://gallery.example.invalid/'];
   const two = ['example/other', join(m.root, 'srv/other'), '--set', 'STATE_DIR=/srv/state/other', '--set', 'OWNER=example-person'];
+  writeFileSync(join(m.state, 'codex/login-exit'), '1');
   const first = m.project(...one);
   assert.equal(first.status, 0, first.output);
   const other = m.project(...two);
@@ -159,8 +162,8 @@ test('two projects, with their modules, get one config and their own extras each
   assert.equal(git(join(m.root, 'srv/other'), 'remote', 'get-url', 'origin'), `file://${m.root}/origins/example/other.git`);
   assert.equal(readFileSync(join(m.home, '.config/triphammer/example-project.conf'), 'utf8').split('\n').slice(1).join('\n'),
     `REPO=example/example-project\nCHECKOUT=${m.root}/example-project\nAPP_AUTHOR=app/example-agents\n`
-    + `STATE_DIR=${m.home}/.local/state/triphammer/projects/example-project\nMODULES=codex,demo\nCODEX_AUDIT_MODEL=gpt-test\n`
-    + 'CODEX_SECURITY_MODEL=gpt-test\nDEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://gallery.example.invalid/\n');
+    + `STATE_DIR=${m.home}/.local/state/triphammer/projects/example-project\nMODULES=codex,demo\n`
+    + `DEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://gallery.example.invalid/\n${codexDefaults}`);
   assert.equal(readFileSync(join(m.home, '.config/triphammer/other.conf'), 'utf8').split('\n').slice(1).join('\n'),
     `REPO=example/other\nCHECKOUT=${m.root}/srv/other\nAPP_AUTHOR=app/example-agents\nSTATE_DIR=/srv/state/other\n`
     + 'OWNER=example-person\n');
@@ -170,14 +173,17 @@ test('two projects, with their modules, get one config and their own extras each
   assert.deepEqual(lines(join(m.state, 'npm-calls')), [`install -g -q --prefix ${m.home}/.local @openai/codex`]);
   assert.match(readFileSync(join(m.sys, 'etc/apparmor.d/bwrap'), 'utf8'), /^profile bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,$/m);
   assert.deepEqual(loaded, ['bwrap']);
-  assert.match(first.stdout, /Log Codex in: sudo -iu triphammer codex login/);
+  assert.match(first.stdout, /Log Codex in: sudo -iu triphammer codex login --device-auth/);
   assert.doesNotMatch(other.stdout, /Log Codex in/);
   assert.match(other.stdout, /\nproject: other\n$/);
 
+  // Once Codex is logged in, the step is left out.
+  rmSync(join(m.state, 'codex/login-exit'));
   for (const args of [one, two]) {
     const again = m.project(...args);
     assert.equal(again.status, 0, again.output);
     assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+    assert.doesNotMatch(again.stdout, /Log Codex in/);
     assert.deepEqual(changingCalls(again.calls), []);
   }
 });
@@ -296,7 +302,8 @@ test('a second run with no flags keeps every setting the config has, byte for by
   const {m, checkout, config, text} = added(t);
   assert.equal(settingsOf(text), `REPO=example/example-project\nCHECKOUT=${checkout}\nAPP_AUTHOR=app/example-agents\n`
     + `STATE_DIR=${m.home}/.local/state/triphammer/projects/example-project\nMODULES=codex,demo\nOWNER=example-person\n`
-    + 'CODEX_AUDIT_MODEL=gpt-test\nCODEX_SECURITY_MODEL=gpt-test\nDEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://gallery.example.invalid/\n');
+    + 'CODEX_AUDIT_MODEL=gpt-test\nCODEX_SECURITY_MODEL=gpt-test\nDEMO_GALLERY_DIR=/srv/gallery\nDEMO_URL=http://gallery.example.invalid/\n'
+    + 'CODEX_WEEKLY_CAP=500\nCODEX_FLOOR_PERCENT=0\nCODEX_RUN_PERCENT=1\n');
   const again = m.project('example/example-project');
   assert.equal(again.status, 0, again.output);
   assert.equal(readFileSync(config, 'utf8'), text);
@@ -360,6 +367,72 @@ test('a module the settings that result leave without what it needs stops provis
   assert.equal(first.status, 2, first.output);
   assert.match(first.stderr, /the demo module needs DEMO_GALLERY_DIR/);
   assert.deepEqual(changingCalls(first.calls), []);
+});
+
+test('the codex module with no --set writes its five settings with their defaults, and a second run keeps them', t => {
+  const m = ready(t, {'example/example-project': projectFiles('example-project')});
+  const checkout = join(m.root, 'example-project');
+  const config = join(m.home, '.config/triphammer/example-project.conf');
+  const result = m.project('example/example-project', checkout, '--modules', 'codex');
+  assert.equal(result.status, 0, result.output);
+  assert.equal(settingsOf(readFileSync(config, 'utf8')), `REPO=example/example-project\nCHECKOUT=${checkout}\n`
+    + `APP_AUTHOR=app/example-agents\nSTATE_DIR=${m.home}/.local/state/triphammer/projects/example-project\n`
+    + `MODULES=codex\n${codexDefaults}`);
+  for (const line of ['CODEX_AUDIT_MODEL added (gpt-6.1-sol)', 'CODEX_SECURITY_MODEL added (gpt-daybreak-blue-latest)',
+    'CODEX_WEEKLY_CAP added (500)', 'CODEX_FLOOR_PERCENT added (0)', 'CODEX_RUN_PERCENT added (1)']) {
+    assert.ok(result.stdout.split('\n').includes(`config: ${line}`), `${line}\n${result.stdout}`);
+  }
+  const text = readFileSync(config, 'utf8');
+  const again = m.project('example/example-project');
+  assert.equal(again.status, 0, again.output);
+  assert.equal(readFileSync(config, 'utf8'), text);
+  assert.match(again.stdout, /^config: CODEX_WEEKLY_CAP kept \(500\)$/m);
+  assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+});
+
+test('with the codex module off none of its defaults is written; turned on, only the missing ones are, and --set wins', t => {
+  const m = ready(t, {'example/example-project': projectFiles('example-project')});
+  const checkout = join(m.root, 'example-project');
+  const config = join(m.home, '.config/triphammer/example-project.conf');
+  const off = m.project('example/example-project', checkout, '--modules', 'demo', '--set', 'CODEX_WEEKLY_CAP=7',
+    '--set', 'DEMO_GALLERY_DIR=/srv/gallery', '--set', 'DEMO_URL=http://gallery.example.invalid/');
+  assert.equal(off.status, 0, off.output);
+  const before = readFileSync(config, 'utf8');
+  assert.deepEqual(before.split('\n').filter(line => line.startsWith('CODEX_')), ['CODEX_WEEKLY_CAP=7']);
+  assert.doesNotMatch(off.stdout, /^config: CODEX_(?!WEEKLY_CAP)/m);
+
+  const on = ['example/example-project', '--modules', 'demo,codex', '--set', 'CODEX_AUDIT_MODEL=gpt-other'];
+  const dry = m.project(...on, '--dry-run');
+  assert.equal(dry.status, 0, dry.output);
+  for (const line of ['CODEX_WEEKLY_CAP kept (7)', 'CODEX_AUDIT_MODEL added (gpt-other)',
+    'CODEX_SECURITY_MODEL added (gpt-daybreak-blue-latest)', 'CODEX_FLOOR_PERCENT added (0)', 'CODEX_RUN_PERCENT added (1)']) {
+    assert.ok(dry.stdout.split('\n').includes(`config: ${line}`), `${line}\n${dry.stdout}`);
+  }
+  assert.match(dry.stdout, /^would: rewrite .*example-project\.conf/m);
+  assert.equal(readFileSync(config, 'utf8'), before);
+
+  const result = m.project(...on);
+  assert.equal(result.status, 0, result.output);
+  const after = readFileSync(config, 'utf8');
+  assert.deepEqual(after.split('\n').filter(line => line.startsWith('CODEX_')), ['CODEX_WEEKLY_CAP=7',
+    'CODEX_AUDIT_MODEL=gpt-other', 'CODEX_SECURITY_MODEL=gpt-daybreak-blue-latest', 'CODEX_FLOOR_PERCENT=0',
+    'CODEX_RUN_PERCENT=1']);
+  const again = m.project('example/example-project');
+  assert.equal(again.status, 0, again.output);
+  assert.equal(readFileSync(config, 'utf8'), after);
+});
+
+test('--unset of a codex setting while the module stays on writes its default again', t => {
+  const {m, config, text} = added(t);
+  writeFileSync(config, text.replace('CODEX_RUN_PERCENT=1', 'CODEX_RUN_PERCENT=3'), {mode: 0o600});
+  const result = m.project('example/example-project', '--unset', 'CODEX_RUN_PERCENT', '--unset', 'CODEX_AUDIT_MODEL');
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.stdout, /^config: CODEX_RUN_PERCENT changed \(3, now 1\)$/m);
+  assert.match(result.stdout, /^config: CODEX_AUDIT_MODEL changed \(gpt-test, now gpt-6\.1-sol\)$/m);
+  const now = readFileSync(config, 'utf8');
+  assert.match(now, /^CODEX_RUN_PERCENT=1$/m);
+  assert.match(now, /^CODEX_AUDIT_MODEL=gpt-6\.1-sol$/m);
+  assert.match(now, /^CODEX_SECURITY_MODEL=gpt-test$/m);
 });
 
 test('a key the config has that is not a setting stops provision-project until --unset removes it, whose value stays hidden when it looks secret', t => {

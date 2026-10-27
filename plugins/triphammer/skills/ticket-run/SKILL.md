@@ -23,6 +23,10 @@ The runner's prompt names the modules that are on (`Modules on: ...` or `No modu
 
 Read their reports, `git diff --stat` and check results. Don't read whole source files or full diffs yourself. For each blocking finding, hand the finding and its reproduction to a fresh `triphammer:builder`. Use a fresh agent for every step and resume none of them, so each one starts clean. This run ends the moment your turn ends, and an agent still running then is lost with its work, so never end a turn while an agent you started is still running: wait for its report, and end only with the closing line under Finish.
 
+## Workflow files
+
+The agents' GitHub App has no Workflows permission, so GitHub refuses its push of any commit that creates, changes or deletes a file under `.github/workflows/`. Before sizing, judge from the issue whether its work has to touch such a file. If it does, build nothing and file no slices: comment on the issue that the App lacks the Workflows permission, so GitHub would refuse the push, and that the owner can either push the branch themselves or grant the App the Workflows permission, delete this "Workflow files" section and the matching paragraph of `bin/README.md`, and then remove `needs-owner`; while this section stands, every run on the issue stops here again. Add the `needs-owner` label and end.
+
 ## Size the ticket first
 
 A ticket that crosses layers is built as one pull request. When it is too big for one pass by the slicing rule in `triphammer:plan-work` (§2 "Slice it"), don't start building. Ask `triphammer:searcher` for what the code already does, then split the issue into slice issues:
@@ -41,7 +45,7 @@ Never use `AskUserQuestion`; it is denied here. Where `triphammer:review-loop` o
 - refuse rather than guess;
 - choose the smaller change.
 
-List each such decision under **Decisions for the owner** in the pull request comment, so they can reverse it with a review. Stop without a pull request only for something `AGENTS.md` or `triphammer:merge-policy` reserves for the owner and that the ticket cannot do without, such as a credential, a ruleset change or an applied migration. Then comment on the issue with what you need and your recommendation, add the `needs-owner` label, and end.
+List each such decision under **Decisions for the owner** in the pull request comment, so they can reverse it with a review. Stop without a pull request only for something `AGENTS.md` or `triphammer:merge-policy` reserves for the owner and that the ticket cannot do without, such as a credential, a ruleset change, an applied migration or a change under `.github/workflows/` (Workflow files, above). Then comment on the issue with what you need and your recommendation, add the `needs-owner` label, and end.
 
 ## Upkeep issues
 
@@ -52,7 +56,7 @@ An issue labelled `upkeep` follows the `triphammer:upkeep` skill instead of buil
 1. Follow `triphammer:review-loop` to the end, through `triphammer:merge-policy`. The pull request description ends with `Closes #N`.
 2. When the change touches the web UI, the project declares `"demos": true` in `.triphammer/project.json`, and the prompt names the `demo` module as on, have a `demo` agent write its walkthrough, which the runner publishes once this session ends, so the owner can see the change without opening the code. Give it the pull request number, the issue and the journey the change touched. A visual problem it reports is a finding. A failed demo never blocks the pull request; mention it in the pull request comment instead.
 3. An escalate-tier pull request is labelled and armed, and then it is done. The owner approves it in their own time. The runner moves on to tickets that do not depend on it.
-4. Remove nothing outside your worktree. End with one line saying the pull request number and its tier, or why there is none (for an `upkeep` issue, the issues filed and that it is closed).
+4. Remove nothing outside your worktree. End with one line saying the pull request number and its tier, or why there is none (for a ticket stopped for the owner, what it needs and that it carries `needs-owner`; for an `upkeep` issue, the issues filed and that it is closed).
 
 ## Repair a pull request
 

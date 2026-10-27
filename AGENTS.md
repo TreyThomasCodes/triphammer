@@ -25,7 +25,7 @@ that hold the rest.
 ## Rules that apply everywhere
 
 - **No project in the core.** Nothing outside a project's `.triphammer/` and its config file names a project, a
-  machine, a person or a model. Examples in docs and tests use placeholders.
+  machine or a person. Examples in docs and tests use placeholders.
 - **Agents never install persistence on the machine** or change its brakes, units, config or state. The owner installs.
 - **Never acquire, extract or disclose credentials** beyond the configured workflow. Config holds paths to secrets,
   never values.
@@ -69,7 +69,7 @@ Behavioral tests with fakes that stand in for the real commands, put first on `P
 a test that fails on the hook in `main`.
 
 - `bin/fixture.mjs`: throwaway origin and checkout rigs (`checkoutSetup`, `runnerSetup`), and `fakeCommand`,
-  `fakeGh`, `fakeDocker` and `fakeCodex`, which put the fakes on `PATH`.
+  `fakeGh`, `fakeDocker`, `fakeCodex` and `fakeSudo`, which put the fakes on `PATH`.
 - `bin/fake-gh.mjs`, `fake-curl.mjs`, `fake-answers.mjs`: canned answers keyed by argument prefix for `gh`, for
   `curl` in the `github-app-token` tests, and for any other command that only needs answers.
 - `bin/fake-claude.mjs`, `fake-codex.mjs`: `claude` (a run, `auth status`, plugin installs) and `codex`, recording

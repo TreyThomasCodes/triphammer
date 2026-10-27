@@ -9,7 +9,8 @@ import {classify as classifyWith, compareVersions, minimumReleaseAgeDays, parseR
 import {gitEnv} from './test-git-repo.mjs';
 
 // The rules of Triphammer's example project (bin/test-fixtures/example-project), which the engine tests run on.
-const rules = parseRules(readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8'));
+const exampleRules = readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8');
+const rules = parseRules(exampleRules);
 const classify = (changes, source) => classifyWith(changes, source, rules);
 
 // Paths judged by path alone: every file reads as empty on both sides, so no test file loses a test.
@@ -30,6 +31,8 @@ test('a rule limited to some git statuses, or excepting some, judges only those 
 
 // A modified test file judged by its base and head text.
 const testChange = async (path, before, after) => classify([{status: 'M', path}], {base: () => before, head: () => after});
+// What testChange returns for a test file that goes from two test cases to one.
+const removesOne = path => ({tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]});
 const csharpTests = (...methods) => `public sealed class PricingTests\n{\n${methods.map(([attribute, name]) =>
   `    ${attribute}\n    public void ${name}() { Assert.True(true); }\n`).join('\n')}}\n`;
 const specTests = (...names) => `import {test, expect} from '@playwright/test';\n\ntest.describe('chain', () => {\n${names.map(name =>
@@ -70,6 +73,33 @@ test('a test case moved into a block comment or an #if false region no longer co
   assert.deepEqual(result.reasons, [`${specPath}: removes test cases (2 before, 1 after)`]);
 });
 
+test('a literal or comment opened in a C# region that never compiles ends with it and hides no removed test', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const removed = removesOne(path);
+  // The compiler does not lex a skipped region, so its text opens nothing that runs past the directive ending it.
+  for (const [skip, open, close] of [['#if false', '@"', '"'], ['#if false', '/*', '*/'], ['#if false', '"""', '"""'],
+    ['#if true\n#else', '@"', '"'], ['#if NEVER\n#elif false', '/*', '*/'], ['#if false\n#if NEVER\n#else', '@"', '"']]) {
+    const end = '\n#endif'.repeat(skip.split('#if').length - 1);
+    const base = `class PricingTests{\n[Fact] void A(){}\n${skip}\n${open}${end}\n[Fact] void B(){}\n${skip}\n${close}${end}\n}\n`;
+    assert.deepEqual(await testChange(path, base, base.replace('[Fact] void B(){}\n', '')), removed, `${skip} ${open}`);
+  }
+  // An indented directive ends the region too, and a test after it still counts.
+  const indented = 'class PricingTests{\n[Fact] void A(){}\n#if false\n@"\n  #endif\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange(path, indented, indented.replace('[Fact] void B(){}\n', '')), removed);
+  assert.deepEqual(await testChange(path, indented, indented.replace('A(){}', 'A2(){}')), {tier: 'auto', reasons: []});
+});
+
+test('a C# literal or comment that runs over an #if, #elif, #else or #endif line is unsure, and its test cases count on the base only', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const unsure = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after, counting those in text it cannot read on the base only)`]};
+  // Opened in a branch under an unknown symbol, the literal swallows the #endif and the live test after it only if that
+  // branch compiles, which the scanner cannot know.
+  for (const [open, close] of [['@"', '"'], ['/*', '*/'], ['"""', '"""']]) {
+    const base = `class PricingTests{\n[Fact] void A(){}\n#if NEVER\n${open}\n#endif\n[Fact] void B(){}\n#if NEVER\n${close}\n#endif\n}\n`;
+    assert.deepEqual(await testChange(path, base, base.replace('[Fact] void B(){}\n', '')), unsure, open);
+  }
+});
+
 test('a test case moved under an #if on an undefined symbol, or a later branch of one, no longer counts', async () => {
   const before = csharpTests(['[Fact]', 'Prices'], ['[Fact]', 'Rounds']);
   for (const after of [wrapped('#if NEVER'), wrapped('#if !NEVER'), wrapped('#if NEVER // off'), wrapped('#if false', '#elif NEVER'),
@@ -93,7 +123,7 @@ test('tests under #if true, an #elif true or #else after only false branches, or
 test('directives and line comments end at every line break the compiler accepts, not only LF', async () => {
   const path = 'tests/X/FooTests.cs';
   const twoFacts = 'class FooTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
-  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  const removed = removesOne(path);
   for (const after of ['class FooTests{\n[Fact] void A(){}\n#if NEVER\r[Fact] void B(){}\n#endif\n}\n',
     'class FooTests{\n[Fact] void A(){}\n#if NEVER\u0085[Fact] void B(){}\n#endif\n}\n',
     'class FooTests{\n[Fact] void A(){}\n#if NEVER\u2028[Fact] void B(){}\n#endif\n}\n']) {
@@ -109,16 +139,15 @@ test('directives and line comments end at every line break the compiler accepts,
   const commentThenFacts = 'class FooTests{\n// note\r[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   assert.deepEqual(await testChange(path, commentThenFacts, 'class FooTests{\n// note\n[Fact] void B(){}\n}\n'), removed);
   const spec = "test('a', () => {});\n// note test('b', () => {});\n";
-  assert.deepEqual(await testChange(specPath, spec, "test('a', () => {});\n"),
-    {tier: 'escalate', reasons: [`${specPath}: removes test cases (2 before, 1 after)`]});
+  assert.deepEqual(await testChange(specPath, spec, "test('a', () => {});\n"), removesOne(specPath));
 });
 
-test('adding an #if, #elif or #else to a C# test file escalates, even where a string fools the comment scanner', async () => {
+test('adding an #if, #elif or #else to a C# test file escalates, and a comment marker in an interpolation hole hides no test', async () => {
   const path = 'tests/X/FooTests.cs';
   const twoFacts = 'class FooTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   const hidden = 'class FooTests{\n[Fact] void A(){}\nstring s = $"{"/*"}";\n#if NEVER\n*/\n[Fact] void B(){}\n#endif\n}\n';
-  assert.deepEqual(await testChange(path, twoFacts, hidden),
-    {tier: 'escalate', reasons: [`${path}: adds conditional compilation (added directive: #if NEVER)`]});
+  assert.deepEqual(await testChange(path, twoFacts, hidden), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`,
+    `${path}: adds conditional compilation (added directive: #if NEVER)`]});
   const debug = 'class FooTests{\n[Fact] void A(){}\n#if DEBUG\n[Fact] void B(){}\n#endif\n}\n';
   assert.deepEqual(await testChange(path, twoFacts, debug), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`,
     `${path}: adds conditional compilation (added directive: #if DEBUG)`]});
@@ -132,8 +161,9 @@ test('adding an #if, #elif or #else to a C# test file escalates, even where a st
     + '    [Fact] public void A() {}\n    [Fact] public void B() {}\n}\n';
   const swapHead = 'public class FooTests {\n    [Fact] public void A() {}\n    static string S = $"{ "/*" }";\n'
     + '#if NEVER\n    // */\n    [Fact] public void B() {}\n#endif\n}\n';
-  assert.deepEqual(await testChange('tests/Pricing.Tests/FooTests.cs', swapBase, swapHead),
-    {tier: 'escalate', reasons: ['tests/Pricing.Tests/FooTests.cs: adds conditional compilation (added directive: #if NEVER)']});
+  assert.deepEqual(await testChange('tests/Pricing.Tests/FooTests.cs', swapBase, swapHead), {tier: 'escalate', reasons: [
+    'tests/Pricing.Tests/FooTests.cs: removes test cases (2 before, 1 after)',
+    'tests/Pricing.Tests/FooTests.cs: adds conditional compilation (added directive: #if NEVER)']});
   // Directive text is compared trimmed with whitespace collapsed, so reindenting one stays automatic.
   assert.deepEqual(await testChange(path, debug, debug.replace('#if DEBUG', '  #  if   DEBUG')), {tier: 'auto', reasons: []});
   // A lone CR or U+2028 starts a directive line too.
@@ -170,6 +200,186 @@ test('comment markers inside strings and the #else of an #if false region keep t
   assert.deepEqual(countReasons(await testChange(csharpPath, before, after)), []);
   const spec = specTests('loads', 'filters');
   assert.deepEqual(await testChange(specPath, spec, spec.replace("test('loads'", "test('loads http://x/* '")), {tier: 'auto', reasons: []});
+});
+
+test('a C# test case named only inside a regular, verbatim, interpolated or raw string no longer counts', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const facts = (...lines) => `class PricingTests{\n[Fact] void A(){}\n${lines.join('\n')}\n}\n`;
+  const removed = removesOne(path);
+  for (const string of ['const string S = "[Fact]";', 'const string S = """\n[Fact]\n""";', 'const string S = """[Fact]""";',
+    'string S = @"say ""hi"" [Fact]";', 'string S = @"\n[Fact]\n";', 'string S = $"{N} [Fact]";', 'string S = $"{(N > 0 ? "a" : "b")} [Fact]";',
+    'string S = $@"{N}\n[Fact]";', 'string S = @$"{N}\n[Fact]";', 'string S = $"""\n{N} [Fact]\n""";', 'string S = $$"""\n{N} {{N}} [Fact]\n""";',
+    'string S = $"{N:F2} [Fact]";', "char Q = '\"'; string S = \"[Fact]\";"]) {
+    assert.deepEqual(await testChange(path, facts('[Fact] void B(){}'), facts(string)), removed, string);
+  }
+  // Quotes inside a literal end nothing early, so a real test after it still counts.
+  for (const string of ['string S = "\\"[";', "char Q = '\"';", 'string S = @"""";', 'string S = """ a "" b """;', 'string S = $"{"}"}";']) {
+    assert.deepEqual(await testChange(path, facts('[Fact] void B(){}'), facts(string, '[Fact] void B(){}')), {tier: 'auto', reasons: []}, string);
+  }
+});
+
+test('a JavaScript test case named only inside a string, template, regex, comment after a regex or JSX text no longer counts', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  for (const after of ["const r = /'/; // test('b', () => {})", "const s = 'test(';", 'const s = "it(";', "const s = `\n${n} test('b', () => {})`;",
+    "const s = `${`}`} test('b')`;", "const r = /[/'\"]/; // test('b')",
+    "const r = x ? /'/ : y; // test('b')", "return typeof /'/; // test('b')", "const half = total! / 2; const r = /'/; // test('b')"]) {
+    const head = `test('a', () => {});\n${after}\n`;
+    assert.deepEqual(await testChange(path, two, head), removesOne(path), after);
+  }
+  const tsx = 'src/web/src/x.test.tsx';
+  assert.deepEqual(await testChange(tsx, two, "test('a', () => {});\nconst e = <p title=\"it(\">don't test('b', () => {})</p>;\n"),
+    removesOne(tsx));
+});
+
+test('a keyword after a spread and a hashbang line hide no removed test', async () => {
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  const ts = 'src/web/src/x.test.ts', tsx = 'src/web/src/x.test.tsx';
+  // After ... a keyword stays a keyword, so the / or < after it opens a regex or a JSX element, or, after await or
+  // yield (names outside an async function or generator), is unsure.
+  for (const [path, line] of [
+    [ts, "const s = [...typeof / test('b', () => {}) /];"],
+    [ts, "async function g() { return [...await / test('b', () => {}) /]; }"],
+    [ts, "function* g() { yield [...yield / test('b', () => {}) /]; }"],
+    [ts, "f(...void / test('b', () => {}) /);"],
+    [tsx, "const s = [...typeof <p> test('b', () => {}) </p>];"],
+  ]) {
+    const result = await testChange(path, two, `test('a', () => {});\n${line}\n`);
+    assert.equal(result.tier, 'escalate', line);
+    assert.match(result.reasons.join('\n'), /^src\/web\/src\/x\.test\.tsx?: removes test cases \(2 before, 1 after/, line);
+  }
+  // A #! line at the start of the file, after any byte order mark, is a comment.
+  for (const head of ["#!/usr/bin/env node test('b', () => {})\ntest('a', () => {});\n", "﻿#!/usr/bin/env node test('b')\ntest('a', () => {});\n"]) {
+    assert.deepEqual(await testChange(ts, two, head), removesOne(ts), head);
+  }
+  // A keyword after a member-access dot is still a property, so the / after it divides.
+  const spec = "const q = a.typeof / 2 / b?.void / 3;\ntest('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(ts, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+});
+
+test('where the scanner cannot tell code from text, the declarations there count on the base only', async () => {
+  const unread = (path, before, after) => ({tier: 'escalate',
+    reasons: [`${path}: removes test cases (${before} before, ${after} after, counting those in text it cannot read on the base only)`]});
+  const spec = 'src/web/src/x.test.ts';
+  // A / after a } starts a regex after a block and divides after an object literal.
+  const blockThenSlash = "test('a', () => {});\n{}\n/x/g.exec(s); test('b', () => {});\n";
+  assert.deepEqual(await testChange(spec, blockThenSlash, blockThenSlash.replace("'a'", "'a2'")), unread(spec, 2, 1));
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = 'open;\ntest('b', () => {});\n"), unread(spec, 2, 1));
+  assert.deepEqual(await testChange(spec, two, "test('a', () => {});\nconst s = `${x;\ntest('b', () => {});\n"), unread(spec, 2, 1));
+  // In TSX a generic arrow's <T extends U> is no JSX element, and a closing tag naming another element ends none.
+  const tsx = 'src/web/src/x.test.tsx';
+  const generic = "const id = <T extends unknown>(x: T) => x;\ntest('a', () => {});\ntest('b', () => {});\n// renders </p>\n";
+  assert.deepEqual(await testChange(tsx, generic, generic.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
+  const mismatched = "const e = <div>text</span>;\ntest('a', () => {});\ntest('b', () => {});\n// </div>\n";
+  assert.deepEqual(await testChange(tsx, mismatched, mismatched.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
+  // A comment between a type parameter list's > and its ( leaves the < unsure as the ( alone does.
+  for (const type of ['type F = <T>/**/(x: T) => T;', 'type F = <T>\n// generic\n(x: T) => T;']) {
+    const commented = `${type}\ntest('b', () => {});\n// </T>\ntest('a', () => {});\n`;
+    assert.deepEqual(await testChange(tsx, commented, commented.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0), type);
+  }
+  // A / or < whose meaning hangs on the token before it is unsure unless that token is clearly an operator, or clearly
+  // an operand on the same line: a ! at a line's start may follow an inserted semicolon, a } may end a block, and the )
+  // of an if may start a statement.
+  const hidden = [
+    [spec, "const ok = 1\n!/[test(]/.exec('x'); test('b', () => {});"],
+    [spec, "const ok = x\n/[test(]/.exec('x'); test('b', () => {});"],
+    [spec, "if (ok) /'/.test(s); // test('b', () => {})"],
+    [tsx, "if (x) {}\n<p>test('b', () => {})</p>;"],
+    [tsx, "const ok = x\n<p>test('b', () => {})</p>;"],
+    ['src/web/src/x.test.js', "if (x) {}\n<p>test('b', () => {})</p>;"],
+  ];
+  for (const [path, line] of hidden) {
+    assert.deepEqual(await testChange(path, two, `test('a', () => {});\n${line}\n`), unread(path, 2, 1), line);
+  }
+  const path = 'tests/X/PricingTests.cs';
+  const facts = 'class PricingTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'const string S = """\n[Fact] void B')), unread(path, 2, 1));
+  assert.deepEqual(await testChange(path, facts, facts.replace('[Fact] void B', 'string S = $"{N\n[Fact] void B')), unread(path, 2, 1));
+});
+
+test('a regex after default, extends or for await (...), a TSX type parameter list and an HTML-like comment hide no removed test', async () => {
+  const two = "test('a', () => {});\ntest('b', () => {});\n";
+  const removes = /: removes test cases \(2 before, 1 after/;
+  const cases = [
+    ['src/web/src/x.test.ts', 'export default /[test(]/;'],
+    ['src/web/src/x.test.ts', 'class A extends /[test(]/.constructor {}'],
+    ['src/web/src/x.test.ts', 'async function f(y) { for await (const x of y) /[test(]/.exec(x); }'],
+    ['src/web/src/x.test.tsx', "interface Api { map: <T>(x: T) => T }\nconst close = '</T>', label = 'test(', done = 'x';"],
+    ['src/web/src/x.test.tsx', "type F = <T>(x: T) => T;\nconst s = '</T>', t = 'test(', u = 'x';"],
+    ['src/web/src/x.test.js', "<!-- test('b', () => {});"],
+    ['src/web/src/x.test.js', "x = 1\n--> test('b', () => {});"],
+  ];
+  for (const [path, line] of cases) {
+    const result = await testChange(path, two, `test('a', () => {});\n${line}\n`);
+    assert.equal(result.tier, 'escalate', line);
+    assert.match(result.reasons.join('\n'), removes, line);
+  }
+  // Ordinary JSX in a TSX test still reads as code around it. The attribute naming a test comes before the first JSX
+  // text, after which it would count on the base.
+  const tsx = 'src/web/src/x.test.tsx';
+  const jsx = "render(<Foo />);\nfunction F() { return <div title=\"it(\">b</div>; }\nconst e = expect(<div>a</div>);\n"
+    + "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("test('b', () => {});\n", '')), removesOne(tsx));
+});
+
+test('a test case the base scan reads as a regex or JSX text counts on the base, and on the head does not', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const removed = removesOne(path);
+  const head ="test('a', () => {});\n";
+  // Each line holds a real test call that a misread / would take for a regex: after a number ending in a dot, a
+  // private name spelled like a keyword, and a property name after a dot and a space or a line break.
+  for (const line of ["const x = 1./test('b', () => {})/2;", "this.#in / test('b', () => {}) / 2", "obj. default / test('b', () => {}) / 2",
+    "obj.\n  default / test('b', () => {}) / 2"]) {
+    assert.deepEqual(await testChange(path, `${head}${line}\n`, head), removed, line);
+  }
+  // Read as JavaScript reads them, each divides, so the test call counts as code on both sides and a rename merges.
+  for (const line of ["const x = 1./test('b', () => {})/2;", "this.#in / test('b', () => {}) / 2", "obj. default / test('b', () => {}) / 2",
+    "obj.\n  default / test('b', () => {}) / 2", "obj./**/default / test('b', () => {}) / 2", "const y = 1.5e3 / test('b', () => {}) / 2;"]) {
+    const spec = `${head}${line}\n`;
+    assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []}, line);
+  }
+  // On the head a regex that names a test hides no removed one.
+  assert.deepEqual(await testChange(path, `${head}test('b', () => {});\n`, `${head}const r = /it(?:x)/;\n`), removed);
+  // A real regex or JSX text naming a test on the base over-escalates, which is the safe way to be wrong.
+  const tsx = 'src/web/src/x.test.tsx';
+  for (const line of ['const r = /it(?:x)/;', 'const e = <p>it(</p>;']) {
+    const spec = `${line}\n${head}`;
+    assert.deepEqual(await testChange(tsx, spec, spec.replace("'a'", "'a2'")), removesOne(tsx), line);
+  }
+});
+
+test('a test call the base hides in a string, template or comment after a regex counts there, since a misread regex shifts them', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const head = "test('a', () => {});\n";
+  // Each / after `Array<number>` divides, but a scan reading it as a regex shifts every later quote, backtick or /* by
+  // one, so the real test('b') lands in a string, a template running onto the next line or a block comment.
+  for (const lines of [
+    "const n = x as Array<number> / 2; const r = /\"/; test('b', () => {}); const q = '\"'; // '",
+    "const n = x as Array<number> / 2; const r = /`/;\ntest('b', () => {}); const s = '`'; // '",
+    "const n = x as Array<number> / 2; const r = /'/; const s = '/*';\ntest('b', () => {}); // */",
+  ]) {
+    assert.deepEqual(await testChange(path, `${head}${lines}\n`, head), removesOne(path), lines);
+  }
+  // A string naming a test after a real regex on the base over-escalates, which is the safe way to be wrong; one
+  // before the first regex does not.
+  const after = `${head}const r = /x/;\nconst s = 'it(';\n`;
+  assert.deepEqual(await testChange(path, after, after.replace("'a'", "'a2'")), removesOne(path));
+  const before = `${head}const s = 'it(';\nconst r = /x/;\n`;
+  assert.deepEqual(await testChange(path, before, before.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+});
+
+test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {
+  const path = 'src/web/src/x.test.tsx';
+  const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it</p>;\n"
+    + "const f = <><Ui.Row><b>it</b><br/></ Ui.Row ></>;\n"
+    + "const s = `it's ${'}'} ${`${n}`}`;\nconst r = /[/]\\/'/g;\nconst q = a++ / 2;\nconst o = {a: 1};\n"
+    + "expect(a < b).toBe(arr[0] / 2 < f(x));\nif (!/'/.test(s) && x) {}\nconst l = items.map(i => <li>{i}</li>);\n"
+    + "test('a', () => {});\ntest('b', () => {});\n";
+  assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
+  const csharp = 'class PricingTests{\n#region don\'t\n#endregion\nchar Q = \'\\\'\';\nstring S = $"{{ {N} }}";\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange('tests/X/PricingTests.cs', csharp, csharp.replace('void A', 'void A2')), {tier: 'auto', reasons: []});
 });
 
 test('removing a test( from a web spec that stays escalates and names the file', async () => {
@@ -492,4 +702,19 @@ test("called from a project, Triphammer's engine at the pinned commit classifies
   const missing = tierInRepo({'.triphammer/risk-tier.json': sampleRules}, {'lib/b.txt': 'b'}, {...env, TRIPHAMMER_REF: unknown});
   assert.equal(missing.code, 2, missing.error);
   assert.deepEqual(JSON.parse(missing.output), {tier: 'escalate', reasons: [`${unknown} has no scripts/risk-tier.mjs yet`]});
+});
+
+test('rules match a non-ASCII path as written, not as git quotes it, and a renamed migration keeps both sides', () => {
+  const migration = 'database/migrations/V0001__café.sql';
+  const base = {'scripts/risk-tier.mjs': engine, '.triphammer/risk-tier.json': exampleRules, [migration]: 'create table t;\n'};
+  const immutable = 'applied migrations are immutable; add a new migration';
+  const edited = tierInRepo(base, {[migration]: 'create table u;\n'});
+  assert.equal(edited.code, 3, edited.error);
+  assert.deepEqual(JSON.parse(edited.output), {tier: 'blocked', reasons: [`${migration}: ${immutable}`]});
+  // Renamed to a new non-ASCII name with a tab in it: the old path is a deletion and the new one an addition.
+  const renamed = 'database/migrations/V0002__naïve\there.sql';
+  const moved = tierInRepo(base, {[migration]: null, [renamed]: 'create table t;\n'});
+  assert.equal(moved.code, 3, moved.error);
+  assert.deepEqual(JSON.parse(moved.output), {tier: 'blocked', reasons: [`${migration}: ${immutable}`,
+    `${renamed}: outside the areas that merge automatically`]});
 });

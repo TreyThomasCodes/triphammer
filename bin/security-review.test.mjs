@@ -108,6 +108,16 @@ test('a pull request with more than 100 files is reviewed when its only trigger 
   assert.match(r.codex().args.at(-1), /src\/Domain\/File149\.cs, bin\/ticket-runner$/);
 });
 
+test('a pull request that only renames a file out of a trigger path is reviewed', async t => {
+  const r = reviewSetup(t);
+  r.gh.json('files.json', [{filename: 'docs/risk-tier.yml', previous_filename: '.github/workflows/risk-tier.yml',
+    status: 'renamed'}]);
+  const result = await r.review();
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(r.comments().length, 1);
+  assert.match(r.codex().args.at(-1), /changes, and whatever they call: docs\/risk-tier\.yml, \.github\/workflows\/risk-tier\.yml$/);
+});
+
 test('a file list gh cannot read exits 1 with the reason, and reviews and comments nothing', async t => {
   const r = reviewSetup(t);
   r.gh.respond({[`api --paginate repos/${repo}/pulls/5/files`]: {stderr: 'gh: network down\n', exit: 1}});
@@ -195,6 +205,7 @@ test('a comment it cannot record exits 1 saying so after posting', async t => {
 
 test('a review skipped for budget posts a skipped note that never reads as a clean review', async t => {
   const r = reviewSetup(t);
+  r.config({CODEX_WEEKLY_CAP: '25'});
   r.pastRuns(...Array.from({length: 25}, (_, i) => 6 * hour + i * 6 * hour));
   const result = await r.review();
   assert.equal(result.code, 0, result.stderr);
@@ -267,6 +278,7 @@ test('--full-area audits the whole area as a run of weight 4, writes the output 
   assert.deepEqual(r.gh.calls(), []);
 
   rmSync(output);
+  r.config({CODEX_WEEKLY_CAP: '25'});
   r.pastRuns(...Array.from({length: 22}, (_, i) => 6 * hour + i * 6 * hour));
   result = await r.run(['--full-area', '--commit', r.head, '--output', output, '--repo', r.checkout]);
   assert.equal(result.code, 4, 'the exit status passes through');
@@ -336,7 +348,7 @@ test('with the codex module off, or without CODEX_SECURITY_MODEL, it exits 2 nam
   for (const [settings, message] of [
     [{MODULES: null}, file => `security-review: the codex module is off; add it to MODULES in ${file} (bin/README.md)`],
     [{MODULES: 'demo,qwen-audit'}, file => `security-review: the codex module is off; add it to MODULES in ${file} (bin/README.md)`],
-    [{CODEX_SECURITY_MODEL: null, CODEX_AUDIT_MODEL: 'codex-audit-test'}, file => `security-review: ${file}: the codex module needs CODEX_SECURITY_MODEL`],
+    [{CODEX_SECURITY_MODEL: null, CODEX_AUDIT_MODEL: 'codex-audit-test'}, file => `security-review: ${file}: the codex module needs CODEX_SECURITY_MODEL; triphammer update writes its default`],
   ]) {
     const r = reviewSetup(t);
     r.config(settings);

@@ -159,7 +159,7 @@ def humanizer_gap(session_id):
 
 
 def load_guard():
-    """agent-guard.py beside this hook, whose shell parsing (HEREDOC, tokenize, pipelines, strip_prefix) finds
+    """agent-guard.py beside this hook, whose shell parsing (strip_heredocs, tokenize, pipelines, strip_prefix) finds
     the commands here."""
     sys.dont_write_bytecode = True  # no __pycache__ in the plugin's directory
     spec = importlib.util.spec_from_file_location(
@@ -202,87 +202,6 @@ def read_options(args, short_values, long_values, attached_only=""):
     return pairs, False
 
 
-def strip_heredocs(cmd, heredoc):
-    """agent-guard's strip_heredocs, minding quotes: a `<<WORD` (agent-guard's HEREDOC pattern) counts only outside
-    quotes and comments, also inside a $( ) or backquotes in a double-quoted word, and its body starts after the next
-    unquoted newline. Each becomes `<<` and a marker word naming its body; returns (text, bodies)."""
-    out, bodies, pending, stack, i, n = [], [], [], ["code"], 0, len(cmd)
-    while i < n:
-        c, top = cmd[i], stack[-1]
-        if top == "'":
-            if c == "'":
-                stack.pop()
-            out.append(c)
-            i += 1
-            continue
-        if c == "\\":
-            out.append(cmd[i:i + 2])
-            i += 2
-            continue
-        if cmd.startswith("$((", i):
-            stack.append("((")
-            out.append("$((")
-            i += 3
-            continue
-        if cmd.startswith("$(", i):
-            stack.append("(")
-            out.append("$(")
-            i += 2
-            continue
-        if c == "`":
-            if top == "`":
-                stack.pop()
-            else:
-                stack.append("`")
-        elif top == '"':
-            if c == '"':
-                stack.pop()
-        elif top == "((":
-            if cmd.startswith("))", i):
-                stack.pop()
-                out.append("))")
-                i += 2
-                continue
-            if c == "(":
-                stack.append("(")
-        elif c in "'\"":
-            stack.append(c)
-        elif c == "(":
-            stack.append("(")
-        elif c == ")" and top == "(":
-            stack.pop()
-        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()<>"):
-            end = cmd.find("\n", i)
-            end = n if end < 0 else end
-            out.append(cmd[i:end])
-            i = end
-            continue
-        elif c == "<" and (match := heredoc.match(cmd, i)):
-            pending.append((match.group(1), match.group(3)))
-            out.append(f"<< \x00{len(bodies) + len(pending) - 1}\x00")
-            i = match.end()
-            continue
-        elif c == "\n" and pending:
-            out.append(c)
-            i += 1
-            for dash, word in pending:
-                body = []
-                while i < n:
-                    end = cmd.find("\n", i)
-                    end = n if end < 0 else end
-                    line, i = cmd[i:end], end + 1
-                    if (line.lstrip("\t") if dash else line) == word:
-                        break
-                    body.append(line)
-                bodies.append("\n".join(body))
-            pending = []
-            continue
-        out.append(c)
-        i += 1
-    bodies += [""] * len(pending)  # a heredoc on the command's last line has an empty body
-    return "".join(out), bodies
-
-
 def recover_tokens(guard, text):
     """text's tokens. When a quote never closes, bash stops with a syntax error and runs no command of that list;
     its commands are still read, as if the quote closed at the end, so a stray quote cannot hide one from the check."""
@@ -299,7 +218,7 @@ def posting_commands(cmd, cwd):
     after any assignments and wrappers: options as read_options returns them, heredoc the first heredoc body it reads
     (also one inside a word, as in --body "$(cat <<'EOF' ...)"), directory the one its relative files are read from."""
     guard = load_guard()
-    text, bodies = strip_heredocs(cmd, guard.HEREDOC)
+    text, bodies = guard.strip_heredocs(cmd)
     for pipeline, _ in guard.pipelines(recover_tokens(guard, text)):
         for command in pipeline:
             words = guard.strip_prefix(command.words)

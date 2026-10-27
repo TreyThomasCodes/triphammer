@@ -1,7 +1,8 @@
 // The `codex` the local-audit and security-review tests put first on PATH (fixture.mjs's fakeCodex):
 // `node fake-codex.mjs <dir> <codex arguments>`. It appends each call's arguments to <dir>/codex-calls.
 //
-// `codex login status` prints an account line (which local-audit must not pass on) and exits with
+// `codex login status` prints an account line (which local-audit must not pass on) and exits with the number in
+// <dir>/login-exit, for callers that clear the environment (provision-project's as_user), else with
 // $FAKE_CODEX_LOGIN_EXIT (default 0). `codex --version` prints a version.
 //
 // `codex exec` writes <dir>/codex.json with its arguments, environment, working directory and standard input, and
@@ -14,7 +15,7 @@
 // - usage: the turn fails on the usage limit, exit 1;
 // - fail: the stream disconnects, exit 1;
 // - hang: sleeps a minute, for the timeout.
-import {appendFileSync, readFileSync, writeFileSync} from 'node:fs';
+import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {gitSnapshot} from './fixture.mjs';
 
@@ -23,7 +24,8 @@ appendFileSync(join(dir, 'codex-calls'), `${JSON.stringify(args)}\n`);
 
 if (args[0] === 'login' && args[1] === 'status') {
   process.stdout.write('Logged in using ChatGPT as fake-account@example.invalid\n');
-  process.exit(Number(process.env.FAKE_CODEX_LOGIN_EXIT ?? 0));
+  const file = join(dir, 'login-exit');
+  process.exit(Number(existsSync(file) ? readFileSync(file, 'utf8') : process.env.FAKE_CODEX_LOGIN_EXIT ?? 0));
 }
 if (args[0] === '--version') {
   process.stdout.write('codex-cli 0.1.0\n');
