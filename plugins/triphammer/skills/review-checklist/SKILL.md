@@ -55,3 +55,12 @@ A check that reads command text before tokenizing it (a line-based heredoc scan,
 - Does a parse failure mean "allow" in a rule that refuses? It must refuse, or check the raw text instead.
 
 Found in: a guard hook's heredoc scan, which read `<<EOF` inside a quoted pull request body as a heredoc and let the command past its rule.
+
+## 10. Option tables that miss a value-taking option
+
+A parser that skips a command's options before judging its operands needs the list of options that take a value. An option missing from that list makes the parser read its value as the first operand, so the real operand (a file the command writes, a program it runs) is never judged.
+
+- For each table of value-taking options (short letters and long names), compare it with the installed tool's `--help` or man page. Is every option that takes a value there, in both spellings?
+- Is there a test that puts a value-taking option before the operand, and does the command still get checked?
+
+Found in: a guard hook's `script` entry, which lacked `-m` (`--logging-format`), so `script -q -m advanced -c true ~/.bashrc` read `advanced` as the file and let the write through.
