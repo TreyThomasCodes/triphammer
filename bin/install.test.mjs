@@ -4,7 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {git, here, interrupt, lines} from './fixture.mjs';
+import {fakeSudo, git, here, interrupt, lines} from './fixture.mjs';
 import {readdir} from './provision-fixture.mjs';
 
 const script = join(here, '..', 'install.sh');
@@ -46,8 +46,7 @@ function setup(t, uid = '1000') {
   const bin = join(dir, 'fakes');
   mkdirSync(bin);
   writeFileSync(join(bin, 'id'), `#!/bin/sh\necho ${uid}\n`, {mode: 0o755});
-  writeFileSync(join(bin, 'sudo'), `#!/bin/sh\necho "$*" >> '${sudoLog}'\n[ "$1" = -v ] && exit 0\nUNDER_SUDO=yes exec "$@"\n`,
-    {mode: 0o755});
+  fakeSudo(bin, {log: sudoLog});
   const tmp = join(dir, 'tmp');
   mkdirSync(tmp);
   const env = {PATH: `${bin}:${process.env.PATH}`, HOME: dir, TMPDIR: tmp, TRIPHAMMER_REPO: 'example-owner/triphammer',

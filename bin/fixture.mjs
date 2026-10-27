@@ -63,6 +63,24 @@ export function fakeCommand(bin, name, dir, fake = name) {
   writeFileSync(join(bin, name), `#!/bin/sh\nexec '${process.execPath}' '${join(here, `fake-${fake}.mjs`)}' '${dir}' "$@"\n`, {mode: 0o755});
 }
 
+// Puts a fake `sudo` in `bin` that runs its command as the caller with UNDER_SUDO=yes: `-v` succeeds, `-u <user>` and
+// `-iu <user>` are dropped, and with `loginShell` `-iu` hands its command to bash as sudo hands it to the login shell,
+// each character escaped but alphanumerics, _, - and $. With `log`, each call appends `prefix` and its arguments there.
+export function fakeSudo(bin, {log, prefix = '', loginShell = false} = {}) {
+  writeFileSync(join(bin, 'sudo'), `#!/bin/sh
+${log ? `echo "${prefix}$*" >> '${log}'` : ''}
+[ "$1" = -v ] && exit 0
+if [ "$1" = -iu ]; then
+  shift 2
+${loginShell ? `  command=""
+  for arg; do command="$command $(printf '%s' "$arg" | sed 's/[^A-Za-z0-9_$-]/\\\\&/g')"; done
+  UNDER_SUDO=yes exec bash -c "$command"
+` : ''}fi
+[ "$1" != -u ] || shift 2
+UNDER_SUDO=yes exec "$@"
+`, {mode: 0o755});
+}
+
 // A fake command `name` (fake-answers.mjs) in `bin`, recording into `dir` and answering from `answers` (argument
 // prefix -> response, '' for every call).
 export function fakeAnswers(bin, name, dir, answers) {
