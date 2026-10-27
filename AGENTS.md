@@ -25,7 +25,7 @@ that hold the rest.
 ## Rules that apply everywhere
 
 - **No project in the core.** Nothing outside a project's `.triphammer/` and its config file names a project, a
-  machine, a person or a model. Examples in docs and tests use placeholders.
+  machine or a person. Examples in docs and tests use placeholders.
 - **Agents never install persistence on the machine** or change its brakes, units, config or state. The owner installs.
 - **Never acquire, extract or disclose credentials** beyond the configured workflow. Config holds paths to secrets,
   never values.

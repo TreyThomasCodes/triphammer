@@ -138,7 +138,7 @@ is on.`), and the `triphammer:ticket-run` and `triphammer:upkeep` skills skip th
 | --- | --- | --- |
 | `demo` | After each session `ticket-runner` publishes the demos it left (`publish-demos`), and each tick it refreshes the gallery (`demo-publish --reindex`). The `triphammer:ticket-run` skill has a `demo` agent write a walkthrough of a web change when the project also declares `"demos": true`. | `python3`, `ffmpeg` (videos become H.264 MP4), `node` for `demo-gallery`, which serves `DEMO_GALLERY_DIR` (the `demo-gallery@<project>` unit, see Install), and whatever makes that reachable at `DEMO_URL`. |
 | `qwen-audit` | Upkeep's second-model audit with a local Qwen model (`local-audit --model qwen`). | An Anthropic Messages API server for the model at `QWEN_BASE_URL`, its key in the file `QWEN_KEY_FILE` names, and `claude`. |
-| `codex` | Upkeep's Codex audit (`local-audit --model codex`), its monthly security audit (`security-review --full-area`), and after each session the security review of the run's pull requests (`security-review --pr`). | `codex`, logged in, and `bwrap` for its sandbox (see Codex below). |
+| `codex` | Upkeep's Codex audit (`local-audit --model codex`), its monthly security audit (`security-review --full-area`), and after each session the security review of the run's pull requests (`security-review --pr`). | `codex`, logged in, and `bwrap` for its sandbox (see Codex below). Its settings have defaults, which `provision-project` writes into the config. |
 
 | Setting | Module | What it is | Checked form |
 | --- | --- | --- | --- |
@@ -149,15 +149,23 @@ is on.`), and the `triphammer:ticket-run` and `triphammer:upkeep` skills skip th
 | `QWEN_BASE_URL` | `qwen-audit`, required | The model server's Anthropic Messages API | `http://` or `https://`, no blanks |
 | `QWEN_KEY_FILE` | `qwen-audit`, required | The file that holds the server's API key; the config never holds the key | an absolute path |
 | `QWEN_MODEL` | `qwen-audit`, required | The model name the server serves | letters, digits and `._:/-` |
-| `CODEX_AUDIT_MODEL` | `codex`, required by `local-audit --model codex` without `--codex-model` | The model of upkeep's Codex audit | letters, digits and `._:/-` |
-| `CODEX_SECURITY_MODEL` | `codex`, required by `security-review` | The model of the security reviews | letters, digits and `._:/-` |
-| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 25) | a whole number, no leading zero |
-| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 10) | a whole number from 0 to 100, no leading zero |
-| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 5) | a whole number from 0 to 100, no leading zero |
+| `CODEX_AUDIT_MODEL` | `codex`, required by `local-audit --model codex` without `--codex-model` | The model of upkeep's Codex audit (default `gpt-6.1-sol`) | letters, digits and `._:/-` |
+| `CODEX_SECURITY_MODEL` | `codex`, required by `security-review` | The model of the security reviews (default `gpt-daybreak-blue-latest`) | letters, digits and `._:/-` |
+| `CODEX_WEEKLY_CAP` | `codex`, optional | Codex runs allowed in 7 days (default 500) | a whole number, no leading zero |
+| `CODEX_FLOOR_PERCENT` | `codex`, optional | The estimated share of the 5-hour window to leave unused (default 0) | a whole number from 0 to 100, no leading zero |
+| `CODEX_RUN_PERCENT` | `codex`, optional | The estimated share of the 5-hour window one run uses (default 1) | a whole number from 0 to 100, no leading zero |
+
+The `codex` module's defaults are defined once, as `codex_defaults` in `config.sh`. When the module is on,
+`provision-project` (through `triphammer add` and `triphammer update`) writes the default of each of the five settings
+the config lacks, as if the owner had given it with `--set`; a value the config holds or `--set` gives stays, and
+`--unset` of one while the module stays on writes its default again. From then on the config holds the value, so a
+changed default reaches only a config that lacks the setting. `local-audit` falls back to the same defaults for a
+config without the three limits.
 
 A module's settings may stay in the file while the module is off. A script that needs a module that is off, or a
 required setting the config leaves out, exits 2 naming the module or the setting (`the codex module is off; add it to
-MODULES in <file>`, `<file>: the qwen-audit module needs QWEN_MODEL`).
+MODULES in <file>`, `<file>: the qwen-audit module needs QWEN_MODEL`); for a `codex` setting the message adds
+`triphammer update writes its default`.
 
 **The project file** `.triphammer/project.json` holds the project's own data. Each script reads it from the project's
 main checkout (`CHECKOUT`, or the `--repo` given to `security-review`), never from a run's worktree, except `local-audit`,
@@ -406,21 +414,24 @@ Prerequisites on the machine: `/usr/bin/bwrap` with the AppArmor profile at `/et
 the owner's ChatGPT account. The script uses only the exit status of `codex login status`, and never reads, copies or
 prints Codex's auth files.
 
-Codex runs on the owner's ChatGPT Plus plan, so the script limits them. It records the start of each run (whatever its
-outcome) in `~/.local/state/local-audit/codex-runs` (`$XDG_STATE_HOME/local-audit` when that is set), and before a run:
+Codex runs on the owner's ChatGPT subscription, which exists only for these runs, so the defaults keep the weekly cap
+and the 5-hour estimate from holding runs back before Codex's own usage limit does, which the script reports as exit 4
+(`Codex: usage limit`). Lower limits stay available through the settings below. It records the start of each run
+(whatever its outcome) in `~/.local/state/local-audit/codex-runs` (`$XDG_STATE_HOME/local-audit` when that is set), and before a run:
 
 - skips it when the runs in the last 7 days reach the weekly cap;
 - skips it when `100 - run_percent * (runs in the last 5 hours + 1)` is under the floor: `codex exec --json` reports no
   usage, so each run is estimated to use `run_percent` of the 5-hour window.
 
 Each limit comes from its environment variable, else from a `key=value` line in
-`~/.local/state/local-audit/codex-settings` (`#` starts a comment), else from the Triphammer config, else from its default:
+`~/.local/state/local-audit/codex-settings` (`#` starts a comment), else from the Triphammer config, else from its default
+(`codex_defaults` in `config.sh`, the defaults `provision-project` writes; Modules):
 
 | `codex-settings` key | Variable | Config setting | Default |
 | --- | --- | --- | --- |
-| `weekly_cap` | `CODEX_AUDIT_WEEKLY_CAP` | `CODEX_WEEKLY_CAP` | 25 runs |
-| `floor_percent` | `CODEX_AUDIT_FLOOR_PERCENT` | `CODEX_FLOOR_PERCENT` | 10 (% of the 5-hour window left) |
-| `run_percent` | `CODEX_AUDIT_RUN_PERCENT` | `CODEX_RUN_PERCENT` | 5 (% of the 5-hour window per run) |
+| `weekly_cap` | `CODEX_AUDIT_WEEKLY_CAP` | `CODEX_WEEKLY_CAP` | 500 runs |
+| `floor_percent` | `CODEX_AUDIT_FLOOR_PERCENT` | `CODEX_FLOOR_PERCENT` | 0 (% of the 5-hour window left) |
+| `run_percent` | `CODEX_AUDIT_RUN_PERCENT` | `CODEX_RUN_PERCENT` | 1 (% of the 5-hour window per run) |
 
 The result counts as an audit only when the session exited 0, at least one command succeeded in the sandbox, no error
 event names the sandbox or a usage limit, and the result file is not empty. A sandbox that fails every command can
@@ -770,8 +781,7 @@ value, and prints no file's content and no command's output:
 ```sh
 triphammer add <owner>/<repo>
 triphammer add <owner>/<repo> /srv/<project> --modules demo,codex --set OWNER=<owner-login> \
-  --set DEMO_GALLERY_DIR=/home/triphammer/demo-gallery --set DEMO_URL=http://127.0.0.1:8788/ \
-  --set CODEX_AUDIT_MODEL=<model> --set CODEX_SECURITY_MODEL=<model>
+  --set DEMO_GALLERY_DIR=/home/triphammer/demo-gallery --set DEMO_URL=http://127.0.0.1:8788/
 ```
 
 `triphammer add` asks sudo for the password once, clones Triphammer's repository (from the machine file) into a
@@ -786,7 +796,7 @@ which leaves out the units `start` enables and says so (Doctor), and prints the 
 | --- | --- |
 | `<owner/name>` | The repository. Its config is `~/.config/triphammer/<name>.conf`, with `<name>` from its `.triphammer/project.json`, and it gets its own pair of timers. |
 | `<checkout>` | Where to clone it, default `/srv/<repository name>`, or Triphammer's checkout when it is Triphammer's own repository. |
-| `--modules <m,...>` | The modules the project turns on (`MODULES`, Configuration), in place of those its config has; `--modules ''` turns every module off. Each module's required settings must come with it or be in the config already. |
+| `--modules <m,...>` | The modules the project turns on (`MODULES`, Configuration), in place of those its config has; `--modules ''` turns every module off. Each module's required settings must come with it or be in the config already, except the `codex` module's, whose defaults it writes (Modules). |
 | `--set KEY=VALUE` | One more setting of its config, any optional one (Configuration, Modules) or `STATE_DIR`, which defaults to `~/.local/state/triphammer/projects/<name>`. |
 | `--unset KEY` | Removes a setting the config has, any but `REPO`, `CHECKOUT` and `APP_AUTHOR`, and not one the same run gives with `--set`, nor `MODULES` with `--modules`. A `STATE_DIR` removed goes back to its default. |
 | `--app-author <login>` | `APP_AUTHOR`. Without it, the config's `APP_AUTHOR`, or else `app/<slug>` with the App's slug, which `github-app-token app-slug` reads from the App's files; when they are not placed yet it stops and says so. |
