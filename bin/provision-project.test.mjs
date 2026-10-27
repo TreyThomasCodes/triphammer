@@ -145,6 +145,19 @@ test('a commit identity the user has already is kept, and one given by an accoun
   assert.match(m.project(...args).stdout, /^Nothing to change/m);
 });
 
+test("a config's APP_AUTHOR with its app/ prefix in another case still commits as the App's bot", t => {
+  const m = ready(t, {'example/example-project': projectFiles('example-project')}, {app: false});
+  const config = join(m.home, '.config/triphammer/example-project.conf');
+  mkdirSync(join(m.home, '.config/triphammer'), {recursive: true});
+  writeFileSync(config, `REPO=example/example-project\nCHECKOUT=${join(m.root, 'example-project')}\nAPP_AUTHOR=App/example-agents\n`,
+    {mode: 0o600});
+  const result = m.project('example/example-project');
+  assert.equal(result.status, 0, result.output);
+  assert.equal(gitConfig(m, 'user.name'), 'example-agents[bot]');
+  assert.equal(gitConfig(m, 'user.email'), 'example-agents[bot]@users.noreply.github.com');
+  assert.match(readFileSync(config, 'utf8'), /^APP_AUTHOR=App\/example-agents$/m);
+});
+
 test('two projects, with their modules, get one config and their own extras each, and a second run changes nothing', t => {
   const m = ready(t, {
     'example/example-project': projectFiles('example-project'),
