@@ -5,17 +5,18 @@ import {join} from 'node:path';
 import {here} from './fixture.mjs';
 
 // GitHub compares logins, owners and repository names in any case, and so does the rest of Triphammer. A comparison
-// of one with ==, !=, grep -Fx or a jq `== $owner` must lowercase both sides (ascii_downcase, .lower(), ${x,,}), or
-// carry a `# case-sensitive: <reason>` comment saying why that identity is compared as written (review-checklist
-// class 10). This is a line-based heuristic: it does not see `[ "$a" = "$b" ]`, a comparison whose operands span
-// lines, a value copied into a variable without such a name, or a case statement.
+// of one with ==, !=, `[ $a = $b ]`, grep -Fx or a jq `== $owner` must lowercase both sides (ascii_downcase, .lower(),
+// ${x,,}), or carry a `# case-sensitive: <reason>` comment saying why that identity is compared as written
+// (review-checklist class 10). This is a line-based heuristic: it does not see a comparison whose operands span lines,
+// a lone = after && or -a inside one test bracket, `[ $a = $b ]` when only one side names an identity, a value copied
+// into a variable without such a name, or a case statement.
 const repository = join(here, '..');
 
 // Lower-case names count anywhere, alone or as part of a snake_case name (tri_repo, app_login), but not inside a
-// hyphenated word (needs-owner, owner-approval: label and check names) or a longer word (loginctl, repository).
+// hyphenated word (needs-owner, owner-approval: label and check names) or a longer word (loginctl, repositories).
 // `app`, the App's login (APP_AUTHOR), counts only alone: app_dir and app_id are no logins. Upper-case names count
-// only as expansions ($REPO, ${OWNER}, $APP_AUTHOR): bare, they are setting names (" REPO CHECKOUT ").
-const identity = /(?<![\w-])(?:(?:\w*_)?(?:owner|login|repo|author)(?:_\w*)?|app)(?![\w-])|\$\{?(?:\w*_)?(?:OWNER|REPO|AUTHOR)(?:_\w*)?\b/;
+// only as expansions ($REPO, ${OWNER}, $HEAD_REPOSITORY): bare, they are setting names (" REPO CHECKOUT ").
+const identity = /(?<![\w-])(?:(?:\w*_)?(?:owner|login|repo|repository|author)(?:_\w*)?|app)(?![\w-])|\$\{?(?:\w*_)?(?:OWNER|REPO|REPOSITORY|AUTHOR)(?:_\w*)?\b/;
 const lowered = /ascii_downcase|\.lower\(\)|\.casefold\(\)|\.toLowerCase\(\)|,,\}|\btr\s+(?:'\[:upper:\]'\s+'\[:lower:\]'|A-Z\s+a-z|'A-Z'\s+'a-z')/;
 const annotated = /#\s*case-sensitive:\s*\S/;
 const openers = '([{', closers = ')]}';
@@ -42,9 +43,14 @@ function operand(line, from, step) {
 function caseSensitiveComparison(line) {
   const trimmed = line.trim();
   if (trimmed.startsWith('#') || trimmed.startsWith('//') || annotated.test(line)) return null;
-  for (const m of line.matchAll(/(?<![<>=!])(?:==|!=)=?/g)) {
+  for (const m of line.matchAll(/(?<![<>=!])(?:==|!=)=?|(?<=\s)=(?=\s)/g)) {
     const left = operand(line, m.index - 1, -1), right = operand(line, m.index + m[0].length, 1);
-    if ((identity.test(left) || identity.test(right)) && !(lowered.test(left) && lowered.test(right)))
+    // A lone ` = ` counts only as the first operator of a test bracket, `[ a = b ]` or `[[ a = b ]]`, not as an
+    // assignment, and only when both operands name an identity: shell compares a value with a literal this way.
+    const bracket = m[0] === '=';
+    if (bracket && line[m.index - 1 - left.length] !== '[') continue;
+    if ((bracket ? identity.test(left) && identity.test(right) : identity.test(left) || identity.test(right)) &&
+        !(lowered.test(left) && lowered.test(right)))
       return `${left.trim()} ${m[0]} ${right.trim()}`;
   }
   for (const m of line.matchAll(/\bgrep((?:\s+--?[\w-]+)+)([^|;&)]*)/g)) {
@@ -79,6 +85,10 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
     'if [ "$by" == "$APP_AUTHOR" ]; then',
     'grep -qxF "REPO=$repo" "$config"',
     'grep -Fx -- "$REPO" <<< "$installed"',
+    'if [ "$WORKFLOW_REPOSITORY" = "$REPOSITORY" ]; then',
+    '[ -n "$a" ] && [[ "$head_repository" = "${repository}" ]] && echo same',
+    'if [ "$HEAD_REPOSITORY" != "$REPOSITORY" ]; then',
+    `jq '.[] | select(.repository.full_name == $repository)'`,
   ];
   for (const line of flagged) assert.ok(caseSensitiveComparison(line), `flagged: ${line}`);
   const passed = [
@@ -97,17 +107,40 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
     '[[ "$tri_repo" =~ $pattern && "$home" == /* ]]',
     'if [ "$(stat -c %a -- "$app_dir")" != 700 ]; then',
     'same_repository "$1" "$served" && grep -qsxF -- "$line" "$state/findings"',
+    'if [ "${WORKFLOW_REPOSITORY,,}" = "${REPOSITORY,,}" ]; then',
+    // A lone = outside a test bracket assigns, and inside one against a literal or a uid it compares no identity.
+    'repository = args.repository',
+    'if [ "$owner_type" = Organization ]; then',
+    '[ "$owner" = "$(id -u)" ] || problem "$path is not owned by $(id -un)"',
   ];
   for (const line of passed) assert.equal(caseSensitiveComparison(line), null, `passed: ${line}`);
 });
 
+// Comparisons the scan finds in files the agents' App cannot change (.github/workflows/), which only the owner can
+// lowercase or annotate. Each entry is the file and the exact trimmed line; once the owner fixes the line, the entry
+// matches nothing and the scan fails until it is removed.
+const owed = [
+  // github.repository against job.workflow_repository, equal in Triphammer's own runs. Both name the same repository
+  // as GitHub records it, but were they ever to differ in case, the run would take its scripts from WORKFLOW_SHA, a
+  // commit the pull request can change, instead of the default branch.
+  ['.github/workflows/risk-tier.yml', 'if [ "$WORKFLOW_REPOSITORY" = "$REPOSITORY" ]; then'],
+  // github.repository against the pull request's head.repo.full_name. A difference in case leaves the owner's pull
+  // request waiting for approval, the safe side.
+  ['.github/workflows/risk-tier.yml',
+    'if [ "${PULL_REQUEST_AUTHOR,,}" = "${OWNER,,}" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then'],
+];
+
 test('no script or workflow compares a login, owner or repository name case-sensitively', () => {
   const files = scanned();
   assert.ok(files.includes('bin/ticket-runner') && files.includes('.github/workflows/risk-tier.yml'), 'scans the tree');
+  const unused = new Set(owed.map(entry => entry.join('\0')));
   const hits = files.flatMap(file => readFileSync(join(repository, file), 'utf8').split('\n').flatMap((line, i) => {
     const why = caseSensitiveComparison(line);
+    if (why && unused.delete(`${file}\0${line.trim()}`)) return [];
     return why ? [`${file}:${i + 1}: ${why}`] : [];
   }));
+  assert.deepEqual([...unused].map(entry => entry.replace('\0', ': ')), [],
+    'these owed comparisons are fixed or gone, so remove their entries from `owed`');
   assert.deepEqual(hits, [], 'compare logins, owners and repositories in any case, with ascii_downcase, .lower() or ' +
     '${x,,} on both sides, or end the line with `# case-sensitive: <reason>`:\n' + hits.join('\n'));
 });

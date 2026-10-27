@@ -63,7 +63,7 @@ A health check, brake or gate vouches for code that runs later. It must read the
 - Does a doctor or preflight run before the environment the real run sets up (its `PATH`, its credential helper, its variables), or with a token that cannot read what the run reads?
 - Does the check ask about the account the code acts as, or about another one?
 - Is a setting read from a different checkout or file than the one the service loads?
-- Is a login, owner or `owner/repo` compared with `==`, `!=` or `grep -Fx`, when GitHub compares them in any case? `bin/identity-case.test.mjs` catches this half mechanically: compare with `ascii_downcase`, `.lower()` or `${x,,}`, or end the line with `# case-sensitive: <reason>`.
+- Is a login, owner or `owner/repo` compared with `==`, `!=`, `[ "$a" = "$b" ]` or `grep -Fx`, when GitHub compares them in any case? `bin/identity-case.test.mjs` catches this half mechanically: compare with `ascii_downcase`, `.lower()` or `${x,,}`, or end the line with `# case-sensitive: <reason>`.
 
 Reproduce by making the two sources differ: run the check without the run's environment, spell the login in another case, or change the file the service loads and not the one the check reads. If the check's answer does not change, it reads the wrong source.
 
