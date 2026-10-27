@@ -313,9 +313,10 @@ test('a regex after default, extends or for await (...), a TSX type parameter li
     assert.equal(result.tier, 'escalate', line);
     assert.match(result.reasons.join('\n'), removes, line);
   }
-  // Ordinary JSX in a TSX test still reads as code around it.
+  // Ordinary JSX in a TSX test still reads as code around it. The attribute naming a test comes before the first JSX
+  // text, after which it would count on the base.
   const tsx = 'src/web/src/x.test.tsx';
-  const jsx = "render(<Foo />);\nconst e = expect(<div>a</div>);\nfunction F() { return <div title=\"it(\">b</div>; }\n"
+  const jsx = "render(<Foo />);\nfunction F() { return <div title=\"it(\">b</div>; }\nconst e = expect(<div>a</div>);\n"
     + "test('a', () => {});\ntest('b', () => {});\n";
   assert.deepEqual(await testChange(tsx, jsx, jsx.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
   assert.deepEqual(await testChange(tsx, jsx, jsx.replace("test('b', () => {});\n", '')),
@@ -347,6 +348,28 @@ test('a test case the base scan reads as a regex or JSX text counts on the base,
     assert.deepEqual(await testChange(tsx, spec, spec.replace("'a'", "'a2'")),
       {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]}, line);
   }
+});
+
+test('a test call the base hides in a string, template or comment after a regex counts there, since a misread regex shifts them', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const head = "test('a', () => {});\n";
+  // Each / after `Array<number>` divides, but a scan reading it as a regex shifts every later quote, backtick or /* by
+  // one, so the real test('b') lands in a string, a template running onto the next line or a block comment.
+  for (const lines of [
+    "const n = x as Array<number> / 2; const r = /\"/; test('b', () => {}); const q = '\"'; // '",
+    "const n = x as Array<number> / 2; const r = /`/;\ntest('b', () => {}); const s = '`'; // '",
+    "const n = x as Array<number> / 2; const r = /'/; const s = '/*';\ntest('b', () => {}); // */",
+  ]) {
+    assert.deepEqual(await testChange(path, `${head}${lines}\n`, head),
+      {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]}, lines);
+  }
+  // A string naming a test after a real regex on the base over-escalates, which is the safe way to be wrong; one
+  // before the first regex does not.
+  const after = `${head}const r = /x/;\nconst s = 'it(';\n`;
+  assert.deepEqual(await testChange(path, after, after.replace("'a'", "'a2'")),
+    {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]});
+  const before = `${head}const s = 'it(';\nconst r = /x/;\n`;
+  assert.deepEqual(await testChange(path, before, before.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
 });
 
 test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {

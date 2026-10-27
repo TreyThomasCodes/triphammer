@@ -304,8 +304,10 @@ function scan(text, {csharp, jsx: readsJsx}) {
     return lineEnd.exec(text)?.index ?? text.length;
   };
   const out = text.split('');
-  // The spans blanked as regex literals or JSX text, whose bounds rest on how the token before them was read.
-  const guessed = [];
+  // Where the first span blanked as a regex literal or JSX text starts. Its bounds rest on how the token before it was
+  // read, as do the bounds of every string, comment, regex and template after it.
+  let guessedFrom = Infinity;
+  const guess = from => { guessedFrom = Math.min(guessedFrom, from); };
   const blank = (from, to) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' '; };
   const fail = () => { throw new Unreadable(); };
   const match = pattern => { pattern.lastIndex = i; return pattern.exec(text)?.[0]; };
@@ -582,7 +584,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       else if (c === '/') break;
     }
     blank(from, i - 1);
-    guessed.push([from, i - 1]);
+    guess(from);
   }
   // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
   // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends, or an opening tag
@@ -641,7 +643,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
     let from = i;
     const blankText = () => {
       blank(from, i);
-      guessed.push([from, i]);
+      guess(from);
     };
     for (;;) {
       const c = text[i];
@@ -677,9 +679,8 @@ function scan(text, {csharp, jsx: readsJsx}) {
     if (!(error instanceof Unreadable)) throw error;
     blank(top, text.length);
   }
-  // A span from top on lies in the unsure text, which holds it already.
-  const spans = guessed.filter(([from]) => from < top).map(([from, to]) => text.slice(from, to));
-  return {code: out.join(''), unsure: text.slice(top), guessed: spans};
+  // Text from top on is the unsure text, which counts already.
+  return {code: out.join(''), unsure: text.slice(top), top, guessedFrom: Math.min(guessedFrom, top)};
 }
 // C# lines that compile for certain when no preprocessor symbol is defined (the test projects define none this relies
 // on). Only the literal conditions true and false are known: a branch under any other condition (#if NEVER, #if !DEBUG)
@@ -727,15 +728,20 @@ function conditionalRegions() {
 // CRLF are rewritten, since a string may hold U+2028 and U+2029 (scan ends comments and regexes at them).
 const csharpLines = text => text.replace(/\r\n|[\r\u0085\u2028\u2029]/g, '\n');
 // The test cases a test file of the language declares in code (outside comments and literals, and in C# outside regions
-// that may not compile), those in the text the scanner cannot read, and those in the text it read as regex literals or
-// JSX text.
+// that may not compile), those in the text the scanner cannot read, and those it blanked as text (string, comment,
+// regex literal or JSX text) from the first regex literal or JSX text on: a misread regex or JSX text can shift where
+// every later string, comment and template starts and ends, so none of their bounds after it is certain.
 function countTestCases(path, language, text) {
   const {csharp} = language;
   const jsx = !csharp && !/\.[mc]?ts$/i.test(path);
-  const {code, unsure, guessed} = scan(csharp ? csharpLines(text) : text.replace(/\r\n?/g, '\n'), {csharp, jsx});
+  const read = csharp ? csharpLines(text) : text.replace(/\r\n?/g, '\n');
+  const {code, unsure, top, guessedFrom} = scan(read, {csharp, jsx});
   const count = part => part.match(language.testCase)?.length ?? 0;
-  return {code: count(csharp ? withoutDisabledRegions(code) : code), unsure: count(unsure),
-    guessed: guessed.reduce((sum, span) => sum + count(span), 0)};
+  // Blanking keeps offsets, so a declaration code holds starts at the same index in the raw text.
+  const inCode = new Set([...code.matchAll(language.testCase)].map(found => found.index));
+  const guessed = [...read.slice(0, top).matchAll(language.testCase)]
+    .filter(found => found.index >= guessedFrom && !inCode.has(found.index)).length;
+  return {code: count(csharp ? withoutDisabledRegions(code) : code), unsure: count(unsure), guessed};
 }
 
 // The #if, #elif and #else lines of a C# file as a count per line text (trimmed, whitespace runs collapsed, `# if` read
@@ -772,9 +778,11 @@ function conditionalProblem(path, status, language, source) {
 // Why a modified test file escalates, or undefined when it keeps at least as many test cases as on the base. Evidence
 // fails closed: a declaration in text the scanner cannot read counts on the base and not on the head, so a head that
 // hides one there escalates. So does one in text it read as a regex literal or JSX text, whose bounds rest on reading
-// the token before them: a test call the base misreads as a regex still counts there, and one the head misreads does
-// not count there, so either misread escalates. A real regex or JSX text naming a test on the base, such as /it(/,
-// escalates too, which is the safe way to be wrong. Strings and comments, whose bounds are certain, count on neither.
+// the token before them, or as any string, comment or template after the first such span, whose bounds a misread
+// there can shift: a test call the base misreads as text still counts there, and one the head misreads does not count
+// there, so either misread escalates. A real regex or JSX text naming a test on the base, such as /it(/, or a later
+// string or comment naming one, escalates too, which is the safe way to be wrong. Strings and comments before the
+// first regex or JSX text, whose bounds are certain, count on neither side.
 function testRemovalProblem(path, language, source) {
   let base, head;
   try {
