@@ -81,3 +81,37 @@ test('in a Triphammer session a shell write inside its worktree, $TMPDIR, /tmp, 
     assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
   }
 });
+
+test('in a Triphammer session a write behind setsid, flock, ionice, taskset, chrt, stdbuf, busybox, script -c, su -c or xargs is refused',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['setsid touch ~/.bashrc', 'setsid -f -w touch ~/.bashrc', 'flock /tmp/l touch ~/.bashrc',
+      'flock -w 5 -E 3 /tmp/l touch ~/.bashrc', `flock /tmp/l -c 'touch ~/.bashrc'`,
+      `flock -n /tmp/l --command 'touch ~/.bashrc'`, 'flock ~/.bashrc true', 'ionice -c3 touch ~/.bashrc',
+      'ionice -c 2 -n 7 -t touch ~/.bashrc', 'taskset 1 touch ~/.bashrc', 'taskset -c 0-3 touch ~/.bashrc',
+      'chrt -o 0 touch ~/.bashrc', 'chrt --sched-runtime 5 -d 0 touch ~/.bashrc', 'stdbuf -oL touch ~/.bashrc',
+      'busybox touch ~/.bashrc', 'nice -n 5 setsid busybox rm ~/.profile', `script -qc "touch ~/.bashrc" /dev/null`,
+      `script --command='touch ~/.bashrc' -q /dev/null`, 'script -qc true ~/.bashrc', 'script -q -O ~/.bashrc -c true',
+      `su -c "touch ~/.bashrc"`, `su - someone -c 'touch ~/.bashrc'`, `sudo runuser -u someone -- rm ~/.x`,
+      `runuser someone --command='rm ~/.x'`, `su -l -c 'touch .bashrc'`, 'echo ~/.bashrc | xargs rm', 'xargs touch <<< ~/.bashrc',
+      'echo x | xargs -I{} touch {}', 'echo x | xargs -n 1 -P 2 sed -i s/a/b/', 'echo x | xargs sudo tee',
+      'echo x | xargs -- xargs cp src/x.cs', 'echo x | busybox xargs rm', 'echo x | xargs touch ~/.bashrc',
+      'nohup touch ~/.bashrc', 'time -p touch ~/.bashrc']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+  });
+
+test('in a Triphammer session those wrappers writing inside its worktree, and xargs running a command that writes nothing, are allowed',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['setsid touch build/x', 'flock /tmp/l touch build/x', `flock /tmp/l -c 'touch build/x'`,
+      'flock build/lock true', 'ionice -c3 touch build/x', 'taskset 1 touch build/x', 'taskset -c 0-3 touch build/x',
+      'chrt -o 0 touch build/x', 'stdbuf -oL touch build/x', 'busybox touch build/x',
+      `script -qc "touch build/x" /dev/null`, 'script -q -c true build/typescript', `su -c 'touch build/x'`,
+      'xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l', 'git ls-files | xargs -0 -n 1 grep -l foo',
+      'echo x | xargs', 'echo x | xargs echo']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });

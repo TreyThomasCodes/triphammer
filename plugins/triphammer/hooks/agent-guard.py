@@ -145,8 +145,22 @@
 # profile snapshot), nor a directory change by any wrapper other than those above, nor git settings that reach the
 # repository some other way (a .gitmodules URL that git submodule sync copies). Outside a Triphammer session
 # a path computed at run time ($VAR/x) counts only by the directory its literal part ends in; in one the
-# worktree-only rule refuses it, as above. Every round of review has found another shell feature this parser misses;
-# those go to an OS-level limit on what a Triphammer session may write (#732), with this hook as a second line.
+# worktree-only rule refuses it, as above.
+#
+# Every rule judges a command behind the wrappers sudo, env, command, builtin, nohup, exec, time, nice, stdbuf,
+# timeout, setsid, flock, ionice, taskset, chrt and busybox (whose applet is the command), past their options and
+# the operand timeout, flock, taskset and chrt take before it. flock FILE -c LINE, script -c LINE and su or runuser
+# -c LINE (or --command, and su's --session-command) have LINE judged as a sh -c script, and runuser -u USER the
+# command after it. flock's lock file counts as a file it creates, and script's typescript (its operand, else
+# ./typescript) and its -I, -O, -B and -T log files as files it writes; su's login shell (su -, -l) starts in another
+# directory, so the worktree-only rule loses track of the directory for its LINE. xargs's command is judged as
+# written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
+# cp, rm, touch and the rest) is refused, since the hook cannot read the operands xargs adds from its input. Not
+# covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
+# options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
+# a LINE run by a shell that reads it differently from sh (su -s), and outside a Triphammer session the operands
+# xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
+# and every round of review has found another shell feature this parser misses: this hook is the only line.
 #
 # `# guard-override: <reason>` anywhere in the command lets that one Bash command through. A file tool has no command
 # text to carry it, so its refusals have no override: the owner makes that change. Heredoc bodies, here-strings
@@ -232,9 +246,10 @@ OPENERS = {"(", "$(", "<("}
 PIPES = {"|", "|&"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
 OTHER_REDIRECTS = {"<", "<<<", "<&"}
-WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "exec", "time", "nice", "stdbuf", "timeout"}
+WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "exec", "time", "nice", "stdbuf", "timeout", "setsid",
+            "flock", "ionice", "taskset", "chrt", "busybox"}
 # Wrapper options that take a value: short letters (value attached, `-n10`, or the next word) and long names (value
-# after `=`, `--user=someone`, or the next word). timeout also takes its duration as the first operand.
+# after `=`, `--user=someone`, or the next word).
 WRAPPER_VALUE_OPTIONS = {
     # sudo's -h is help, or a host only when attached (`-hhost`), so it never takes the next word.
     "sudo": ("aCcDgpRrTtUu", {"--auth-type", "--login-class", "--close-from", "--chdir", "--group", "--host",
@@ -247,7 +262,28 @@ WRAPPER_VALUE_OPTIONS = {
     "nice": ("n", {"--adjustment"}),
     "stdbuf": ("eio", {"--error", "--input", "--output"}),
     "timeout": ("ks", {"--kill-after", "--signal"}),
+    "flock": ("Ew", {"--conflict-exit-code", "--timeout", "--wait"}),
+    "ionice": ("cnpPu", {"--class", "--classdata", "--pid", "--pgid", "--uid"}),
+    "chrt": ("TPD", {"--sched-runtime", "--sched-period", "--sched-deadline"}),
 }
+# Wrappers that take an operand before the command, matching the pattern: timeout's duration, flock's lock file,
+# taskset's mask or CPU list and chrt's priority (a number, so a chrt that leaves it out still has its command read).
+ANY_OPERAND = re.compile(r".*", re.DOTALL)
+WRAPPER_OPERANDS = {"timeout": ANY_OPERAND, "flock": ANY_OPERAND, "taskset": ANY_OPERAND, "chrt": re.compile(r"\d+")}
+# Commands that run a shell command line given by an option, as `sh -c` does, and their options that take a value:
+# script (-c or --command; its log files and typescript operand are writes) and su and runuser (-c, --command or
+# --session-command; their remaining operands after the user go to the shell).
+SCRIPT_RUNNERS = {
+    "script": ("cEIOBTo", {"--command", "--echo", "--log-in", "--log-out", "--log-io", "--log-timing",
+                           "--logging-format", "--output-limit"}),
+    "su": ("cgGsw", {"--command", "--session-command", "--group", "--supp-group", "--shell",
+                     "--whitelist-environment"}),
+}
+# runuser -u USER runs its operands as the command itself, without a shell.
+SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
+# xargs's options that take the next word as their value (-e, -i and -l take one only attached).
+XARGS_VALUE_OPTIONS = ("adEILnPs", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
+                                    "--process-slot-var"})
 # python's short options without a value, which can stand before c in one group (`-Ic`); c's script is the rest of
 # the group or the next word.
 PYTHON_SCRIPT_FLAG = re.compile(r"-[bBdEhiIOPqRsSuvVx]*c(.*)", re.DOTALL)
@@ -529,14 +565,20 @@ def pipelines(tokens):
     yield pipeline, None
 
 
-def strip_prefix(words, chdirs=None):
+def strip_prefix(words, chdirs=None, writes=None):
     """Drops variable assignments and wrappers such as sudo or env before the command name. With chdirs, appends to
     it each directory a wrapper option changes to (env -C or --chdir, sudo -D or --chdir), as a word, or None for one
-    whose value is missing."""
-    i, wrapper, duration = 0, None, False
+    whose value is missing or that the hook does not follow (su's login). With writes, appends to it each file a
+    wrapper creates or writes itself (flock's lock file, script's typescript and logs). A wrapper that runs a shell
+    command line (flock FILE -c, script -c, su -c) gives the words `sh -c <line>` in its place."""
+    i, wrapper, operand, locked = 0, None, None, False
     while i < len(words):
         value = words[i].value
         name = os.path.basename(value)
+        if locked and value in ("-c", "--command"):
+            # `flock FILE -c LINE`: flock runs the line with $SHELL -c.
+            return shell_words(words[i + 1:i + 2])
+        locked = False
         if wrapper == "env" and ENV_SPLIT_FLAG.fullmatch(value):
             words, i = split_string(words, i), 0  # env keeps reading options from the split words
         elif wrapper is not None and value == "--":
@@ -549,17 +591,66 @@ def strip_prefix(words, chdirs=None):
             if chdirs is not None and chdir_option(wrapper, value):
                 chdirs.append(chdir_value(wrapper, words[i], words[i + 1] if taken and i + 1 < len(words) else None))
             i += 1 + taken
-        elif duration:
-            duration = False
+        elif operand is not None and operand[1].fullmatch(value):
+            if operand[0] == "flock":
+                locked = True
+                if writes is not None and i + 1 < len(words):
+                    # flock creates its lock file (a lone number with no command after it is a descriptor), and
+                    # leaves its content alone.
+                    writes.append((words[i], False))
+            operand = None
             i += 1
         elif re.match(r"[A-Za-z_]\w*=", value) or value in RESERVED:
             i += 1
+        elif name in SCRIPT_RUNNERS:
+            return script_runner_words(name, words[i + 1:], chdirs, writes)
         elif name in WRAPPERS:
-            wrapper, duration = name, name == "timeout"
+            wrapper = name
+            operand = (name, WRAPPER_OPERANDS[name]) if name in WRAPPER_OPERANDS else None
             i += 1
         else:
             break
     return words[i:]
+
+
+def literal_word(text):
+    word = Word()
+    word.value = text
+    return word
+
+
+def shell_words(line):
+    """`sh -c` and the command line in the list line (none when it is missing), standing for a wrapper that runs the
+    line with a shell."""
+    return [literal_word("sh"), literal_word("-c")] + list(line)
+
+
+def script_runner_words(name, args, chdirs, writes):
+    """The words a script, su or runuser with the arguments args stands for: `sh -c <line>` and, for su, the operands
+    after the user, which go to the shell; just `sh` and those operands when no line is given, and none for a script
+    without one, whose shell reads the terminal. Appends script's typescript and log files to writes, as (word, True)
+    pairs, and a None to chdirs for su's login shell, which starts in the user's home directory."""
+    files, options = split_options(args, *SCRIPT_RUNNERS[name])
+    given = {option for option, _ in options}
+    line = [value for option, value in options
+            if option in ("-c", "--command", "--session-command") and value is not None][-1:]
+    if name == "script":
+        if writes is not None:
+            logs = [value for option, value in options if option in ("-I", "-O", "-B", "-T", "--log-in",
+                                                                      "--log-out", "--log-io", "--log-timing")]
+            if not files and not given & {"-I", "-O", "-B", "--log-in", "--log-out", "--log-io"}:
+                files = [literal_word("typescript")]  # script's default log, in the current directory
+            writes += [(value, True) for value in logs + files[:1] if value is not None]
+        return shell_words(line) if line else []
+    login = bool(files) and files[0].value == "-"
+    if login or given & {"-l", "--login"}:
+        if chdirs is not None:
+            chdirs.append(None)
+        files = files[1:] if login else files
+    if given & {"-u", "--user"}:
+        return shell_words(line) + files if line else files  # runuser -u USER COMMAND runs it directly
+    rest = files[1:]  # the operands after the user
+    return shell_words(line) + rest if line else [literal_word("sh")] + rest if rest else []
 
 
 def split_string(words, i):
@@ -970,8 +1061,8 @@ def prefix_of(whole, words):
 
 def analyze(command, cwd, findings, depth):
     """Judges one command; returns the directory it leaves the shell in (an eval that runs cd), else SAME_CWD."""
-    chdirs = []
-    words = strip_prefix(command.words, chdirs)
+    chdirs, wrapper_writes = [], []
+    words = strip_prefix(command.words, chdirs, wrapper_writes)
     for target in command.write_targets:
         findings.edit(target, cwd)  # the shell opens a redirection before a wrapper changes the directory
     if triphammer_sessions():
@@ -981,6 +1072,11 @@ def analyze(command, cwd, findings, depth):
             # `env -C $(...) touch x`: the words after the substitution read as another command, which the
             # directory moves too, so the hook loses track of the directory from here on.
             findings.cwd_lost = True
+    for target, content in wrapper_writes:
+        if content:
+            findings.edit(target, cwd)
+        else:
+            findings.change(target, cwd, content=False)
     assignments = prefix_of(command.words, words)
     if words and os.path.basename(words[0].value) in EXPORTERS:
         assignments = assignments + words[1:]
@@ -1020,8 +1116,7 @@ def analyze(command, cwd, findings, depth):
                 return v
         return None
 
-    in_place = (name in ("sed", "gsed") and any(re.match(r"-[nErsuz]*i|--in-place", v) for v in values)
-                or name == "perl" and any(re.match(r"-(?![MmIeEx])\w*i", v) for v in values))
+    in_place = in_place_edit(name, values)
     if command.substituted and (in_place or name in SUBSTITUTION_WRITERS):
         findings.unresolved.append(f"the operands of `{name}` beside a command substitution")
     if triphammer_sessions() and (in_place or name in SUBSTITUTION_WRITERS):
@@ -1069,6 +1164,8 @@ def analyze(command, cwd, findings, depth):
         if len(args) == 2:
             findings.hard_link(args[0], cwd)
             findings.hard_link(args[1], cwd, source=False)
+    elif name == "xargs":
+        analyze_xargs(command, args, cwd, findings, depth)
     elif name == "systemctl":
         analyze_systemctl(args, findings)
     elif name == "git":
@@ -1101,6 +1198,40 @@ def analyze(command, cwd, findings, depth):
         if files:
             findings.runs(name, files[0], cwd)
     return SAME_CWD
+
+
+def in_place_edit(name, values):
+    """Whether sed or perl with the argument values edits its files in place."""
+    return (name in ("sed", "gsed") and any(re.match(r"-[nErsuz]*i|--in-place", v) for v in values)
+            or name == "perl" and any(re.match(r"-(?![MmIeEx])\w*i", v) for v in values))
+
+
+def analyze_xargs(command, args, cwd, findings, depth):
+    """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
+    place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
+    rule reads is refused, since the hook cannot read the operands xargs gives it."""
+    i = 0
+    short, long = XARGS_VALUE_OPTIONS
+    while i < len(args):
+        v = args[i].value
+        if v == "--":
+            i += 1
+            break
+        if not v.startswith("-") or v == "-":
+            break
+        if v.startswith("--"):
+            i += 1 + (v in long)
+        else:
+            letter = next((j for j, c in enumerate(v[1:]) if c in short), None)
+            i += 1 + (letter is not None and letter == len(v) - 2)
+    inner = Command()
+    inner.words, inner.pipeline_input, inner.substituted = args[i:], command.pipeline_input, command.substituted
+    analyze(inner, cwd, findings, depth)
+    words = strip_prefix(inner.words)
+    if words and triphammer_sessions():
+        name = os.path.basename(words[0].value)
+        if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
+            findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
 
 
 def path_changer_files(name, args):
