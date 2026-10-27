@@ -1204,10 +1204,11 @@ test("the run's own pull request merging and closing the issue does not end the 
   assert.equal(r.demoCalls().length, 1);
 });
 
-test('a session that labels its own issue needs-owner goes on to comment and ends as a run that progressed', t => {
+// GitHub compares logins in any case, so the App's login in another case than APP_AUTHOR's is still the App.
+for (const appLogin of ['example-agents[bot]', 'Example-Agents[bot]']) test(`a session that labels its own issue needs-owner (as ${appLogin}) goes on to comment and ends as a run that progressed`, t => {
   const r = ticketSetup(t);
   r.gh.json('self-needs-owner.json', issue(7, {labels: ['agent-working', 'needs-owner']}));
-  r.gh.json('by-app.json', labelledBy('example-agents[bot]'));
+  r.gh.json('by-app.json', labelledBy(appLogin));
   const routes = {[issueView(7)]: {file: 'self-needs-owner.json'}, [eventsCall(7)]: {file: 'by-app.json'},
     [`issue view 7 -R ${repo} --json state,labels`]: {file: 'self-needs-owner.json'}};
   brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});  // then writes its comment

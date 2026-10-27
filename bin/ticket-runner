@@ -559,7 +559,7 @@ issue_brake() {
       | select(.event == "labeled" and .label.name == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
     if [ -z "$by" ]; then
       log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
-    elif [ "$by" != "$app_login" ]; then
+    elif [ "${by,,}" != "${app_login,,}" ]; then
       echo "labelled needs-owner"
       return 0
     fi
