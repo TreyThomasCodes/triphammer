@@ -127,10 +127,13 @@ detached() {
   (trap - INT QUIT; exec "${prefix[@]}" bash -c "$own_session" detached "$@") < /dev/null &
   child=$!
   [ -z "$caught" ] || relay
+  # A wait a trap cut short waits again only while the child is still there: when the signal also reached the child (a
+  # Ctrl-C to the process group) and it ended while the trap ran, bash can reap it there and lose its status, and a wait
+  # for it then blocks until some other child ends (as_root's tee, which waits for this shell to close the FIFO).
   while :; do
     woke=""
     wait "$child" && status=0 || status=$?
-    [ -n "$woke" ] || break
+    [ -n "$woke" ] && kill -0 "$child" 2> /dev/null || break
   done
   trap - INT TERM HUP
   [ -z "$caught" ] || kill -s "$caught" "$$"
