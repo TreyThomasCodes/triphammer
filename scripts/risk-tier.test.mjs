@@ -322,10 +322,37 @@ test('a regex after default, extends or for await (...), a TSX type parameter li
     {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
 });
 
+test('a test case the base scan reads as a regex or JSX text counts on the base, and on the head does not', async () => {
+  const path = 'src/web/src/x.test.ts';
+  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  const head = "test('a', () => {});\n";
+  // Each line holds a real test call that a misread / would take for a regex: after a number ending in a dot, a
+  // private name spelled like a keyword, and a property name after a dot and a space or a line break.
+  for (const line of ["const x = 1./test('b', () => {})/2;", "this.#in / test('b', () => {}) / 2", "obj. default / test('b', () => {}) / 2",
+    "obj.\n  default / test('b', () => {}) / 2"]) {
+    assert.deepEqual(await testChange(path, `${head}${line}\n`, head), removed, line);
+  }
+  // Read as JavaScript reads them, each divides, so the test call counts as code on both sides and a rename merges.
+  for (const line of ["const x = 1./test('b', () => {})/2;", "this.#in / test('b', () => {}) / 2", "obj. default / test('b', () => {}) / 2",
+    "obj.\n  default / test('b', () => {}) / 2", "obj./**/default / test('b', () => {}) / 2", "const y = 1.5e3 / test('b', () => {}) / 2;"]) {
+    const spec = `${head}${line}\n`;
+    assert.deepEqual(await testChange(path, spec, spec.replace("'a'", "'a2'")), {tier: 'auto', reasons: []}, line);
+  }
+  // On the head a regex that names a test hides no removed one.
+  assert.deepEqual(await testChange(path, `${head}test('b', () => {});\n`, `${head}const r = /it(?:x)/;\n`), removed);
+  // A real regex or JSX text naming a test on the base over-escalates, which is the safe way to be wrong.
+  const tsx = 'src/web/src/x.test.tsx';
+  for (const line of ['const r = /it(?:x)/;', 'const e = <p>it(</p>;']) {
+    const spec = `${line}\n${head}`;
+    assert.deepEqual(await testChange(tsx, spec, spec.replace("'a'", "'a2'")),
+      {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]}, line);
+  }
+});
+
 test('division, JSX text with quotes and literals holding quotes or slashes keep later test cases counted', async () => {
   const path = 'src/web/src/x.test.tsx';
-  const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it(</p>;\n"
-    + "const f = <><Ui.Row><b>it(</b><br/></ Ui.Row ></>;\n"
+  const spec = "const half = (a + b) / 2 / c;\nconst ratio = total! / count;\nconst e = <p className=\"x\">Don't {n}/2 it</p>;\n"
+    + "const f = <><Ui.Row><b>it</b><br/></ Ui.Row ></>;\n"
     + "const s = `it's ${'}'} ${`${n}`}`;\nconst r = /[/]\\/'/g;\nconst q = a++ / 2;\nconst o = {a: 1};\n"
     + "expect(a < b).toBe(arr[0] / 2 < f(x));\nif (!/'/.test(s) && x) {}\nconst l = items.map(i => <li>{i}</li>);\n"
     + "test('a', () => {});\ntest('b', () => {});\n";

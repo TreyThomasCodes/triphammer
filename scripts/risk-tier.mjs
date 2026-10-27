@@ -116,7 +116,8 @@ export function parseRules(text) {
 // Test-case declarations: C# methods attributed [Fact] or [Theory] (with arguments such as Skip), and test( or it( calls
 // in JavaScript and TypeScript. Renaming or moving a test within a file keeps the count; moving it to another file
 // lowers this one's. Declarations inside comments, string, regex or template literals or JSX text, or inside a C# #if
-// region that may not compile, do not count (see scan and testRemovalProblem).
+// region that may not compile, do not count, but for those in regex literals and JSX text on the base (see scan and
+// testRemovalProblem).
 const csharpTestCase = /[[,]\s*(?:Xunit\.)?(?:Fact|Theory)(?:Attribute)?\s*[\](,]/g;
 const javascriptTestCase = /(?<![\w.$])(?:test|it)(?:\.(?:only|skip|fixme|fail))?\s*\(/g;
 
@@ -303,6 +304,8 @@ function scan(text, {csharp, jsx: readsJsx}) {
     return lineEnd.exec(text)?.index ?? text.length;
   };
   const out = text.split('');
+  // The spans blanked as regex literals or JSX text, whose bounds rest on how the token before them was read.
+  const guessed = [];
   const blank = (from, to) => { for (let k = from; k < to; k++) if (out[k] !== '\n') out[k] = ' '; };
   const fail = () => { throw new Unreadable(); };
   const match = pattern => { pattern.lastIndex = i; return pattern.exec(text)?.[0]; };
@@ -320,8 +323,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
   // Code up to the end of the file or, in a hole, up to the } that closes it, where it stops.
   function code(nested) {
     const opens = [];
-    // The kind of the last token (operator, operand or unsure) and whether a line has ended since it.
-    let previous = 'operator', broke = false, lastWord, lineStart = !nested;
+    // The kind of the last token (operator, operand or unsure), whether a line has ended since it, and whether it was a
+    // member-access dot.
+    let previous = 'operator', broke = false, lastWord, lineStart = !nested, dot = false;
     while (i < text.length) {
       if (!nested) top = i;
       const c = text[i];
@@ -345,8 +349,9 @@ function scan(text, {csharp, jsx: readsJsx}) {
         i = end + 2;
         continue;
       }
-      const after = lastWord;
+      const after = lastWord, dotted = dot;
       lastWord = undefined;
+      dot = false;
       const before = previous === 'operand' && broke ? 'unsure' : previous;
       broke = false;
       const opener = csharp && /[$@"]/.test(c) ? stringOpener(i) : null;
@@ -383,10 +388,15 @@ function scan(text, {csharp, jsx: readsJsx}) {
       if (csharp && nested && c === ':' && opens.length === 0) { format(); continue; }
       const name = match(word);
       if (name) {
+        // A name after a member-access dot (a.b, a?.b, a. b, a.\nb, a./**/b) or a # (this.#in) is a property or a
+        // private name, never a keyword; after a spread's ... it is not.
+        const property = dotted || !csharp && text[i - 1] === '#';
         i += name.length;
-        // A name after one member-access dot (a.b, a?.b) is a property, never a keyword; after a spread's ... it is not.
-        const start = i - name.length;
-        const property = text[start - 1] === '.' && text[start - 2] !== '.';
+        // A number's dot and the digits or exponent after it are part of the number (1., 1.5, 1.e3).
+        if (!csharp && /^\d/.test(name) && text[i] === '.') {
+          i++;
+          i += match(word)?.length ?? 0;
+        }
         previous = property ? 'operand' : operatorWords.has(name) ? 'operator' : unsureWords.has(name) ? 'unsure' : 'operand';
         // for await ( opens a condition as for ( does.
         if (!property) lastWord = name === 'await' && after === 'for' ? 'for' : name;
@@ -411,7 +421,13 @@ function scan(text, {csharp, jsx: readsJsx}) {
       } else if (c === '!' && text[i] !== '=') {
         // A ! after an operand is TypeScript's non-null assertion, and after an operator a not.
         previous = before;
-      } else previous = 'operator';
+      } else if (c === '.' && text.startsWith('..', i)) {
+        i += 2;
+        previous = 'operator';
+      } else {
+        dot = c === '.';
+        previous = 'operator';
+      }
     }
     if (nested) fail();
   }
@@ -566,6 +582,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       else if (c === '/') break;
     }
     blank(from, i - 1);
+    guessed.push([from, i - 1]);
   }
   // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
   // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends, or an opening tag
@@ -622,15 +639,19 @@ function scan(text, {csharp, jsx: readsJsx}) {
   // closing tag means the < that opened the element was not JSX, so it is unsure.
   function children(tag) {
     let from = i;
+    const blankText = () => {
+      blank(from, i);
+      guessed.push([from, i]);
+    };
     for (;;) {
       const c = text[i];
       if (c === undefined) fail();
       if (c === '{') {
-        blank(from, i);
+        blankText();
         hole(1);
         from = i;
       } else if (c === '<') {
-        blank(from, i);
+        blankText();
         if (text[i + 1] === '/') {
           const closing = match(/<\/\s*([\w$.:-]*)\s*>/y);
           if (!closing || closing.slice(2, -1).trim() !== tag) fail();
@@ -651,12 +672,14 @@ function scan(text, {csharp, jsx: readsJsx}) {
       blank(hashbang, i);
     }
     code(false);
-    return {code: out.join(''), unsure: ''};
+    top = text.length;
   } catch (error) {
     if (!(error instanceof Unreadable)) throw error;
     blank(top, text.length);
-    return {code: out.join(''), unsure: text.slice(top)};
   }
+  // A span from top on lies in the unsure text, which holds it already.
+  const spans = guessed.filter(([from]) => from < top).map(([from, to]) => text.slice(from, to));
+  return {code: out.join(''), unsure: text.slice(top), guessed: spans};
 }
 // C# lines that compile for certain when no preprocessor symbol is defined (the test projects define none this relies
 // on). Only the literal conditions true and false are known: a branch under any other condition (#if NEVER, #if !DEBUG)
@@ -704,13 +727,15 @@ function conditionalRegions() {
 // CRLF are rewritten, since a string may hold U+2028 and U+2029 (scan ends comments and regexes at them).
 const csharpLines = text => text.replace(/\r\n|[\r\u0085\u2028\u2029]/g, '\n');
 // The test cases a test file of the language declares in code (outside comments and literals, and in C# outside regions
-// that may not compile), and those in the text the scanner cannot read.
+// that may not compile), those in the text the scanner cannot read, and those in the text it read as regex literals or
+// JSX text.
 function countTestCases(path, language, text) {
   const {csharp} = language;
   const jsx = !csharp && !/\.[mc]?ts$/i.test(path);
-  const {code, unsure} = scan(csharp ? csharpLines(text) : text.replace(/\r\n?/g, '\n'), {csharp, jsx});
+  const {code, unsure, guessed} = scan(csharp ? csharpLines(text) : text.replace(/\r\n?/g, '\n'), {csharp, jsx});
   const count = part => part.match(language.testCase)?.length ?? 0;
-  return {code: count(csharp ? withoutDisabledRegions(code) : code), unsure: count(unsure)};
+  return {code: count(csharp ? withoutDisabledRegions(code) : code), unsure: count(unsure),
+    guessed: guessed.reduce((sum, span) => sum + count(span), 0)};
 }
 
 // The #if, #elif and #else lines of a C# file as a count per line text (trimmed, whitespace runs collapsed, `# if` read
@@ -746,7 +771,10 @@ function conditionalProblem(path, status, language, source) {
 
 // Why a modified test file escalates, or undefined when it keeps at least as many test cases as on the base. Evidence
 // fails closed: a declaration in text the scanner cannot read counts on the base and not on the head, so a head that
-// hides one there escalates.
+// hides one there escalates. So does one in text it read as a regex literal or JSX text, whose bounds rest on reading
+// the token before them: a test call the base misreads as a regex still counts there, and one the head misreads does
+// not count there, so either misread escalates. A real regex or JSX text naming a test on the base, such as /it(/,
+// escalates too, which is the safe way to be wrong. Strings and comments, whose bounds are certain, count on neither.
 function testRemovalProblem(path, language, source) {
   let base, head;
   try {
@@ -755,7 +783,7 @@ function testRemovalProblem(path, language, source) {
   } catch {
     return 'cannot read both versions to count its test cases';
   }
-  const [before, after] = [base.code + base.unsure, head.code];
+  const [before, after] = [base.code + base.unsure + base.guessed, head.code];
   if (after >= before) return undefined;
   const unread = base.unsure || head.unsure ? ', counting those in text it cannot read on the base only' : '';
   return `removes test cases (${before} before, ${after} after${unread})`;
