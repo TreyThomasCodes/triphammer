@@ -452,7 +452,8 @@ open pull request of the run: the ones closing the ticket's issue, listed again 
 The repository is the config's `REPO`, and `<repo>` defaults to its `CHECKOUT`. It reviews a pull request only when it
 is open and changes a path the project's `securityReviewPaths` matches (the example project's: `bin/`,
 `status/`, `plugins/triphammer/hooks/`, `.claude/settings.json`, `scripts/risk-tier*`, `.github/`, `.triphammer/`
-or a systemd unit, `*.service`, `*.timer`, `*.path`; a project that declares none has nothing reviewed), and its head
+or a systemd unit, `*.service`, `*.timer`, `*.path`; a project that declares none has nothing reviewed; a renamed
+file counts under its old path as well as its new one), and its head
 commit is not yet in `security-reviewed` in the state directory. That file is the script's own record, one line
 `<REPO> <n> <head>` per head it posted a comment on, reviewed, skipped or failed; `agent-guard.py` keeps agents from
 writing the state directory, and pull request comments are never read, so a comment that looks like a review cannot
