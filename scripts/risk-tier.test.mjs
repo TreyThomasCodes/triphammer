@@ -30,6 +30,8 @@ test('a rule limited to some git statuses, or excepting some, judges only those 
 
 // A modified test file judged by its base and head text.
 const testChange = async (path, before, after) => classify([{status: 'M', path}], {base: () => before, head: () => after});
+// What testChange returns for a test file that goes from two test cases to one.
+const removesOne = path => ({tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]});
 const csharpTests = (...methods) => `public sealed class PricingTests\n{\n${methods.map(([attribute, name]) =>
   `    ${attribute}\n    public void ${name}() { Assert.True(true); }\n`).join('\n')}}\n`;
 const specTests = (...names) => `import {test, expect} from '@playwright/test';\n\ntest.describe('chain', () => {\n${names.map(name =>
@@ -72,7 +74,7 @@ test('a test case moved into a block comment or an #if false region no longer co
 
 test('a literal or comment opened in a C# region that never compiles ends with it and hides no removed test', async () => {
   const path = 'tests/X/PricingTests.cs';
-  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  const removed = removesOne(path);
   // The compiler does not lex a skipped region, so its text opens nothing that runs past the directive ending it.
   for (const [skip, open, close] of [['#if false', '@"', '"'], ['#if false', '/*', '*/'], ['#if false', '"""', '"""'],
     ['#if true\n#else', '@"', '"'], ['#if NEVER\n#elif false', '/*', '*/'], ['#if false\n#if NEVER\n#else', '@"', '"']]) {
@@ -120,7 +122,7 @@ test('tests under #if true, an #elif true or #else after only false branches, or
 test('directives and line comments end at every line break the compiler accepts, not only LF', async () => {
   const path = 'tests/X/FooTests.cs';
   const twoFacts = 'class FooTests{\n[Fact] void A(){}\n[Fact] void B(){}\n}\n';
-  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  const removed = removesOne(path);
   for (const after of ['class FooTests{\n[Fact] void A(){}\n#if NEVER\r[Fact] void B(){}\n#endif\n}\n',
     'class FooTests{\n[Fact] void A(){}\n#if NEVER\u0085[Fact] void B(){}\n#endif\n}\n',
     'class FooTests{\n[Fact] void A(){}\n#if NEVER\u2028[Fact] void B(){}\n#endif\n}\n']) {
@@ -136,8 +138,7 @@ test('directives and line comments end at every line break the compiler accepts,
   const commentThenFacts = 'class FooTests{\n// note\r[Fact] void A(){}\n[Fact] void B(){}\n}\n';
   assert.deepEqual(await testChange(path, commentThenFacts, 'class FooTests{\n// note\n[Fact] void B(){}\n}\n'), removed);
   const spec = "test('a', () => {});\n// note test('b', () => {});\n";
-  assert.deepEqual(await testChange(specPath, spec, "test('a', () => {});\n"),
-    {tier: 'escalate', reasons: [`${specPath}: removes test cases (2 before, 1 after)`]});
+  assert.deepEqual(await testChange(specPath, spec, "test('a', () => {});\n"), removesOne(specPath));
 });
 
 test('adding an #if, #elif or #else to a C# test file escalates, and a comment marker in an interpolation hole hides no test', async () => {
@@ -203,7 +204,7 @@ test('comment markers inside strings and the #else of an #if false region keep t
 test('a C# test case named only inside a regular, verbatim, interpolated or raw string no longer counts', async () => {
   const path = 'tests/X/PricingTests.cs';
   const facts = (...lines) => `class PricingTests{\n[Fact] void A(){}\n${lines.join('\n')}\n}\n`;
-  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  const removed = removesOne(path);
   for (const string of ['const string S = "[Fact]";', 'const string S = """\n[Fact]\n""";', 'const string S = """[Fact]""";',
     'string S = @"say ""hi"" [Fact]";', 'string S = @"\n[Fact]\n";', 'string S = $"{N} [Fact]";', 'string S = $"{(N > 0 ? "a" : "b")} [Fact]";',
     'string S = $@"{N}\n[Fact]";', 'string S = @$"{N}\n[Fact]";', 'string S = $"""\n{N} [Fact]\n""";', 'string S = $$"""\n{N} {{N}} [Fact]\n""";',
@@ -223,11 +224,11 @@ test('a JavaScript test case named only inside a string, template, regex, commen
     "const s = `${`}`} test('b')`;", "const r = /[/'\"]/; // test('b')",
     "const r = x ? /'/ : y; // test('b')", "return typeof /'/; // test('b')", "const half = total! / 2; const r = /'/; // test('b')"]) {
     const head = `test('a', () => {});\n${after}\n`;
-    assert.deepEqual(await testChange(path, two, head), {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]}, after);
+    assert.deepEqual(await testChange(path, two, head), removesOne(path), after);
   }
   const tsx = 'src/web/src/x.test.tsx';
   assert.deepEqual(await testChange(tsx, two, "test('a', () => {});\nconst e = <p title=\"it(\">don't test('b', () => {})</p>;\n"),
-    {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
+    removesOne(tsx));
 });
 
 test('a keyword after a spread and a hashbang line hide no removed test', async () => {
@@ -248,7 +249,7 @@ test('a keyword after a spread and a hashbang line hide no removed test', async 
   }
   // A #! line at the start of the file, after any byte order mark, is a comment.
   for (const head of ["#!/usr/bin/env node test('b', () => {})\ntest('a', () => {});\n", "﻿#!/usr/bin/env node test('b')\ntest('a', () => {});\n"]) {
-    assert.deepEqual(await testChange(ts, two, head), {tier: 'escalate', reasons: [`${ts}: removes test cases (2 before, 1 after)`]}, head);
+    assert.deepEqual(await testChange(ts, two, head), removesOne(ts), head);
   }
   // A keyword after a member-access dot is still a property, so the / after it divides.
   const spec = "const q = a.typeof / 2 / b?.void / 3;\ntest('a', () => {});\ntest('b', () => {});\n";
@@ -319,14 +320,13 @@ test('a regex after default, extends or for await (...), a TSX type parameter li
   const jsx = "render(<Foo />);\nfunction F() { return <div title=\"it(\">b</div>; }\nconst e = expect(<div>a</div>);\n"
     + "test('a', () => {});\ntest('b', () => {});\n";
   assert.deepEqual(await testChange(tsx, jsx, jsx.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
-  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("test('b', () => {});\n", '')),
-    {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]});
+  assert.deepEqual(await testChange(tsx, jsx, jsx.replace("test('b', () => {});\n", '')), removesOne(tsx));
 });
 
 test('a test case the base scan reads as a regex or JSX text counts on the base, and on the head does not', async () => {
   const path = 'src/web/src/x.test.ts';
-  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
-  const head = "test('a', () => {});\n";
+  const removed = removesOne(path);
+  const head ="test('a', () => {});\n";
   // Each line holds a real test call that a misread / would take for a regex: after a number ending in a dot, a
   // private name spelled like a keyword, and a property name after a dot and a space or a line break.
   for (const line of ["const x = 1./test('b', () => {})/2;", "this.#in / test('b', () => {}) / 2", "obj. default / test('b', () => {}) / 2",
@@ -345,8 +345,7 @@ test('a test case the base scan reads as a regex or JSX text counts on the base,
   const tsx = 'src/web/src/x.test.tsx';
   for (const line of ['const r = /it(?:x)/;', 'const e = <p>it(</p>;']) {
     const spec = `${line}\n${head}`;
-    assert.deepEqual(await testChange(tsx, spec, spec.replace("'a'", "'a2'")),
-      {tier: 'escalate', reasons: [`${tsx}: removes test cases (2 before, 1 after)`]}, line);
+    assert.deepEqual(await testChange(tsx, spec, spec.replace("'a'", "'a2'")), removesOne(tsx), line);
   }
 });
 
@@ -360,14 +359,12 @@ test('a test call the base hides in a string, template or comment after a regex 
     "const n = x as Array<number> / 2; const r = /`/;\ntest('b', () => {}); const s = '`'; // '",
     "const n = x as Array<number> / 2; const r = /'/; const s = '/*';\ntest('b', () => {}); // */",
   ]) {
-    assert.deepEqual(await testChange(path, `${head}${lines}\n`, head),
-      {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]}, lines);
+    assert.deepEqual(await testChange(path, `${head}${lines}\n`, head), removesOne(path), lines);
   }
   // A string naming a test after a real regex on the base over-escalates, which is the safe way to be wrong; one
   // before the first regex does not.
   const after = `${head}const r = /x/;\nconst s = 'it(';\n`;
-  assert.deepEqual(await testChange(path, after, after.replace("'a'", "'a2'")),
-    {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]});
+  assert.deepEqual(await testChange(path, after, after.replace("'a'", "'a2'")), removesOne(path));
   const before = `${head}const s = 'it(';\nconst r = /x/;\n`;
   assert.deepEqual(await testChange(path, before, before.replace("'a'", "'a2'")), {tier: 'auto', reasons: []});
 });

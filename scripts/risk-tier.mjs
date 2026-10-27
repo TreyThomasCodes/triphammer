@@ -602,7 +602,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
     i += tag.length;
     if (match(/\s+extends\b/y)) fail();
     for (;;) {
-      while (/\s/.test(text[i] ?? '')) i++;
+      i += match(/\s*/y).length;
       const c = text[i];
       if (c === undefined) fail();
       if (text.startsWith('/>', i)) {
@@ -622,10 +622,10 @@ function scan(text, {csharp, jsx: readsJsx}) {
       const attribute = match(/[\w$:-]+/y);
       if (!attribute) fail();
       i += attribute.length;
-      while (/\s/.test(text[i] ?? '')) i++;
+      i += match(/\s*/y).length;
       if (text[i] !== '=') continue;
       i++;
-      while (/\s/.test(text[i] ?? '')) i++;
+      i += match(/\s*/y).length;
       const value = text[i];
       if (value === '"' || value === "'") {
         const end = text.indexOf(value, i + 1);
