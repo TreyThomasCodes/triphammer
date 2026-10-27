@@ -63,6 +63,22 @@ test('in a Triphammer session every git config write and every git remote write 
   }
 });
 
+test('in a Triphammer session xargs running git config, git remote or git without a subcommand is refused, since its input can make a read a write',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo /tmp/h | xargs git config core.hooksPath',
+      'echo /tmp/h | xargs git config --global core.hooksPath', 'echo "core.hooksPath /tmp/h" | xargs git config',
+      'echo x | xargs -I{} git config core.hooksPath {}', 'echo x | xargs sudo git -C src config core.pager',
+      'echo "add evil https://x" | xargs git remote', 'echo "config core.hooksPath /tmp/h" | xargs git',
+      'echo "core.hooksPath=/tmp/h status" | xargs git -c']) {
+      assertRuleDenied(decide(command, s.worktree, {env: s.env}), 'git-command', command);
+    }
+    for (const command of ['git branch --merged | xargs git branch -d', 'echo src/x.cs | xargs git log --']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session reading git config and git -c with other keys stay allowed', t => {
   const s = triphammerSession(t);
   if (!s) return;

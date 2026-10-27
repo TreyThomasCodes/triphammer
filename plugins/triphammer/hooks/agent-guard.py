@@ -111,9 +111,10 @@
 #               process stops whatever else is still running a second later.
 #   git-command  every git config write, whatever the key and scope (a set, --add, --replace-all, --unset,
 #               --unset-all, --rename-section, --remove-section, --edit, a --file, and the set, unset, rename-section,
-#               remove-section and edit subcommands), since a worktree's configuration is its repository's (or
-#               ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename, remove, rm, set-head,
-#               set-branches and set-url; git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
+#               remove-section and edit subcommands, and xargs running git config), since a worktree's configuration
+#               is its repository's (or ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename,
+#               remove, rm, set-head, set-branches and set-url (and xargs running git remote, or git with no
+#               subcommand); git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
 #               setting, for one command, a key whose value git runs as a command or reads as more settings:
 #               core.hooksPath, core.fsmonitor, core.sshCommand, core.editor, core.pager, core.askpass, core.gitProxy,
 #               core.alternateRefsCommand, sequence.editor, pager.*, credential.helper and credential.*.helper,
@@ -158,8 +159,10 @@
 # -T log files as files it writes; su's login shell (su -, -l) starts in another directory, so the worktree-only
 # rule loses track of the directory for its LINE. xargs's command is judged as
 # written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
-# cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, or python or
-# node with an inline script is refused, since the hook cannot read the operands xargs adds from its input, nor
+# cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, python or
+# node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
+# write), or a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, appended
+# or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
 # what -I's string becomes inside a script. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
 # options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
@@ -291,6 +294,8 @@ SCRIPT_RUNNERS = {
 SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
 # xargs's short options that take the rest of their group or else the next word as their value, its short options
 # whose optional value can only be the rest of their group, and its long options that take the next word.
+# The text of a word standing for one xargs appends from its input; no command line holds a NUL.
+XARGS_INPUT = "\0xargs-input\0"
 XARGS_VALUE_OPTIONS = ("adEILnPs", "eil", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
                                            "--process-slot-var"})
 # python's short options without a value, which can stand before c in one group (`-Ic`); c's script is the rest of
@@ -1277,9 +1282,10 @@ def in_place_edit(name, values):
 def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
-    rule reads, or a shell, eval, source or an interpreter's inline script, is refused, since the hook cannot read the
-    operands xargs gives it."""
-    i = 0
+    rule reads, a shell, eval, source or an interpreter's inline script, git config or git remote (or git with no
+    subcommand), or a wrapper whose file operand (flock's lock file, script's typescript) the input can give, is
+    refused, since the hook cannot read the operands xargs gives it."""
+    i, replace = 0, None
     short, optional, long = XARGS_VALUE_OPTIONS
     while i < len(args):
         v = args[i].value
@@ -1289,23 +1295,58 @@ def analyze_xargs(command, args, cwd, findings, depth):
         if not v.startswith("-") or v == "-":
             break
         if v.startswith("--"):
+            name, eq, attached = v.partition("=")
+            if name == "--replace":
+                replace = attached if eq else "{}"
             i += 1 + (v in long)
         else:
             # The first letter that takes a value ends the group: the rest of the word is its value, and only a letter
             # in short that ends the word takes the next word instead.
             letter = next((j for j, c in enumerate(v[1:], 1) if c in short or c in optional), None)
-            i += 1 + (letter == len(v) - 1 and v[letter] in short)
+            taken = letter == len(v) - 1 and v[letter] in short
+            if letter is not None and v[letter] == "I":
+                replace = args[i + 1].value if taken and i + 1 < len(args) else v[letter + 1:] or None
+            elif letter is not None and v[letter] == "i":
+                replace = v[letter + 1:] or "{}"
+            i += 1 + taken
     inner = Command()
     inner.words, inner.pipeline_input, inner.substituted = args[i:], command.pipeline_input, command.substituted
     analyze(inner, cwd, findings, depth)
-    words = strip_prefix(inner.words)
-    if words and triphammer_sessions():
-        name = os.path.basename(words[0].value)
-        if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
-            findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
-        elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
-            # xargs also puts its input in place of -I's string inside the script, which the hook read as written.
-            findings.unresolved.append(f"the script `{name}` runs with words from the input of xargs")
+    if not triphammer_sessions():
+        return
+    # Words standing for those xargs appends from its input, enough to fill a wrapper's options and file operand.
+    writes = []
+    words = strip_prefix(inner.words + [literal_word(XARGS_INPUT) for _ in range(4)], writes=writes)
+    words = [w for w in words if w.value != XARGS_INPUT]
+    for target, _ in writes:
+        if XARGS_INPUT in target.value or replace and replace in target.value:
+            findings.unresolved.append("the file a wrapper writes, which the input of xargs can give")
+    if not words:
+        return
+    name = os.path.basename(words[0].value)
+    if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
+        findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
+    elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
+        # xargs also puts its input in place of -I's string inside the script, which the hook read as written.
+        findings.unresolved.append(f"the script `{name}` runs with words from the input of xargs")
+    elif name == "git" and git_subcommand(words[1:]) in (None, "config", "remote"):
+        # The input's words turn a read (git config KEY, git remote) into a write, or name the subcommand itself.
+        findings.git_settings.append(f"`{' '.join(w.value for w in words)}` with words from the input of xargs, "
+                                     f"which can write git configuration")
+
+
+def git_subcommand(args):
+    """The subcommand after git's own options, or None when there is none."""
+    i = 0
+    while i < len(args):
+        v = args[i].value
+        if v in GIT_VALUE_OPTIONS:
+            i += 2
+        elif v.startswith("-"):
+            i += 1
+        else:
+            return v
+    return None
 
 
 def inline_script(name, values):

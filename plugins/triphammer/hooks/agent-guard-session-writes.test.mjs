@@ -138,6 +138,21 @@ test('in a Triphammer session xargs running a shell, eval, source or an inline s
     }
   });
 
+test('in a Triphammer session xargs running a wrapper whose file operand its input can give is refused', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of ['echo ~/.newfile | xargs -I{} flock -n {} true', 'echo ~/.newfile true | xargs flock',
+    'echo ~/.newfile true | xargs flock -n', 'echo "5 ~/.newfile true" | xargs flock -w',
+    'echo ~/.newfile | xargs -I X flock X true', 'echo ~/.newfile | xargs -IX flock X true',
+    'echo ~/.newfile | xargs -i flock {} true', 'echo ~/.newfile | xargs --replace=@ flock @.lock true',
+    'echo ~/.newfile | xargs nice flock']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['echo a | xargs flock build/lock echo', 'echo a | xargs -I{} flock build/lock echo {}']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
 test('in a Triphammer session the letters of an attached xargs option value are not read as options', t => {
   const s = triphammerSession(t);
   if (!s) return;
