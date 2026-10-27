@@ -185,6 +185,23 @@ test('in a Triphammer session the letters of an attached xargs option value are 
   }
 });
 
+test('in a Triphammer session xargs with a long option not named in full is refused, since it may take the next word',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    // GNU xargs reads --max-a as --max-args and --delim as --delimiter, each taking the next word, so the command is
+    // touch or rm with the input's words, not the word after the option.
+    for (const command of ['echo ~/.bashrc | xargs --max-a 1 touch', 'echo ~/.bashrc | xargs --delim , touch',
+      'echo ~/.bashrc | xargs --max-p 2 rm', 'echo ~/.bashrc | xargs --process-slot 2 rm',
+      'echo ~/.bashrc | xargs --max-a=1 touch']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['echo src/x.cs | xargs --max-args 1 wc -l', 'echo src/x.cs | xargs --max-args=1 wc -l',
+      'echo src/x.cs | xargs --delimiter , --no-run-if-empty wc -l']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
   const s = triphammerSession(t);
   if (!s) return;

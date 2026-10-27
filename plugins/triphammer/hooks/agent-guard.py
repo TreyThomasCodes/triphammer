@@ -164,9 +164,11 @@
 # write), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, or a command
 # the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
 # or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
-# what -I's string becomes inside a script. Not
+# what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
+# which may take the next word and move the command. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
-# options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
+# options the hook does not list (an abbreviated long option other than xargs's, script -t with its file attached),
+# busybox --install,
 # a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
 # from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
 # push, fetch, pull, checkout or switch from its input (xargs git branch with -u or --set-upstream-to in the input,
@@ -296,11 +298,15 @@ SCRIPT_RUNNERS = {
 # runuser -u USER runs its operands as the command itself, without a shell.
 SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
 # xargs's short options that take the rest of their group or else the next word as their value, its short options
-# whose optional value can only be the rest of their group, and its long options that take the next word.
+# whose optional value can only be the rest of their group, and its long options that take the next word. GNU xargs
+# also takes any unambiguous prefix of a long option, so in a session one not named in full is refused.
 # The text of a word standing for one xargs appends from its input; no command line holds a NUL.
 XARGS_INPUT = "\0xargs-input\0"
 XARGS_VALUE_OPTIONS = ("adEILnPs", "eil", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
                                            "--process-slot-var"})
+XARGS_LONG_OPTIONS = XARGS_VALUE_OPTIONS[2] | {"--null", "--eof", "--replace", "--max-lines", "--interactive",
+                                               "--no-run-if-empty", "--open-tty", "--show-limits", "--exit",
+                                               "--verbose", "--help", "--version"}
 # python's short options without a value, which can stand before c in one group (`-Ic`); c's script is the rest of
 # the group or the next word.
 PYTHON_SCRIPT_FLAG = re.compile(r"-[bBdEhiIOPqRsSuvVx]*c(.*)", re.DOTALL)
@@ -1289,7 +1295,7 @@ def analyze_xargs(command, args, cwd, findings, depth):
     subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, or a
     command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
     gives it."""
-    i, replace = 0, None
+    i, replace, unknown = 0, None, []
     short, optional, long = XARGS_VALUE_OPTIONS
     while i < len(args):
         v = args[i].value
@@ -1302,6 +1308,8 @@ def analyze_xargs(command, args, cwd, findings, depth):
             name, eq, attached = v.partition("=")
             if name == "--replace":
                 replace = attached if eq else "{}"
+            elif name not in XARGS_LONG_OPTIONS:
+                unknown.append(name)
             i += 1 + (v in long)
         else:
             # The first letter that takes a value ends the group: the rest of the word is its value, and only a letter
@@ -1317,6 +1325,11 @@ def analyze_xargs(command, args, cwd, findings, depth):
     inner.words, inner.pipeline_input, inner.substituted = args[i:], command.pipeline_input, command.substituted
     analyze(inner, cwd, findings, depth)
     if not triphammer_sessions():
+        return
+    if unknown:
+        # An abbreviation (--max-a, --delim) may take the next word as its value, so the command may start later.
+        findings.unresolved.append(f"the command xargs runs after `{unknown[0]}`, which may abbreviate an option "
+                                   f"that takes the next word")
         return
     if not inner.words:
         return  # xargs runs echo
