@@ -9,7 +9,8 @@ import {classify as classifyWith, compareVersions, minimumReleaseAgeDays, parseR
 import {gitEnv} from './test-git-repo.mjs';
 
 // The rules of Triphammer's example project (bin/test-fixtures/example-project), which the engine tests run on.
-const rules = parseRules(readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8'));
+const exampleRules = readFileSync(new URL('../bin/test-fixtures/example-project/.triphammer/risk-tier.json', import.meta.url), 'utf8');
+const rules = parseRules(exampleRules);
 const classify = (changes, source) => classifyWith(changes, source, rules);
 
 // Paths judged by path alone: every file reads as empty on both sides, so no test file loses a test.
@@ -701,4 +702,19 @@ test("called from a project, Triphammer's engine at the pinned commit classifies
   const missing = tierInRepo({'.triphammer/risk-tier.json': sampleRules}, {'lib/b.txt': 'b'}, {...env, TRIPHAMMER_REF: unknown});
   assert.equal(missing.code, 2, missing.error);
   assert.deepEqual(JSON.parse(missing.output), {tier: 'escalate', reasons: [`${unknown} has no scripts/risk-tier.mjs yet`]});
+});
+
+test('rules match a non-ASCII path as written, not as git quotes it, and a renamed migration keeps both sides', () => {
+  const migration = 'database/migrations/V0001__café.sql';
+  const base = {'scripts/risk-tier.mjs': engine, '.triphammer/risk-tier.json': exampleRules, [migration]: 'create table t;\n'};
+  const immutable = 'applied migrations are immutable; add a new migration';
+  const edited = tierInRepo(base, {[migration]: 'create table u;\n'});
+  assert.equal(edited.code, 3, edited.error);
+  assert.deepEqual(JSON.parse(edited.output), {tier: 'blocked', reasons: [`${migration}: ${immutable}`]});
+  // Renamed to a new non-ASCII name with a tab in it: the old path is a deletion and the new one an addition.
+  const renamed = 'database/migrations/V0002__naïve\there.sql';
+  const moved = tierInRepo(base, {[migration]: null, [renamed]: 'create table t;\n'});
+  assert.equal(moved.code, 3, moved.error);
+  assert.deepEqual(JSON.parse(moved.output), {tier: 'blocked', reasons: [`${migration}: ${immutable}`,
+    `${renamed}: outside the areas that merge automatically`]});
 });
