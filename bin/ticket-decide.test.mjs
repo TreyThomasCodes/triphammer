@@ -264,6 +264,13 @@ test('an empty owner login falls back to the owner part of the repository', t =>
   assert.equal(decide(t, [issue(50, '', {author: owner})], [], {owner: ''}).action, 'ticket 50');
 });
 
+test("the App's pull request is repaired whatever the case of its author's login", t => {
+  for (const author of [app, 'App/Example-Agents', app.toUpperCase()]) {
+    const {action} = decide(t, [issue(30)], [pr(40, 30, {mergeStateStatus: 'DIRTY', author})]);
+    assert.equal(action, 'repair 40 30 conflicts', author);
+  }
+});
+
 test('held, draft and owner-authored pull requests are not repaired', t => {
   const dirty = {mergeStateStatus: 'DIRTY'};
   const prs = [pr(40, 30, {...dirty, labels: ['hold']}), pr(41, 31, {...dirty, isDraft: true}),

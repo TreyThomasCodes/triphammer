@@ -55,3 +55,16 @@ A check that reads command text before tokenizing it (a line-based heredoc scan,
 - Does a parse failure mean "allow" in a rule that refuses? It must refuse, or check the raw text instead.
 
 Found in: a guard hook's heredoc scan, which read `<<EOF` inside a quoted pull request body as a heredoc and let the command past its rule.
+
+## 10. Checks that look somewhere else
+
+A health check, brake or gate vouches for code that runs later. It must read the same source, account, environment and spelling as that code does at run time. Otherwise it passes while the real run fails, or stops a run that was fine.
+
+- Does a doctor or preflight run before the environment the real run sets up (its `PATH`, its credential helper, its variables), or with a token that cannot read what the run reads?
+- Does the check ask about the account the code acts as, or about another one?
+- Is a setting read from a different checkout or file than the one the service loads?
+- Is a login, owner or `owner/repo` compared with `==`, `!=`, `[ "$a" = "$b" ]` or `grep -Fx`, when GitHub compares them in any case? `bin/identity-case.test.mjs` catches this half mechanically: compare with `ascii_downcase`, `.lower()` or `${x,,}`, or end the line with `# case-sensitive: <reason>`.
+
+Reproduce by making the two sources differ: run the check without the run's environment, spell the login in another case, or change the file the service loads and not the one the check reads. If the check's answer does not change, it reads the wrong source.
+
+Found in: tools found on the caller's PATH, a credential helper set up after the clone, a unit read from the project's checkout, a variable the App token cannot read, a login and a repository name compared case-sensitively, a doctor checking the App token for a different account than the runner uses.
