@@ -53,7 +53,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `demo-publish` | The `demo` module. `demo-publish <pr> --summary <line> <folder>` publishes the screenshots and videos under one folder to the gallery in the config's `DEMO_GALLERY_DIR` and prints its `DEMO_URL`, and `demo-publish --reindex` refreshes pull request states, which `ticket-runner` does every tick; with the module off, or either setting missing, it exits 2 naming it. Any other form prints the usage and exits nonzero. It never follows a symlink inside the folder and refuses a folder argument that is itself a symlink (a symlinked parent directory in the argument's path is followed), never copies a file with more than one hard link (another name may lie outside the folder) and never copies a file whose real path is outside the folder; it names each one it skips. When no media survives these checks, or a file cannot be copied or converted, it exits nonzero with one line on stderr and leaves the pull request's earlier demo in place: it builds the new entry in a hidden folder in the gallery and swaps it in only once every file and `meta.json` are written. |
 | `publish-demos` | The `demo` module. Runs `demo-publish` for each demo a session left in its worktree; `ticket-runner` calls it when a session ends. See below. |
 | `local-audit` | The `qwen-audit` and `codex` modules. Audits one area with Triphammer's local Qwen model or with Codex, the second and third models of the weekly upkeep audit; see below. |
-| `security-review` | The `codex` module. Advisory security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session. `--full-area` audits the whole area for the monthly upkeep run. See below. |
+| `security-review` | The `codex` module. Security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session, and a head whose review found something gets a repair session that follows the findings up. `--full-area` audits the whole area for the monthly upkeep run. See below. |
 | `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the worktree whose HEAD is its pushed head, fetches `main` in Triphammer's checkout (the one `land-pr` resolves to through its link) and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the checkout, so `land-pr.sh` runs Triphammer `main`'s classifier against the worktree's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
 | `merge-when-ready` | A serial merge queue per repository, as the GitHub App (the `triphammer:merge-policy` skill), that merges armed pull requests and brings them up to date one at a time, stops for the owner's brakes and keeps off the branches a `ticket-runner` run works on. With a project (`TRIPHAMMER_PROJECT`) it serves only that project's repository, reads that project's runner and starts it after a merge. Its header lists the rules. |
 | `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. Its header lists the rules. |
@@ -328,6 +328,10 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
   and newer than the pull request's last commit, the rule of the `owner-approval` brake: a later approval or dismissal
   withdraws it. Anyone else's review, or one without an author, counts for nothing. The repair session's prompt names
   the owner, whose reviews alone it reads.
+- A `security-findings` repair starts when the pull request's head is pending follow-up: its `<REPO> <n> <head>` line
+  is in the state directory's `security-findings` record and not in its `security-followed-up` record (Security
+  review). Only whole lines match, so findings on an older head start nothing. Conflicts, failing checks and changes
+  requested come first; the draft, `hold` and author rules of every repair apply.
 - Several issues may claim the same `Slice k of #N`. Any open one keeps parent `#N` open and holds back slice `k+1`.
   A parent labelled `hold`, `needs-owner` or `stop-agents` stays open after its last slice closes, and the reason is
   printed to standard error.
@@ -486,12 +490,26 @@ checkout, so a pull request cannot change the prompt that reviews it.
 
 It then posts one comment headed `Security review (<model>)` with the head commit: the model's findings with
 their reproductions, or its `No findings.` line, when the run audited something; otherwise `Skipped: <reason>` (exit 3
-or 4, such as the weekly cap) or `Failed (exit <n>): <reason>`, saying that nothing was reviewed, and appends the head
-to `security-reviewed`; when it posted the comment but cannot record the head it exits 1 saying so. The comment is
-advisory: merge-policy, `land-pr` and `merge-when-ready` never read it, and a missing, skipped or failed review never
-blocks or delays a merge. The runner logs the script's output and failures and carries on. Before the reviews it
-rewrites its `current` file without the session's pull requests and branch, so `merge-when-ready` may update them
-while a review runs.
+or 4, such as the weekly cap) or `Failed (exit <n>): <reason>`, saying that nothing was reviewed. When the run audited
+something and returned anything but `No findings.`, it appends `<REPO> <n> <head>` to `security-findings` in the state
+directory; then it appends the same line to `security-reviewed`. When it posted the comment but cannot record the
+findings or the head it exits 1 saying so, and the next run reviews the head again. The runner logs the script's
+output and failures and carries on. Before the reviews it rewrites its `current` file without the session's pull
+requests and branch, so `merge-when-ready` may update them while a review runs.
+
+A head in `security-findings` and not in `security-followed-up` is pending follow-up. `ticket-decide.py` starts a
+`security-findings` repair on it (What a tick decides), whose session reads the comment for that head, reproduces each
+finding, and fixes it on the branch, files it as an issue labelled `needs-owner`, or answers why it is not a defect,
+listing each under a `Security review` heading in its pull request comment (the `triphammer:ticket-run` skill). When
+that session ends with exit 0, `ticket-runner` appends the head's line to `security-followed-up` and counts the run as
+progress, whether or not it pushed; a failed, timed-out or braked session records nothing, so the head is repaired
+again under the usual three runs. A pushed fix is a new head, which gets its own review. Until the head is followed
+up, `merge-when-ready` neither merges nor updates the pull request. Only the scripts write the two records, and
+`agent-guard.py` keeps agents out of the state directory, so no comment can forge a follow-up.
+
+Nothing reads model text to decide a merge: merge-policy, `land-pr` and `merge-when-ready` never read the comment, and
+a missing, skipped or failed review, or one with no findings, records nothing and never blocks or delays a merge. The
+owner's approval stays the final gate.
 
 `security-review --full-area --commit <rev> --output <file>` is upkeep's monthly audit of the whole area, the
 project's `securityReviewArea` (the example project's: the paths above, with the `.claude/settings.json` hooks and

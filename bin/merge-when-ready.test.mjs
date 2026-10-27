@@ -371,6 +371,57 @@ test('a pull request behind its base with a failed required check is skipped for
   assert.match(r.log(), /o\/a#1: behind its base with a failed required check; not updating it/);
 });
 
+// Appends "<repo> <number> <head>" lines to security-review's findings record, or to ticket-runner's follow-up record.
+function securityRecord(r, file, ...entries) {
+  mkdirSync(r.runnerState, {recursive: true});
+  writeFileSync(join(r.runnerState, file), entries.map(([repo, number, head]) => `${repo} ${number} ${head}\n`).join(''),
+    {flag: 'a'});
+}
+
+test('an approved clean pull request whose head has security findings not followed up waits, then merges once followed up', t => {
+  const r = queueSetup(t);
+  const approved = [passed, ownerApproval('SUCCESS')];
+  r.pulls('o/a', [queued(1, 'CLEAN', '2026-10-17T09:00:00Z', approved), queued(2, 'CLEAN', '2026-10-17T10:00:00Z', approved)]);
+  securityRecord(r, 'security-findings', ['o/a', 1, pr(1).headRefOid]);
+  assert.equal(r.tick().status, 0);
+  // The held one does not take the merge slot: the next clean one merges.
+  assert.deepEqual(r.calls(), [`merge o/a#2 ${pr(2).headRefOid}`]);
+  assert.match(r.log(), /o\/a#1: security-review findings on 1aaaaaa not yet followed up; not merging it/);
+  r.pulls('o/a', [queued(1, 'CLEAN', '2026-10-17T09:00:00Z', approved)]);
+  securityRecord(r, 'security-followed-up', ['o/a', 1, pr(1).headRefOid]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`, `merge o/a#2 ${pr(2).headRefOid}`]);
+  assert.match(r.log(), /cleared: o\/a#1: security-review findings/);
+});
+
+test('a behind pull request whose head has security findings not followed up is not updated, and the next one is', t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [queued(1, 'BEHIND', '2026-10-17T09:00:00Z', [passed]), queued(2, 'BEHIND', '2026-10-17T10:00:00Z', [passed])]);
+  securityRecord(r, 'security-findings', ['o/a', 1, pr(1).headRefOid]);
+  // A follow-up of another pull request, or of another repository's #1, does not count.
+  securityRecord(r, 'security-followed-up', ['o/a', 2, pr(1).headRefOid], ['o/b', 1, pr(1).headRefOid]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), ['update-branch o/a#2']);
+  assert.match(r.log(), /o\/a#1: security-review findings on 1aaaaaa not yet followed up; not updating it/);
+});
+
+test('a findings record for an earlier head, or for another repository, does not hold a pull request', t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [queued(1, 'CLEAN', '2026-10-17T09:00:00Z', [passed]), queued(2, 'BEHIND', '2026-10-17T10:00:00Z', [passed])]);
+  r.pulls('o/b', [queued(1, 'CLEAN', '2026-10-17T09:00:00Z', [passed])]);
+  securityRecord(r, 'security-findings', ['o/a', 1, 'f'.repeat(40)], ['o/a', 2, 'f'.repeat(40)], ['o/b', 1, pr(1).headRefOid]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`, `merge o/b#1 ${pr(1).headRefOid}`, 'update-branch o/a#2']);
+  assert.doesNotMatch(r.log(), /security-review findings/);
+});
+
+test('an approved clean pull request with no security record merges', t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [queued(1, 'CLEAN', '2026-10-17T09:00:00Z', [passed, ownerApproval('SUCCESS')])]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`]);
+});
+
 test('a pull request in flight past the stall limit stops holding the line, and the stall is logged once', t => {
   const r = queueSetup(t);
   r.pulls('o/a', [
