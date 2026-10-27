@@ -17,15 +17,66 @@ export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split
 // Sends `signal` to a spawned script once its slow fake step has recorded `started` in `slowLog` (with `group`, to the
 // whole process group the script leads, as a terminal's Ctrl-C does), and returns how the script exited, how many
 // milliseconds after the signal, and what the step recorded by the time its child would have recorded `finished`.
-export async function interrupt(child, signal, group, slowLog) {
-  const exited = new Promise(done => child.on('exit', (status, by) => done({status, by, at: Date.now()})));
-  for (let i = 0; i < 500 && !lines(slowLog).includes('started'); i++) await sleep(20);
+// Each wait is bounded by `limit` milliseconds: when the step has not started by then (or the script has ended first),
+// or the script has not ended that long after the signal, it records the process tree under the script, kills that
+// tree, and throws with the tree in the message. Without the step started, it sends no signal but the SIGKILL.
+export async function interrupt(child, signal, group, slowLog, limit = 10000) {
+  const exited = new Promise(done => {
+    if (child.exitCode !== null || child.signalCode !== null) done({status: child.exitCode, by: child.signalCode, at: Date.now()});
+    else child.on('exit', (status, by) => done({status, by, at: Date.now()}));
+  });
+  const script = child.spawnargs.join(' ');
+  let ended;
+  exited.then(result => { ended = result; });
+  for (const until = Date.now() + limit; !lines(slowLog).includes('started');) {
+    if (ended) throw new Error(`${script} ended (${ended.by ?? `exit ${ended.status}`}) before its slow step recorded started in ${slowLog}; no signal sent`);
+    if (Date.now() >= until) {
+      throw new Error(`the slow step of ${script} did not record started in ${slowLog} within ${limit} ms; no signal sent\n${await killTree(child, exited)}`);
+    }
+    await sleep(20);
+  }
   const sent = Date.now();
   if (group) process.kill(-child.pid, signal);
   else child.kill(signal);
-  const {status, by, at} = await exited;
+  const result = await within(exited, limit);
+  if (!result) throw new Error(`${signal} did not end ${script} within ${limit} ms; what ran under it:\n${await killTree(child, exited)}`);
   await sleep(2500);
-  return {status, signal: by, after: at - sent, steps: lines(slowLog)};
+  return {status: result.status, signal: result.by, after: result.at - sent, steps: lines(slowLog)};
+}
+// What `promise` resolves to, or undefined once `ms` milliseconds pass first (on a timer that keeps no process alive).
+const within = (promise, ms) => Promise.race([promise, sleep(ms, undefined, {ref: false})]);
+// The processes under a spawned script: its descendants, and every process in a group or session one of them leads,
+// from `ps` (pid, ppid, pgid, sid, state, command). Returns them as a table header first.
+function processTree(pid) {
+  const rows = execFileSync('ps', ['-ww', '-eo', 'pid=,ppid=,pgid=,sid=,stat=,args='], {encoding: 'utf8'}).split('\n')
+    .map(line => line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/)).filter(Boolean)
+    .map(([, pid, ppid, pgid, sid, state, command]) => ({pid: +pid, ppid: +ppid, pgid: +pgid, sid: +sid, state, command}));
+  const under = new Set([pid]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of rows) {
+      if (!under.has(row.pid) && row.pid !== process.pid && [row.ppid, row.pgid, row.sid].some(id => under.has(id))) {
+        under.add(row.pid);
+        grew = true;
+      }
+    }
+  }
+  return rows.filter(row => under.has(row.pid));
+}
+// Records the process tree under a spawned script, sends SIGKILL to the group it leads (if it leads one) and to each
+// process recorded, waits up to two seconds for the script's exit, and returns the tree as text.
+async function killTree(child, exited) {
+  const tree = processTree(child.pid);
+  for (const target of [-child.pid, ...tree.map(row => row.pid)]) {
+    try {
+      process.kill(target, 'SIGKILL');
+    } catch {
+      // gone already, or not a group
+    }
+  }
+  await within(exited, 2000);
+  return ['PID PPID PGID SID STAT COMMAND', ...tree.map(row => `${row.pid} ${row.ppid} ${row.pgid} ${row.sid} ${row.state} ${row.command}`)]
+    .join('\n');
 }
 // A free port on 127.0.0.1, as the kernel hands one out: bound once, then released.
 export function freePort() {
