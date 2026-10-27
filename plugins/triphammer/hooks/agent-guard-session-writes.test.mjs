@@ -122,6 +122,21 @@ test('in a Triphammer session xargs running a shell, eval, source or an inline s
     }
   });
 
+test('in a Triphammer session the letters of an attached xargs option value are not read as options', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  // -e, -i and -l take an optional value only attached, so the rest of their group is it and the next word is the
+  // command; the other value options take the rest of their group, or the next word when nothing follows.
+  for (const command of ['echo ~/.bashrc | xargs -iP touch P', 'echo ~/.bashrc | xargs -ia touch a',
+    'echo ~/.bashrc | xargs -iX touch X', 'echo ~/.bashrc | xargs -en touch', 'echo ~/.bashrc | xargs -r -ea rm',
+    'echo ~/.bashrc | xargs -ld touch', 'echo ~/.bashrc | xargs -rn1 touch', 'echo ~/.bashrc | xargs -rn 1 touch',
+    'echo ~/.bashrc | xargs -0P2 rm', 'echo ~/.bashrc | xargs -rd, rm', 'echo ~/.bashrc | xargs -rd , rm',
+    'echo ~/.bashrc | xargs -rEeof rm', 'echo ~/.bashrc | xargs -rs 99 rm', 'echo ~/.bashrc | xargs -rIP touch P',
+    'echo ~/.bashrc | xargs -rL 1 rm', 'xargs -a list rm', 'xargs -ralist rm']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+});
+
 test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
   const s = triphammerSession(t);
   if (!s) return;

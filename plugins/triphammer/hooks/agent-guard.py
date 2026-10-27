@@ -285,9 +285,10 @@ SCRIPT_RUNNERS = {
 }
 # runuser -u USER runs its operands as the command itself, without a shell.
 SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
-# xargs's options that take the next word as their value (-e, -i and -l take one only attached).
-XARGS_VALUE_OPTIONS = ("adEILnPs", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
-                                    "--process-slot-var"})
+# xargs's short options that take the rest of their group or else the next word as their value, its short options
+# whose optional value can only be the rest of their group, and its long options that take the next word.
+XARGS_VALUE_OPTIONS = ("adEILnPs", "eil", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
+                                           "--process-slot-var"})
 # python's short options without a value, which can stand before c in one group (`-Ic`); c's script is the rest of
 # the group or the next word.
 PYTHON_SCRIPT_FLAG = re.compile(r"-[bBdEhiIOPqRsSuvVx]*c(.*)", re.DOTALL)
@@ -1273,7 +1274,7 @@ def analyze_xargs(command, args, cwd, findings, depth):
     rule reads, or a shell, eval, source or an interpreter's inline script, is refused, since the hook cannot read the
     operands xargs gives it."""
     i = 0
-    short, long = XARGS_VALUE_OPTIONS
+    short, optional, long = XARGS_VALUE_OPTIONS
     while i < len(args):
         v = args[i].value
         if v == "--":
@@ -1284,8 +1285,10 @@ def analyze_xargs(command, args, cwd, findings, depth):
         if v.startswith("--"):
             i += 1 + (v in long)
         else:
-            letter = next((j for j, c in enumerate(v[1:]) if c in short), None)
-            i += 1 + (letter is not None and letter == len(v) - 2)
+            # The first letter that takes a value ends the group: the rest of the word is its value, and only a letter
+            # in short that ends the word takes the next word instead.
+            letter = next((j for j, c in enumerate(v[1:], 1) if c in short or c in optional), None)
+            i += 1 + (letter == len(v) - 1 and v[letter] in short)
     inner = Command()
     inner.words, inner.pipeline_input, inner.substituted = args[i:], command.pipeline_input, command.substituted
     analyze(inner, cwd, findings, depth)
