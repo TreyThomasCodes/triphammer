@@ -22,7 +22,7 @@
 #               any repository, so this rule needs no git and no project file. eval's arguments are judged as the
 #               command they make (a cd in them moves the rest of the command); an eval whose text is computed when
 #               it runs (a variable, a command substitution), a source or . of a file the same command writes, a
-#               bash, sh, zsh or dash given such a file as its script (`bash s.sh`, not -c text or -s), and a source
+#               bash, sh, zsh, dash or ash given such a file as its script (`bash s.sh`, not -c text or -s), and a source
 #               or . of a process substitution are refused, since the hook cannot read what they run; the write and
 #               the run match when they name the same path, spelled with ~, $HOME, ${HOME} or relative to the
 #               directory. Reads (cat, ls, readlink, systemctl --user status, show, list-timers, is-enabled) stay
@@ -155,7 +155,9 @@
 # ./typescript) and its -I, -O, -B and -T log files as files it writes; su's login shell (su -, -l) starts in another
 # directory, so the worktree-only rule loses track of the directory for its LINE. xargs's command is judged as
 # written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
-# cp, rm, touch and the rest) is refused, since the hook cannot read the operands xargs adds from its input. Not
+# cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, or python or
+# node with an inline script is refused, since the hook cannot read the operands xargs adds from its input, nor
+# what -I's string becomes inside a script. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
 # options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
 # a LINE run by a shell that reads it differently from sh (su -s), and outside a Triphammer session the operands
@@ -295,7 +297,7 @@ SHELL_OPTION_GROUP = re.compile(r"[-+][a-zA-Z]+")
 ENV_SPLIT_FLAG = re.compile(r"-[iv0]*S(.*)|--split-string(?:=(.*))?", re.DOTALL)
 # Reserved words that can stand before a command name: `if true; then sed -i ...; fi` runs sed.
 RESERVED = {"if", "then", "else", "elif", "do", "while", "until", "{", "!", "coproc"}
-SHELLS = {"bash", "sh", "zsh", "dash"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ash"}
 PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?$")
 # Script writes the hook recognises, each with the written path as a string literal or a plain variable. A path
 # the script builds any other way is not followed, so the script is allowed.
@@ -1209,7 +1211,8 @@ def in_place_edit(name, values):
 def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
-    rule reads is refused, since the hook cannot read the operands xargs gives it."""
+    rule reads, or a shell, eval, source or an interpreter's inline script, is refused, since the hook cannot read the
+    operands xargs gives it."""
     i = 0
     short, long = XARGS_VALUE_OPTIONS
     while i < len(args):
@@ -1232,6 +1235,15 @@ def analyze_xargs(command, args, cwd, findings, depth):
         name = os.path.basename(words[0].value)
         if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
             findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
+        elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
+            # xargs also puts its input in place of -I's string inside the script, which the hook read as written.
+            findings.unresolved.append(f"the script `{name}` runs with words from the input of xargs")
+
+
+def inline_script(name, values):
+    """Whether python or node with the argument values runs a script given on its command line."""
+    return (PYTHON.match(name) is not None and any(PYTHON_SCRIPT_FLAG.fullmatch(v) for v in values)
+            or name in ("node", "nodejs") and any(v in ("-e", "--eval", "-p", "--print") for v in values))
 
 
 def path_changer_files(name, args):

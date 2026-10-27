@@ -102,6 +102,34 @@ test('in a Triphammer session a write behind setsid, flock, ionice, taskset, chr
     }
   });
 
+test('in a Triphammer session xargs running a shell, eval, source or an inline script is refused, since -I puts its input in the script',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of [`echo ~/.bashrc | xargs -I{} sh -c 'echo x > {}'`,
+      `echo ~/.bashrc | xargs -I{} sh -c 'touch {}'`, `echo ~/.bashrc | xargs -I{} bash -c 'touch {}'`,
+      `echo ~/.bashrc | xargs -i sh -c 'echo x > {}'`, `echo ~/.bashrc | xargs -I{} sudo sh -c 'echo > {}'`,
+      `echo ~/.bashrc | xargs --replace sh -c 'touch {}'`, `echo ~/.bashrc | xargs -I{} ash -c 'touch {}'`,
+      `echo x | xargs -I{} flock /tmp/l -c 'touch {}'`, `echo x | xargs -I{} script -qc 'touch {}' /dev/null`,
+      `echo x | xargs -I{} su someone -c 'touch {}'`, `echo x | xargs -I{} runuser someone -c 'touch {}'`,
+      `echo x | xargs eval`, `echo x | xargs source`, `echo ~/.bashrc | xargs -I{} python3 -c "open('{}', 'w')"`,
+      `echo ~/.bashrc | xargs -I{} node -e "require('fs').writeFileSync('{}', '')"`]) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of [`echo x | xargs python3 tools/check.py`, `echo x | xargs node tools/check.mjs`]) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of [`ash -c 'touch ~/.bashrc'`, `busybox ash -c 'touch ~/.bashrc'`]) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  assert.equal(decide(`ash -c 'touch build/x'`, s.worktree, {env: s.env}), null);
+});
+
 test('in a Triphammer session those wrappers writing inside its worktree, and xargs running a command that writes nothing, are allowed',
   t => {
     const s = triphammerSession(t);
