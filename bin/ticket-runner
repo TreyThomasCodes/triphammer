@@ -540,7 +540,7 @@ working_label add "$labelled" "$number"
 # runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
 # failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
 app_login="$app_author"
-[[ "$app_author" != app/* ]] || app_login="${app_author#app/}[bot]"
+[[ "$app_author" != app/* ]] || app_login="${app_author#app/}[bot]"  # case-sensitive: gh's own app/ prefix
 # shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
 issue_brake() {
   local facts by closer

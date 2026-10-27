@@ -145,7 +145,7 @@ for parent in sorted(slices):
 
 failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"}
 for pr in sorted(prs, key=lambda pr: pr["number"]):
-    if author(pr) != app or pr["isDraft"] or "hold" in labels(pr):
+    if (author(pr) or "").lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):
         continue
     issue = (closing(pr, repo) or [0])[0]
     checks = [c for c in latest_checks(pr["statusCheckRollup"] or [])

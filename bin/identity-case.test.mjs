@@ -13,8 +13,9 @@ const repository = join(here, '..');
 
 // Lower-case names count anywhere, alone or as part of a snake_case name (tri_repo, app_login), but not inside a
 // hyphenated word (needs-owner, owner-approval: label and check names) or a longer word (loginctl, repository).
-// Upper-case names count only as expansions ($REPO, ${OWNER}): bare, they are setting names (" REPO CHECKOUT ").
-const identity = /(?<![\w-])(?:\w*_)?(?:owner|login|repo)(?:_\w*)?(?![\w-])|\$\{?(?:\w*_)?(?:OWNER|REPO)(?:_\w*)?\b/;
+// `app`, the App's login (APP_AUTHOR), counts only alone: app_dir and app_id are no logins. Upper-case names count
+// only as expansions ($REPO, ${OWNER}, $APP_AUTHOR): bare, they are setting names (" REPO CHECKOUT ").
+const identity = /(?<![\w-])(?:(?:\w*_)?(?:owner|login|repo|author)(?:_\w*)?|app)(?![\w-])|\$\{?(?:\w*_)?(?:OWNER|REPO|AUTHOR)(?:_\w*)?\b/;
 const lowered = /ascii_downcase|\.lower\(\)|\.casefold\(\)|\.toLowerCase\(\)|,,\}|\btr\s+(?:'\[:upper:\]'\s+'\[:lower:\]'|A-Z\s+a-z|'A-Z'\s+'a-z')/;
 const annotated = /#\s*case-sensitive:\s*\S/;
 const openers = '([{', closers = ')]}';
@@ -74,6 +75,8 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
     `jq -r --arg owner "$o" '.[] | select(.account.login == $owner) | .id'`,
     `jq '.[] | select((.user.login | ascii_downcase) == $owner)'`,
     'if pr["author"]["login"] != owner:',
+    'if author(pr) != app or pr["isDraft"] or "hold" in labels(pr):',
+    'if [ "$by" == "$APP_AUTHOR" ]; then',
     'grep -qxF "REPO=$repo" "$config"',
     'grep -Fx -- "$REPO" <<< "$installed"',
   ];
@@ -82,6 +85,7 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
     'elif [ "${by,,}" != "${app_login,,}" ]; then',
     `jq '.[] | select((.user.login | ascii_downcase) == ($owner | ascii_downcase))'`,
     'if pr["author"]["login"].lower() != owner.lower():',
+    'if (author(pr) or "").lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):',
     'grep -qixF "REPO=$repo" "$config"',
     'elif [ "$by" != "$app_login" ]; then  # case-sensitive: the sample says why',
     // Not identities: label and check names, setting names, other words, and operands that hold none.
@@ -91,6 +95,7 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
     'if [ "$(loginctl show-user "$user" --property=Linger --value)" != yes ]; then',
     `jq '.[] | select(.account.login? | type == "string")'`,
     '[[ "$tri_repo" =~ $pattern && "$home" == /* ]]',
+    'if [ "$(stat -c %a -- "$app_dir")" != 700 ]; then',
     'same_repository "$1" "$served" && grep -qsxF -- "$line" "$state/findings"',
   ];
   for (const line of passed) assert.equal(caseSensitiveComparison(line), null, `passed: ${line}`);
