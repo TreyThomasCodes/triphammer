@@ -936,11 +936,17 @@ test("a compose pattern that does not match the example project's names prunes o
 // Two projects on one machine, as ticket-runner@a and ticket-runner@b run them: each a ticketSetup (its own repository fakes,
 // checkout and state directory) whose config is a.conf or b.conf under one XDG_CONFIG_HOME, both with one
 // XDG_STATE_HOME, so they share the shared directory `sharedDir`. Each project's `tick` runs it, `runs` counts the runs its
-// log started, and `tickCommand` writes a program that runs one tick of it, for another project's session to run.
-function twoProjects(t, {a: aIssues = [issue(7)], b: bIssues = [issue(7)]} = {}) {
+// log started, and `tickCommand` writes a program that runs one tick of it with the extra environment given, for
+// another project's session to run.
+function twoProjects(t, {a = [issue(7)], b = [issue(7)]} = {}) {
+  return projects(t, {a, b});
+}
+// The same for any number of projects, one per key of `issuesByName`.
+function projects(t, issuesByName) {
   const shared = mkdtempSync(join(tmpdir(), 'triphammer-projects-'));
   t.after(() => rmSync(shared, {recursive: true, force: true}));
   mkdirSync(join(shared, 'xdg/triphammer'), {recursive: true});
+  let commands = 0;
   const project = (name, issues) => {
     const r = ticketSetup(t, issues);
     writeFileSync(join(shared, `xdg/triphammer/${name}.conf`), readFileSync(r.configFile, 'utf8'));
@@ -954,9 +960,9 @@ function twoProjects(t, {a: aIssues = [issue(7)], b: bIssues = [issue(7)]} = {})
       tick: (more = {}) => r.tick({...env, ...more}),
       log,
       runs: () => (log().match(/: run \d of 3 starting/g) ?? []).length,
-      tickCommand() {
-        const all = {...r.env, DEMO_CALLS: join(r.root, 'demo-calls'), PROBE: r.root, ...env};
-        const file = join(shared, `tick-${name}`);
+      tickCommand(more = {}) {
+        const all = {...r.env, DEMO_CALLS: join(r.root, 'demo-calls'), PROBE: r.root, ...env, ...more};
+        const file = join(shared, `tick-${name}-${++commands}`);
         writeFileSync(file, `#!/bin/sh\nexec env -i ${Object.entries(all).map(([k, v]) => `${k}=${quote(v)}`).join(' ')} ${
           quote(join(r.checkout, 'bin/ticket-runner'))}\n`, {mode: 0o755});
         return file;
@@ -964,7 +970,12 @@ function twoProjects(t, {a: aIssues = [issue(7)], b: bIssues = [issue(7)]} = {})
     };
   };
   const sharedDir = join(shared, 'state/triphammer');
-  return {a: project('a', aIssues), b: project('b', bIssues), sharedDir};
+  return {...Object.fromEntries(Object.entries(issuesByName).map(([name, issues]) => [name, project(name, issues)])),
+    sharedDir, root: shared,
+    maxSessions(text) {
+      mkdirSync(sharedDir, {recursive: true});
+      writeFileSync(join(sharedDir, 'max-sessions'), text);
+    }};
 }
 
 test("a session in one project holds the other project's tick, which starts nothing and waits for its turn", t => {
@@ -1239,4 +1250,109 @@ wait
   assert.equal(alive(Number(r.probe('session-child'))), false);
   assert.equal(existsSync(r.current), false);
   assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
+});
+
+// Writes a program a session runs through $DURING_SESSION.
+function sessionScript(dir, name, body) {
+  const file = join(dir, name);
+  writeFileSync(file, `#!/bin/sh\n${body}`, {mode: 0o755});
+  return file;
+}
+// Whether a project's tick claimed anything: labelled an issue agent-working or opened one.
+const claimed = p => labelCalls(p.ghCalls()).length > 0 || p.creates().length > 0;
+
+test('without max-sessions, a run in one project makes another project with a run to start exit, claiming nothing', t => {
+  const {a, b, sharedDir} = twoProjects(t);
+  a.tick({DURING_SESSION: b.tickCommand()});
+  assert.equal(existsSync(join(sharedDir, 'max-sessions')), false, 'no script writes max-sessions');
+  assert.equal(a.runs(), 1);
+  assert.equal(b.ran(), false);
+  assert.equal(claimed(b), false);
+  assert.doesNotMatch(b.log(), /max-sessions/);
+});
+
+test('with max-sessions at 2, two projects run at once and a third exits, claiming nothing', t => {
+  const p = projects(t, {a: [issue(7)], b: [issue(7)], c: [issue(7)]});
+  p.maxSessions('2\n');
+  p.a.tick({DURING_SESSION: p.b.tickCommand({DURING_SESSION: p.c.tickCommand()})});
+  assert.equal(p.a.runs(), 1);
+  assert.equal(p.b.runs(), 1, 'b started its run while a ran');
+  assert.equal(p.c.ran(), false, 'every slot was taken');
+  assert.equal(claimed(p.c), false);
+  assert.ok(existsSync(join(p.sharedDir, 'waiting/c')), 'c marked itself waiting');
+});
+
+test('a second tick of a project whose run is in progress never starts a run, whatever max-sessions is', t => {
+  const p = projects(t, {a: [issue(7), issue(8)]});
+  p.maxSessions('3\n');
+  p.a.tick({DURING_SESSION: p.a.tickCommand()});
+  assert.equal(p.a.runs(), 1);
+  assert.equal(labelCalls(p.a.ghCalls()).filter(call => call.includes('--add-label')).length, 1);
+});
+
+test('with a free slot the project that ran last runs despite a fresh waiting mark; with every slot taken it yields', t => {
+  const free = twoProjects(t);
+  free.maxSessions('2\n');
+  free.a.tick();
+  writeFileSync(join(free.sharedDir, 'waiting/b'), `${Math.floor(Date.now() / 1000)}\n`);
+  free.a.tick();
+  assert.equal(free.a.runs(), 2);
+  assert.doesNotMatch(free.a.log(), /yielding/);
+
+  const full = projects(t, {a: [issue(7)], b: [issue(7)], c: [issue(7)]});
+  full.maxSessions('2\n');
+  // During c's run, a ran last and b is waiting; a's tick takes the last free slot.
+  full.c.tick({DURING_SESSION: sessionScript(full.root, 'a-last', `printf 'a\\n' > '${join(full.sharedDir, 'last')}'
+date +%s > '${join(full.sharedDir, 'waiting/b')}'
+exec '${full.a.tickCommand()}'
+`)});
+  assert.equal(full.c.runs(), 1);
+  assert.equal(full.a.runs(), 0);
+  assert.match(full.a.log(), /ticket #7: a ran last and b is waiting; yielding this turn to it/);
+});
+
+test('a max-sessions that is not a whole number of at least 1 counts as 1, and the tick logs that it ignored it', t => {
+  for (const text of ['0\n', '-1\n', 'two\n', '\n']) {
+    const {a, b, maxSessions} = twoProjects(t);
+    maxSessions(text);
+    a.tick({DURING_SESSION: b.tickCommand()});
+    assert.equal(a.runs(), 1, JSON.stringify(text));
+    assert.equal(b.ran(), false, JSON.stringify(text));
+    assert.equal(claimed(b), false, JSON.stringify(text));
+    assert.match(b.log(), /ignored \S+\/max-sessions, which is not a whole number of at least 1; running one session at a time/,
+      JSON.stringify(text));
+  }
+});
+
+test('a run killed mid-session frees its slot for a later tick', t => {
+  const p = projects(t, {a: [issue(7)], b: [issue(7)], c: [issue(7)]});
+  p.maxSessions('2\n');
+  // As systemd kills a unit's processes: the runner, its brake watcher and the session.
+  const kill = sessionScript(p.root, 'kill-run', `pid="$(sed -n 's/^pid //p' '${p.a.current}')"
+pkill -KILL -P "$pid"
+kill -KILL "$pid"
+`);
+  assert.throws(() => p.a.tick({...brakeEnv, DURING_SESSION: kill}), error => error.signal === 'SIGKILL');
+  assert.equal(p.a.runs(), 1);
+  p.b.tick({DURING_SESSION: p.c.tickCommand()});
+  assert.equal(p.b.runs(), 1);
+  assert.equal(p.c.runs(), 1, "a's slot was free again");
+});
+
+test('with max-sessions above 1 the shared stop file and the shared backoff still pause every project', t => {
+  const stopped = twoProjects(t);
+  stopped.maxSessions('2\n');
+  writeFileSync(join(stopped.sharedDir, 'stop'), '');
+  stopped.a.tick();
+  stopped.b.tick();
+  assert.equal(stopped.a.ran(), false);
+  assert.equal(stopped.b.ran(), false);
+
+  const backedOff = twoProjects(t);
+  backedOff.maxSessions('2\n');
+  writeFileSync(join(backedOff.sharedDir, 'backoff'), `${Math.floor(Date.now() / 1000) + 3600}\n`);
+  backedOff.a.tick();
+  backedOff.b.tick();
+  assert.equal(backedOff.a.ran(), false);
+  assert.equal(backedOff.b.ran(), false);
 });
