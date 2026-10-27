@@ -202,6 +202,19 @@ test('in a Triphammer session xargs with a long option not named in full is refu
     }
   });
 
+test('in a Triphammer session xargs running sed or perl is refused, since its input can add -i after the script',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo "-i ~/.bashrc" | xargs sed s/a/b/', 'echo "-i ~/.bashrc" | xargs perl -pe s/a/b/',
+      'echo -i | xargs -I{} sed {} s/a/b/ ~/.bashrc', 'echo "-i ~/.bashrc" | xargs gsed s/a/b/']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
   const s = triphammerSession(t);
   if (!s) return;

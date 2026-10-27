@@ -111,7 +111,8 @@
 #               process stops whatever else is still running a second later.
 #   git-command  every git config write, whatever the key and scope (a set, --add, --replace-all, --unset,
 #               --unset-all, --rename-section, --remove-section, --edit, a --file, and the set, unset, rename-section,
-#               remove-section and edit subcommands, and xargs running git config), since a worktree's configuration
+#               remove-section and edit subcommands, and xargs running git config or -I's string as git's
+#               subcommand, a git -c value or an assignment before git), since a worktree's configuration
 #               is its repository's (or ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename,
 #               remove, rm, set-head, set-branches and set-url (and xargs running git remote, or git with no
 #               subcommand); git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
@@ -158,10 +159,11 @@
 # file counts as a file it creates, and script's typescript (its operand, else ./typescript) and its -I, -O, -B and
 # -T log files as files it writes; su's login shell (su -, -l) starts in another directory, so the worktree-only
 # rule loses track of the directory for its LINE. xargs's command is judged as
-# written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
-# cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, python or
+# written, and in a Triphammer session xargs running one of the worktree-only rule's writers (tee, cp, rm, touch and
+# the rest), sed or perl with or without -i (GNU sed and perl read an -i the input adds after the script), a shell (also through script, su, runuser or flock -c), eval, source, python or
 # node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
-# write), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, or a command
+# write), git with -I's string in a word up to and including its subcommand (the subcommand, a git -c value, an
+# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, or a command
 # the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
 # or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
 # what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
@@ -1291,8 +1293,8 @@ def in_place_edit(name, values):
 def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
-    rule reads, a shell, eval, source or an interpreter's inline script, git config or git remote (or git with no
-    subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, or a
+    rule reads, sed or perl (whose -i the input can add), a shell, eval, source or an interpreter's inline script, git
+    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, or a
     command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
     gives it."""
     i, replace, unknown = 0, None, []
@@ -1346,19 +1348,28 @@ def analyze_xargs(command, args, cwd, findings, depth):
         return
     words = [w for w in words if w.value != XARGS_INPUT]
     name = os.path.basename(words[0].value)
-    if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
+    if name in ("sed", "gsed", "perl") or name in SUBSTITUTION_WRITERS:
+        # GNU sed and perl read -i after the script too, and the input can give it (or -I's string stand for it).
         findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
     elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
         # xargs also puts its input in place of -I's string inside the script, which the hook read as written.
         findings.unresolved.append(f"the script `{name}` runs with words from the input of xargs")
-    elif name == "git" and git_subcommand(words[1:]) in (None, "config", "remote"):
-        # The input's words turn a read (git config KEY, git remote) into a write, or name the subcommand itself.
+    elif name == "git" and (git_subcommand(words[1:]) in (None, "config", "remote") or replace and any(
+            replace in w.value for w in git_prefix(inner.words, words))):
+        # The input's words turn a read (git config KEY, git remote) into a write, or name the subcommand itself; -I's
+        # string can also stand for the subcommand, a -c value or an environment assignment before git.
         findings.git_settings.append(f"`{' '.join(w.value for w in words)}` with words from the input of xargs, "
                                      f"which can write git configuration")
 
 
 def git_subcommand(args):
     """The subcommand after git's own options, or None when there is none."""
+    i = git_subcommand_index(args)
+    return None if i is None else args[i].value
+
+
+def git_subcommand_index(args):
+    """The index of the subcommand after git's own options, or None when there is none."""
     i = 0
     while i < len(args):
         v = args[i].value
@@ -1367,8 +1378,17 @@ def git_subcommand(args):
         elif v.startswith("-"):
             i += 1
         else:
-            return v
+            return i
     return None
+
+
+def git_prefix(written, words):
+    """The words of a command xargs runs up to and including git's subcommand: the written words strip_prefix dropped
+    (wrappers, their options and variable assignments), then git and its own options. words is what strip_prefix left,
+    starting with git."""
+    sub = git_subcommand_index(words[1:])
+    kept = {id(w) for w in words}
+    return [w for w in written if id(w) not in kept] + words[:len(words) if sub is None else sub + 2]
 
 
 def inline_script(name, values):

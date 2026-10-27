@@ -79,6 +79,21 @@ test('in a Triphammer session xargs running git config, git remote or git withou
     }
   });
 
+test('in a Triphammer session xargs with -I standing for git\'s subcommand, a -c value or an assignment before git is refused',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo config | xargs -I{} git {} core.hooksPath /tmp/h',
+      'echo remote | xargs -I{} git {} add x https://x', 'echo core.fsmonitor=/tmp/evil | xargs -I{} git -c {} status',
+      `echo "'core.fsmonitor=/tmp/evil'" | xargs -I{} env GIT_CONFIG_PARAMETERS={} git status`,
+      'echo config | xargs -i git {} core.hooksPath /tmp/h', 'echo config | xargs --replace=@ git @ core.pager x']) {
+      assertRuleDenied(decide(command, s.worktree, {env: s.env}), 'git-command', command);
+    }
+    for (const command of ['echo src/x.cs | xargs -I{} git log -- {}', 'echo HEAD | xargs -I{} git -C src show {}']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session reading git config and git -c with other keys stay allowed', t => {
   const s = triphammerSession(t);
   if (!s) return;
