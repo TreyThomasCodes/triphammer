@@ -173,8 +173,8 @@
 # what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
 # which may take the next word and move the command. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
-# options the hook does not list (an abbreviated long option other than xargs's and time's, script -t or --timing
-# with its file attached, -tFILE or --timing=FILE),
+# options the hook does not list (an abbreviated long option other than xargs's and time's), the timing file script
+# writes (-tFILE or --timing=FILE; the hook reads the rest of -t's group as that file, as script does),
 # busybox --install,
 # a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
 # from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
@@ -274,7 +274,6 @@ WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "exec", "time", "nice"
 # Wrapper options that take a value: short letters (value attached, `-n10`, or the next word) and long names (value
 # after `=`, `--user=someone`, or the next word).
 WRAPPER_VALUE_OPTIONS = {
-    # sudo's -h is help, or a host only when attached (`-hhost`), so it never takes the next word.
     "sudo": ("aCcDgpRrTtUu", {"--auth-type", "--login-class", "--close-from", "--chdir", "--group", "--host",
                                "--prompt", "--chroot", "--role", "--type", "--command-timeout", "--other-user",
                                "--user"}),
@@ -308,6 +307,10 @@ SCRIPT_RUNNERS = {
 }
 # runuser -u USER runs its operands as the command itself, without a shell.
 SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
+# The wrappers' and script runners' short letters whose optional value can only be attached: like a letter that takes
+# a value, each ends its group, the rest of the word being its value, but never takes the next word. sudo's -h is
+# help, or a host when attached (`-hhost`); script's -t is its timing file (`-tc` writes timing to ./c).
+OPTIONAL_VALUE_LETTERS = {"sudo": "h", "script": "t"}
 # xargs's short options that take the rest of their group or else the next word as their value, its short options
 # whose optional value can only be the rest of their group, and its long options that take the next word. GNU xargs
 # also takes any unambiguous prefix of a long option, so in a session one not named in full is refused.
@@ -730,7 +733,7 @@ def script_runner_words(name, args, chdirs, writes):
     its script from stdin (script passes its own stdin through), which a pipeline or here-string can supply. Appends
     script's typescript and log files to writes, as (word, True) pairs, and a None to chdirs for su's login shell,
     which starts in the user's home directory."""
-    files, options = split_options(args, *SCRIPT_RUNNERS[name])
+    files, options = split_options(args, *SCRIPT_RUNNERS[name], OPTIONAL_VALUE_LETTERS.get(name, ""))
     given = {option for option, _ in options}
     line = [value for option, value in options
             if option in ("-c", "--command", "--session-command") and value is not None][-1:]
@@ -779,8 +782,8 @@ def chdir_option(wrapper, option):
     if option.startswith("--"):
         name = option.partition("=")[0]
         return len(name) > 2 and long.startswith(name)
-    short = WRAPPER_VALUE_OPTIONS[wrapper][0]
-    return next((c for c in option[1:] if c in short), None) == letter
+    end = value_letter(option, WRAPPER_VALUE_OPTIONS[wrapper][0], OPTIONAL_VALUE_LETTERS.get(wrapper, ""))
+    return end is not None and option[end] == letter
 
 
 def chdir_value(wrapper, word, following):
@@ -823,11 +826,8 @@ def takes_value(wrapper, option):
     short, long = WRAPPER_VALUE_OPTIONS.get(wrapper, ("", set()))
     if option.startswith("--"):
         return "=" not in option and (long_name(wrapper, option) in long or chdir_option(wrapper, option))
-    letters = option[1:]
-    for j, letter in enumerate(letters):
-        if letter in short:
-            return j == len(letters) - 1
-    return False
+    end = value_letter(option, short, OPTIONAL_VALUE_LETTERS.get(wrapper, ""))
+    return end == len(option) - 1 and option[end] in short
 
 
 def absolute(text, cwd):
@@ -1369,7 +1369,7 @@ def analyze_xargs(command, args, cwd, findings, depth):
         else:
             # The first letter that takes a value ends the group: the rest of the word is its value, and only a letter
             # in short that ends the word takes the next word instead.
-            letter = next((j for j, c in enumerate(v[1:], 1) if c in short or c in optional), None)
+            letter = value_letter(v, short, optional)
             taken = letter == len(v) - 1 and v[letter] in short
             if letter is not None and v[letter] == "I":
                 replace = args[i + 1].value if taken and i + 1 < len(args) else v[letter + 1:] or None
@@ -1476,10 +1476,17 @@ def derived(word, text):
     return part
 
 
-def split_options(args, short_values, long_values):
+def value_letter(group, short_values, optional_values=""):
+    """The index in a short-option group word (`-qtc`) of its first letter that takes a value, which ends the group:
+    one in short_values (the rest of the group, or else the next word) or in optional_values (only the rest of the
+    group, possibly empty). None when no letter does."""
+    return next((j for j, c in enumerate(group[1:], 1) if c in short_values or c in optional_values), None)
+
+
+def split_options(args, short_values, long_values, optional_values=""):
     """The operand words and the (option, value word or None) pairs of a GNU-style argument list. A short letter in
-    short_values takes the rest of its group or the next word; a long name in long_values takes the next word unless
-    its value is attached with `=`."""
+    short_values takes the rest of its group or the next word, one in optional_values only the rest of its group; a
+    long name in long_values takes the next word unless its value is attached with `=`."""
     files, options, i, ended = [], [], 0, False
     while i < len(args):
         w, i = args[i], i + 1
@@ -1498,16 +1505,15 @@ def split_options(args, short_values, long_values):
             else:
                 options.append((name, None))
         else:
-            for j, letter in enumerate(v[1:]):
-                if letter in short_values:
-                    rest, value = v[j + 2:], None
-                    if rest:
-                        value = derived(w, rest)
-                    elif i < len(args):
-                        value, i = args[i], i + 1
-                    options.append(("-" + letter, value))
-                    break
-                options.append(("-" + letter, None))
+            end = value_letter(v, short_values, optional_values)
+            options += [("-" + letter, None) for letter in v[1:end]]
+            if end is not None:
+                rest, value = v[end + 1:], None
+                if rest:
+                    value = derived(w, rest)
+                elif v[end] in short_values and i < len(args):
+                    value, i = args[i], i + 1
+                options.append(("-" + v[end], value))
     return files, options
 
 

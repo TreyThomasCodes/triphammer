@@ -271,3 +271,18 @@ test('in a Triphammer session GNU time writing its -o or --output file outside t
     assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
   }
 });
+
+test('in a Triphammer session an option whose optional value can only be attached ends its group, as getopt reads it',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    // script's -t[FILE] and sudo's -h[HOST] take the rest of their group as their value, never the next word: in
+    // `script -tc FILE` the timing file is c and FILE is the typescript.
+    for (const command of ['script -tc ~/.bashrc', 'script -q -tc ~/.bashrc < /dev/null', 'script -qtc ~/.bashrc',
+      'script -tc -q ~/.bashrc', 'sudo -hhost touch ~/.bashrc', 'sudo -hDx touch ~/.bashrc']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['script -q -tc true build/ts', 'script -qt -c true build/ts', 'sudo -hhost touch build/x']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
