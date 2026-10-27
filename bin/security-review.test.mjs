@@ -108,6 +108,16 @@ test('a pull request with more than 100 files is reviewed when its only trigger 
   assert.match(r.codex().args.at(-1), /src\/Domain\/File149\.cs, bin\/ticket-runner$/);
 });
 
+test('a pull request that only renames a file out of a trigger path is reviewed', async t => {
+  const r = reviewSetup(t);
+  r.gh.json('files.json', [{filename: 'docs/risk-tier.yml', previous_filename: '.github/workflows/risk-tier.yml',
+    status: 'renamed'}]);
+  const result = await r.review();
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.equal(r.comments().length, 1);
+  assert.match(r.codex().args.at(-1), /changes, and whatever they call: docs\/risk-tier\.yml, \.github\/workflows\/risk-tier\.yml$/);
+});
+
 test('a file list gh cannot read exits 1 with the reason, and reviews and comments nothing', async t => {
   const r = reviewSetup(t);
   r.gh.respond({[`api --paginate repos/${repo}/pulls/5/files`]: {stderr: 'gh: network down\n', exit: 1}});
