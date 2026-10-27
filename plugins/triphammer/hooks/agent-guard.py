@@ -276,7 +276,7 @@ WRAPPER_OPERANDS = {"timeout": ANY_OPERAND, "flock": ANY_OPERAND, "taskset": ANY
 # script (-c or --command; its log files and typescript operand are writes) and su and runuser (-c, --command or
 # --session-command; their remaining operands after the user go to the shell).
 SCRIPT_RUNNERS = {
-    "script": ("cEIOBTo", {"--command", "--echo", "--log-in", "--log-out", "--log-io", "--log-timing",
+    "script": ("cEIOBTmo", {"--command", "--echo", "--log-in", "--log-out", "--log-io", "--log-timing",
                            "--logging-format", "--output-limit"}),
     "su": ("cgGsw", {"--command", "--session-command", "--group", "--supp-group", "--shell",
                      "--whitelist-environment"}),

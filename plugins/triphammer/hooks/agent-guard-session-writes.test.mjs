@@ -93,6 +93,7 @@ test('in a Triphammer session a write behind setsid, flock, ionice, taskset, chr
       'chrt -o 0 touch ~/.bashrc', 'chrt --sched-runtime 5 -d 0 touch ~/.bashrc', 'stdbuf -oL touch ~/.bashrc',
       'busybox touch ~/.bashrc', 'nice -n 5 setsid busybox rm ~/.profile', `script -qc "touch ~/.bashrc" /dev/null`,
       `script --command='touch ~/.bashrc' -q /dev/null`, 'script -qc true ~/.bashrc', 'script -q -O ~/.bashrc -c true',
+      'script -q -m advanced -c true ~/.bashrc',
       `su -c "touch ~/.bashrc"`, `su - someone -c 'touch ~/.bashrc'`, `sudo runuser -u someone -- rm ~/.x`,
       `runuser someone --command='rm ~/.x'`, `su -l -c 'touch .bashrc'`, 'echo ~/.bashrc | xargs rm', 'xargs touch <<< ~/.bashrc',
       'echo x | xargs -I{} touch {}', 'echo x | xargs -n 1 -P 2 sed -i s/a/b/', 'echo x | xargs sudo tee',
