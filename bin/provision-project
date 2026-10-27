@@ -264,9 +264,9 @@ extras=()
 [ ${#extras[@]} -eq 0 ] || apt_install "${extras[@]}"
 
 # The identity the user's commits carry, from APP_AUTHOR, unless one is set already: an App's bot account
-# (app/<slug> commits as <slug>[bot]) or the account itself, each at its GitHub noreply address.
-git_name="${app_author#app/}"
-[ "$git_name" = "$app_author" ] || git_name="${git_name}[bot]"
+# (app/<slug>, its prefix in any case, commits as <slug>[bot]) or the account itself, each at its GitHub noreply address.
+git_name="$app_author"
+[[ "${app_author,,}" != app/* ]] || git_name="${app_author:4}[bot]"  # lowered, against a lowercase literal
 for key in user.name user.email; do
   value="$git_name"
   [ "$key" = user.name ] || value="$git_name@users.noreply.github.com"
