@@ -14,8 +14,9 @@
 # A project that has a config already, the one in ~/.config/triphammer that names its repository, keeps each setting it
 # holds (its checkout, APP_AUTHOR, STATE_DIR, MODULES and the rest, unknown keys too) unless this run gives another:
 # <checkout>, --set, --modules or --app-author replaces one, --unset removes one, and --modules '' turns every module
-# off. The file is read as KEY=VALUE lines, never run. A config's checks and a module's needs apply to the settings that
-# result. It prints each setting it adds, keeps, changes or removes (`config: OWNER kept (<login>)`), with its value
+# off. With the codex module on, each of its settings that the result lacks (one --unset removes included) gets its
+# default from config.sh's codex_defaults; a value the config holds or --set gives stays. The file is read as KEY=VALUE
+# lines, never run. A config's checks and a module's needs apply to the settings that result. It prints each setting it adds, keeps, changes or removes (`config: OWNER kept (<login>)`), with its value
 # unless the key's name looks like a secret's.
 #
 # It installs, each only when it is not there already: the project's checkout, cloned as the service user; the .NET SDK
@@ -123,7 +124,7 @@ old_keys=()
 declare -A old=()
 # merge <checkout> <app author> <default state dir>: sets conf_keys and conf to the settings the config is to hold: the
 # required four, MODULES, then the existing config's others in its order and the new ones in --set's, each the value
-# this run gives, or else the existing one, unless --unset removes it.
+# this run gives, or else the existing one, unless --unset removes it, then the codex module's defaults it still lacks.
 conf_keys=()
 declare -A conf=()
 merge() {
@@ -147,6 +148,13 @@ merge() {
   while IFS= read -r line; do
     [ -z "$line" ] || put "${line%%=*}" "${line#*=}"
   done <<< "$sets"
+  # With the codex module on, each of its settings the result leaves out or empty gets its default, at the end.
+  if module codex; then
+    for key in "${optional_settings[@]}"; do
+      [ -n "${codex_defaults[$key]+set}" ] && [ -z "${conf[$key]:-}" ] && ! given "$key" || continue
+      put "$key" "${codex_defaults[$key]}"
+    done
+  fi
 }
 module() { [[ ",${conf[MODULES]:-}," == *",$1,"* ]]; }
 # config_text: the project's config file, from conf.

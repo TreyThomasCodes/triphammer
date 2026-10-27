@@ -205,6 +205,7 @@ test('a comment it cannot record exits 1 saying so after posting', async t => {
 
 test('a review skipped for budget posts a skipped note that never reads as a clean review', async t => {
   const r = reviewSetup(t);
+  r.config({CODEX_WEEKLY_CAP: '25'});
   r.pastRuns(...Array.from({length: 25}, (_, i) => 6 * hour + i * 6 * hour));
   const result = await r.review();
   assert.equal(result.code, 0, result.stderr);
@@ -277,6 +278,7 @@ test('--full-area audits the whole area as a run of weight 4, writes the output 
   assert.deepEqual(r.gh.calls(), []);
 
   rmSync(output);
+  r.config({CODEX_WEEKLY_CAP: '25'});
   r.pastRuns(...Array.from({length: 22}, (_, i) => 6 * hour + i * 6 * hour));
   result = await r.run(['--full-area', '--commit', r.head, '--output', output, '--repo', r.checkout]);
   assert.equal(result.code, 4, 'the exit status passes through');
@@ -346,7 +348,7 @@ test('with the codex module off, or without CODEX_SECURITY_MODEL, it exits 2 nam
   for (const [settings, message] of [
     [{MODULES: null}, file => `security-review: the codex module is off; add it to MODULES in ${file} (bin/README.md)`],
     [{MODULES: 'demo,qwen-audit'}, file => `security-review: the codex module is off; add it to MODULES in ${file} (bin/README.md)`],
-    [{CODEX_SECURITY_MODEL: null, CODEX_AUDIT_MODEL: 'codex-audit-test'}, file => `security-review: ${file}: the codex module needs CODEX_SECURITY_MODEL`],
+    [{CODEX_SECURITY_MODEL: null, CODEX_AUDIT_MODEL: 'codex-audit-test'}, file => `security-review: ${file}: the codex module needs CODEX_SECURITY_MODEL; triphammer update writes its default`],
   ]) {
     const r = reviewSetup(t);
     r.config(settings);

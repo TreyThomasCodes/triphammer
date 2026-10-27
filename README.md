@@ -150,7 +150,10 @@ These are off unless a project's config lists them in `MODULES`, which `triphamm
 - `qwen-audit` repeats the weekly audit with a local model behind an Anthropic Messages API server, for a second
   opinion.
 - `codex` adds Codex to the weekly audit, runs a monthly security audit, and posts an advisory security review on pull
-  requests that touch Triphammer's own code.
+  requests that touch Triphammer's own code. Its settings have defaults, which `triphammer add` and `triphammer update`
+  write into the project's config when it lacks them: `CODEX_SECURITY_MODEL=gpt-daybreak-blue-latest`,
+  `CODEX_AUDIT_MODEL=gpt-6.1-sol`, `CODEX_WEEKLY_CAP=500`, `CODEX_FLOOR_PERCENT=0` and `CODEX_RUN_PERCENT=1`
+  ([`bin/README.md`](bin/README.md), Modules).
 
 ## Use only the plugin
 

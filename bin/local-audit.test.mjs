@@ -357,17 +357,19 @@ test('--model codex runs the reviewer brief and the area on Codex with the agree
   assert.deepEqual(r.runs(), [now - 2 * hour, now], 'the run is recorded and runs older than a week are dropped');
 });
 
-test('Codex at the weekly cap is skipped with exit 4 and runs nothing; runs older than a week do not count', async t => {
+test('Codex at the weekly cap, by default 500, is skipped with exit 4 and runs nothing; runs older than a week do not count', async t => {
   const r = auditSetup(t);
-  r.pastRuns(...Array.from({length: 25}, (_, i) => 6 * hour + i * 6 * hour));
+  // 500 runs a thousand seconds apart: all in the last 7 days, and 18 in the last 5 hours, well above the floor.
+  const week = Array.from({length: 500}, (_, i) => 1000 + i * 1000);
+  r.pastRuns(...week);
   let result = await r.codexAudit();
   assert.equal(result.code, 4, result.stderr);
-  assert.match(result.stdout, /Codex: weekly cap reached \(25 of 25 runs in the last 7 days\)/);
+  assert.match(result.stdout, /Codex: weekly cap reached \(500 of 500 runs in the last 7 days\)/);
   assert.deepEqual(r.codexCalls(), [], 'not even codex login status');
   assert.equal(existsSync(r.output), false);
-  assert.equal(r.runs().length, 25, 'a skip is not counted');
+  assert.equal(r.runs().length, 500, 'a skip is not counted');
 
-  r.pastRuns(...Array.from({length: 24}, (_, i) => 6 * hour + i * 6 * hour), 7 * 24 * hour + 1);
+  r.pastRuns(...week.slice(1), 7 * 24 * hour + 1);
   result = await r.codexAudit();
   assert.equal(result.code, 0, result.stdout + result.stderr);
 });
@@ -385,18 +387,18 @@ test('the weekly cap comes from the settings file, and the environment overrides
 
 test('Codex is skipped once the estimated 5-hour window left after another run would fall under the floor', async t => {
   const r = auditSetup(t);
-  // 17 runs in the window at 5% each: another leaves about 10%, which the default 10% floor allows.
-  const recent = Array.from({length: 17}, (_, i) => 60 + i * 60);
+  // 99 runs in the window at the default 1% each: another leaves about 0%, which the default 0% floor allows.
+  const recent = Array.from({length: 99}, (_, i) => 60 + i * 60);
   r.pastRuns(...recent);
   assert.equal((await r.codexAudit()).code, 0);
-  assert.equal(r.runs().length, 18);
-  // 18 runs: another would leave about 5%.
+  assert.equal(r.runs().length, 100);
+  // 100 runs: another would leave about -1%.
   const result = await r.codexAudit();
   assert.equal(result.code, 4);
-  assert.match(result.stdout, /Codex: 5-hour floor reached \(18 runs in the last 5 hours, about 5% left after another; floor 10%\)/);
-  assert.equal(r.runs().length, 18);
+  assert.match(result.stdout, /Codex: 5-hour floor reached \(100 runs in the last 5 hours, about -1% left after another; floor 0%\)/);
+  assert.equal(r.runs().length, 100);
   // Runs that left the 5-hour window no longer count.
-  r.pastRuns(...Array.from({length: 18}, () => 5 * hour + 1));
+  r.pastRuns(...Array.from({length: 100}, () => 5 * hour + 1));
   assert.equal((await r.codexAudit()).code, 0);
 });
 
@@ -525,6 +527,7 @@ test('a run of weight 4 records four runs, and is skipped when the cap or the fl
   const r = auditSetup(t);
   const weighted = (env = {}) => r.run(['--repo', r.repo, '--commit', r.audited, '--area', area, '--output', r.output,
     '--model', 'codex', '--weight', '4'], env);
+  r.configure({CODEX_WEEKLY_CAP: '25', CODEX_FLOOR_PERCENT: '10', CODEX_RUN_PERCENT: '5'});
   r.pastRuns(...Array.from({length: 21}, (_, i) => 6 * hour + i * 6 * hour));
   let result = await weighted();
   assert.equal(result.code, 0, result.stdout + result.stderr);
@@ -614,7 +617,8 @@ test('a module that is on without a setting it needs exits 2 naming the setting,
     const result = await run(r);
     assert.equal(result.code, 2, `${setting}: ${result.stdout}${result.stderr}`);
     const module = setting.startsWith('QWEN') ? 'qwen-audit' : 'codex';
-    assert.equal(result.stderr.trim(), `local-audit: ${r.configFile}: the ${module} module needs ${setting}`);
+    const hint = module === 'codex' ? '; triphammer update writes its default' : '';
+    assert.equal(result.stderr.trim(), `local-audit: ${r.configFile}: the ${module} module needs ${setting}${hint}`);
     assert.equal(r.ran(), false);
     assert.deepEqual(r.codexCalls(), []);
   }
