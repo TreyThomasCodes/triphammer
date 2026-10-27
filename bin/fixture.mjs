@@ -43,16 +43,8 @@ export async function interrupt(child, signal, group, slowLog, limit = 10000) {
   await sleep(2500);
   return {status: result.status, signal: result.by, after: result.at - sent, steps: lines(slowLog)};
 }
-// What `promise` resolves to, or undefined once `ms` milliseconds pass first.
-async function within(promise, ms) {
-  let timer;
-  const late = new Promise(done => { timer = setTimeout(done, ms); });
-  try {
-    return await Promise.race([promise, late]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// What `promise` resolves to, or undefined once `ms` milliseconds pass first (on a timer that keeps no process alive).
+const within = (promise, ms) => Promise.race([promise, sleep(ms, undefined, {ref: false})]);
 // The processes under a spawned script: its descendants, and every process in a group or session one of them leads,
 // from `ps` (pid, ppid, pgid, sid, state, command). Returns them as a table header first.
 function processTree(pid) {
