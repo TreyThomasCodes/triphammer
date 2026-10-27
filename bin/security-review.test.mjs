@@ -4,7 +4,7 @@ import {execFile} from 'node:child_process';
 import {existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {gitEnv, gitRepo} from '../scripts/test-git-repo.mjs';
-import {fakeCodex, fakeGh, here, projectJson, writeConfig} from './fixture.mjs';
+import {fakeCodex, fakeGh, here, lines, projectJson, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The Triphammer config's CODEX_SECURITY_MODEL; the comment's heading names it without its trailing -latest.
@@ -46,7 +46,9 @@ function reviewSetup(t) {
   const r = {
     root, checkout, head, gh, config, configFile, stateDir,
     // The heads security-review recorded in its state directory, and forgetting them.
-    reviewed: () => existsSync(reviewed) ? readFileSync(reviewed, 'utf8').split('\n').filter(Boolean) : [],
+    reviewed: () => lines(reviewed),
+    // The heads whose review returned findings, which hold their merge until a repair session follows them up.
+    findings: () => lines(join(stateDir, 'security-findings')),
     forget: () => rmSync(reviewed, {force: true}),
     project: fields => writeFileSync(join(checkout, '.triphammer/project.json'), JSON.stringify({name: 'example-project', ...fields})),
     // Pull request #5 as `gh pr view` returns it, whose `files` stops at the first 100 as gh's never pages, and its files
@@ -91,7 +93,7 @@ test('an open pull request touching each trigger path gets one review comment wi
     assert.equal(body.split('\n')[0], `## ${heading}`);
     assert.match(body, new RegExp(`Head: ${r.head}`));
     assert.match(body, /Finding: bin\/x:3 lets an issue opener lift a brake/);
-    assert.match(body, /Advisory only: merge-policy and merge-when-ready never read this comment/);
+    assert.match(body, /Nothing reads this comment to decide a merge\. Findings start a repair session and hold the merge of this head until that session has followed them up/);
     assert.match(r.codex().args.at(-1), new RegExp(`the files pull request #5 changes, and whatever they call: src/Domain/Money.cs, ${path.replace(/\./g, '\\.')}`));
   }
   // The pull request has no labels: risk-tier adds needs-owner seconds after it opens, often after the session ends.
@@ -249,7 +251,38 @@ test("a review with no findings posts the model's line", async t => {
   const r = reviewSetup(t);
   assert.equal((await r.review({FAKE_CODEX_RESULT: 'No findings.'})).code, 0);
   const [{body}] = r.comments();
-  assert.match(body, /\n\nNo findings\.\n\nAdvisory only/);
+  assert.match(body, /\n\nNo findings\.\n\nNothing reads this comment/);
+});
+
+test('a review with findings records the head in security-findings as well as security-reviewed', async t => {
+  const r = reviewSetup(t);
+  const result = await r.review({FAKE_CODEX_RESULT: 'Finding: bin/x:3 lets an issue opener lift a brake.'});
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.deepEqual(r.findings(), [`${repo} 5 ${r.head}`]);
+  assert.deepEqual(r.reviewed(), [`${repo} 5 ${r.head}`]);
+});
+
+test('a review with no findings, an empty result, or one skipped or failed records no findings', async t => {
+  for (const env of [{FAKE_CODEX_RESULT: 'No findings.'}, {FAKE_CODEX_RESULT: '\n  No findings.  \n\n'},
+    {FAKE_CODEX_RESULT: ''}, {FAKE_CODEX_RESULT: '  \n'}, {FAKE_CODEX_MODE: 'usage'}, {FAKE_CODEX_MODE: 'sandbox'},
+    {FAKE_CODEX_MODE: 'fail'}, {FAKE_CODEX_LOGIN_EXIT: '1'}]) {
+    const r = reviewSetup(t);
+    const result = await r.review(env);
+    assert.equal(result.code, 0, `${JSON.stringify(env)}: ${result.stdout}${result.stderr}`);
+    assert.equal(r.comments().length, 1, JSON.stringify(env));
+    assert.deepEqual(r.findings(), [], JSON.stringify(env));
+    assert.deepEqual(r.reviewed(), [`${repo} 5 ${r.head}`], JSON.stringify(env));
+  }
+});
+
+test('findings it cannot record exit 1 saying so after posting, and leave the head to be reviewed again', async t => {
+  const r = reviewSetup(t);
+  mkdirSync(join(r.stateDir, 'security-findings'), {recursive: true});
+  const result = await r.review({FAKE_CODEX_RESULT: 'Finding: bin/x:3.'});
+  assert.equal(result.code, 1);
+  assert.equal(r.comments().length, 1);
+  assert.match(result.stderr, /commented on #5 at [0-9a-f]{40} but cannot record its findings in .*security-findings/);
+  assert.deepEqual(r.reviewed(), []);
 });
 
 test('a pull request gh cannot read, or a comment gh cannot post, exits 1 with the reason', async t => {
@@ -339,7 +372,9 @@ test('argument errors exit 2', async t => {
   const r = reviewSetup(t);
   for (const args of [[], ['--pr', 'x'], ['--pr', '5', '--commit', 'HEAD'], ['--full-area', '--commit', 'HEAD'],
     ['--full-area', '--pr', '5', '--commit', 'HEAD', '--output', 'o'], ['--other']]) {
-    assert.equal((await r.run(args)).code, 2, args.join(' '));
+    const result = await r.run(args);
+    assert.equal(result.code, 2, args.join(' '));
+    if (args.length === 0) assert.match(result.stderr, /^security-review --pr <n> \[--repo <path>\]\nsecurity-review --full-area/);
   }
   assert.deepEqual(r.gh.calls(), []);
 });

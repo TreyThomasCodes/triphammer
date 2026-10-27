@@ -297,7 +297,7 @@ test("a run whose only pull request closes another repository's #N, or a differe
   }
 });
 
-// The advisory security review after the session (bin/security-review).
+// The security review after the session (bin/security-review).
 
 test('after the session and its demos the runner security-reviews the pull request the session opened', t => {
   const r = tickOpening(t, [linked('Example-Owner', 'example-project', 7)]);
@@ -485,6 +485,51 @@ test('a repair run names the pull request it repairs in current', t => {
   assert.deepEqual({kind, number, branch, prs}, {kind: 'repair', number: '40', branch: 'ticket/30', prs: '40'});
   assert.equal(existsSync(r.current), false);
   assert.deepEqual(r.securityCalls(), [`--pr 40 --repo ${r.checkout}`], 'the repaired pull request is security-reviewed');
+});
+
+// A machine whose next tick repairs pull request #40 for the security findings recorded on its head; `options` go to
+// ticketSetup.
+const findingsHead = 'c'.repeat(40);
+const findingsLine = `${repo} 40 ${findingsHead}`;
+function securityRepairSetup(t, options = {}) {
+  const r = repairSetup(t, options);
+  r.gh.json('pulls.json', [{...JSON.parse(readFileSync(join(r.root, 'gh/pulls.json'), 'utf8'))[0],
+    mergeStateStatus: 'CLEAN', headRefOid: findingsHead}]);
+  const state = join(r.root, 'state/ticket-runner');
+  mkdirSync(state, {recursive: true});
+  writeFileSync(join(state, 'security-findings'), `${findingsLine}\n`);
+  const followedUp = join(state, 'security-followed-up');
+  return {...r, followedUp: () => lines(followedUp),
+    attempts: join(state, 'attempts/repair-40')};
+}
+
+test('a security-findings repair session that ends normally records its head as followed up, and made progress', t => {
+  const r = securityRepairSetup(t);
+  r.tick();
+  assert.match(r.probe('claude-args'), /reason security-findings/);
+  const list = r.ghCalls().find(call => call[0] === 'pr' && call[1] === 'list' && call.some(arg => arg.includes('reviews')));
+  assert.match(flagValue(list, '--json'), /(^|,)headRefOid(,|$)/, 'the decision reads each head');
+  assert.deepEqual(r.followedUp(), [findingsLine]);
+  assert.match(r.log(), /repair #40: run 1 finished \(exit 0\)/, 'answering in a comment, with the head unchanged, is progress');
+  assert.equal(existsSync(r.attempts), false);
+  assert.equal(r.ghCalls().some(call => call.join(' ').includes('--add-label hold')), false);
+  assert.doesNotMatch(r.tick({}, ['--plan']), /^repair/, 'the followed-up head is not repaired again');
+});
+
+test('a failed, timed-out or rate-limited security-findings repair session records no follow-up', t => {
+  for (const env of [{CLAUDE_EXIT: '1'}, {CLAUDE_EXIT: '124'}, {CLAUDE_EXIT: '1', CLAUDE_SAYS: 'Claude usage limit reached'}]) {
+    const r = securityRepairSetup(t);
+    r.tick(env);
+    assert.deepEqual(r.followedUp(), [], JSON.stringify(env));
+  }
+});
+
+test('a repair for another reason records no security follow-up', t => {
+  const r = securityRepairSetup(t);
+  r.gh.json('pulls.json', [{...JSON.parse(readFileSync(join(r.root, 'gh/pulls.json'), 'utf8'))[0], mergeStateStatus: 'DIRTY'}]);
+  r.tick();
+  assert.match(r.probe('claude-args'), /reason conflicts/);
+  assert.deepEqual(r.followedUp(), []);
 });
 
 test('during the security review current still names the live runner but none of its pull requests or its branch', t => {

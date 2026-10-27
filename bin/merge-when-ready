@@ -22,6 +22,10 @@
 #     project shares (config.sh), or an open issue labelled `stop-agents` in any installation repository, means a
 #     tick does nothing; a tick whose stop-agents query fails does nothing either;
 #   - a pull request labelled `hold` is never merged or updated, and does not hold the line;
+#   - a pull request of the served repository whose current head security-review recorded findings for, and which
+#     ticket-runner has not yet followed up, is neither merged nor updated: its line "<REPO> <n> <head>" is in
+#     security-findings in ticket-runner's state directory and not in security-followed-up there. An update would make
+#     a new head that no session reviews. A missing record file means nothing is pending; no comment is read;
 #   - while ticket-runner holds its lock (`lock` in its state directory), the pull requests its run may push to
 #     are not updated (an update would move the head a repair is judged by); clean pull requests still merge. Those are
 #     the ones the `current` file there names for the served repository below, by number or by the head branch the run
@@ -54,6 +58,12 @@ served="$cfg_repo" runner_state="$cfg_state_dir"
 # Whether repositories $1 and $2 are the same one: GitHub ignores the case of owner and repository names, and the
 # config may spell REPO in any case while the installation lists the canonical name.
 same_repository() { [ "${1,,}" = "${2,,}" ]; }
+# Whether head $3 of pull request $2 of repository $1 has security-review findings no repair session has followed up.
+pending_follow_up() {
+  local line="$served $2 $3"
+  same_repository "$1" "$served" && grep -qsxF -- "$line" "$runner_state/security-findings" \
+    && ! grep -qsxF -- "$line" "$runner_state/security-followed-up"
+}
 # Every gh call gets its token from the App's installation on the account that owns the served repository
 # (bin/github-app-token), so the installation repositories below are that account's.
 export GITHUB_APP_OWNER="${served%%/*}"
@@ -237,6 +247,10 @@ for repository in $repositories; do
       case "$state" in CLEAN|BEHIND) skips+="$repository#$number: labelled hold; not merging or updating it"$'\n' ;; esac
       continue
     fi
+    if [ "$state" = CLEAN ] && pending_follow_up "$repository" "$number" "$head"; then
+      skips+="$repository#$number: security-review findings on ${head:0:7} not yet followed up; not merging it"$'\n'
+      continue
+    fi
     if [ "$state" = CLEAN ] && [ -z "$merge_number" ]; then
       merge_number="$number" merge_head="$head"
       continue
@@ -291,7 +305,9 @@ for repository in $repositories; do
         [ "$state" != BEHIND ] || skips+="$repository#$number: behind its base, waiting for owner-approval; not updating it"$'\n' ;;
       ready)
         # One the runner may push to still holds the line while in flight, but is never updated.
-        if [ "$state" = BEHIND ] && runner_owns "$repository" "$number" "${branch_of[$number]}"; then
+        if [ "$state" = BEHIND ] && pending_follow_up "$repository" "$number" "$head"; then
+          skips+="$repository#$number: security-review findings on ${head:0:7} not yet followed up; not updating it"$'\n'
+        elif [ "$state" = BEHIND ] && runner_owns "$repository" "$number" "${branch_of[$number]}"; then
           skips+="$repository#$number: not updating it while ticket-runner $runner_doing"$'\n'
         elif [ "$state" = BEHIND ] && [ -z "$candidate" ]; then
           candidate="$number" candidate_head="$head"

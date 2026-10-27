@@ -25,9 +25,18 @@ function ticketDecide(...args) {
   return result;
 }
 // `served` is the repository, and `owner`, when given, the owner login the runner passes (the Triphammer config's OWNER).
-function decide(t, issues, prs = [], {upkeepDone = true, served = repo, owner} = {}) {
+// `state`, when given, maps the state directory's records (security-findings, security-followed-up) to their lines,
+// and the state directory is passed too.
+function decide(t, issues, prs = [], {upkeepDone = true, served = repo, owner, state} = {}) {
   const all = upkeepDone ? [upkeep(1, daysAgo(1), 'CLOSED'), ...issues] : issues;
-  const result = ticketDecide(jsonFile(t, all), jsonFile(t, prs), app, now, served, ...(owner === undefined ? [] : [owner]));
+  const extra = owner === undefined && state === undefined ? [] : [owner ?? ''];
+  if (state !== undefined) {
+    const dir = mkdtempSync(join(tmpdir(), 'triphammer-decide-state-'));
+    t.after(() => rmSync(dir, {recursive: true, force: true}));
+    for (const [name, records] of Object.entries(state)) writeFileSync(join(dir, name), records.map(r => `${r}\n`).join(''));
+    extra.push(dir);
+  }
+  const result = ticketDecide(jsonFile(t, all), jsonFile(t, prs), app, now, served, ...extra);
   return {action: result.stdout.trim(), log: result.stderr};
 }
 
@@ -59,11 +68,11 @@ const ours = number => reference('Example-Owner', 'example-project', number);
 
 function pr(number, closes, {checks = passing, mergeStateStatus = 'CLEAN', reviews = [], labels = [], isDraft = false,
   author = app, committedDate = '2026-10-16T09:00:00Z', body = `Fixes a thing.\n\nCloses #${closes}`,
-  closingIssuesReferences = [ours(closes)]} = {}) {
+  closingIssuesReferences = [ours(closes)], headRefOid = 'abc123'} = {}) {
   return {
     number, body, closingIssuesReferences, author: {is_bot: true, login: author}, isDraft,
     labels: labelList(labels),
-    headRefName: `ticket/${closes}`, headRefOid: 'abc123', mergeStateStatus, statusCheckRollup: checks,
+    headRefName: `ticket/${closes}`, headRefOid, mergeStateStatus, statusCheckRollup: checks,
     reviews: reviews.map(([state, submittedAt, login = 'Example-Owner']) =>
       ({id: 'R1', author: login === null ? null : {login}, body: '', state, submittedAt})),
     commits: [{oid: 'abc123', committedDate, authoredDate: committedDate, messageHeadline: 'work', messageBody: ''}],
@@ -164,6 +173,58 @@ test('the owner\'s latest review that is not a comment decides whether changes a
   const approvedByOther = reviews(['CHANGES_REQUESTED', '2026-10-16T12:00:00Z'],
     ['APPROVED', '2026-10-16T13:00:00Z', 'stranger']);
   assert.equal(decide(t, [issue(30)], [approvedByOther]).action, 'repair 40 30 changes-requested');
+});
+
+// The security-findings repair: the state directory records the heads whose security review returned findings
+// (bin/security-review) and the ones whose repair session ended normally (ticket-runner).
+const head = 'a'.repeat(40);
+const oldHead = 'b'.repeat(40);
+const finding = (number, oid = head, served = repo) => `${served} ${number} ${oid}`;
+
+test('a pull request whose head has security findings and no follow-up is repaired for security-findings', t => {
+  const open = pr(40, 30, {headRefOid: head});
+  assert.equal(decide(t, [issue(30)], [open], {state: {'security-findings': [finding(40)]}}).action,
+    'repair 40 30 security-findings');
+  assert.equal(decide(t, [issue(30)], [open], {state: {'security-findings': [finding(40)], 'security-followed-up': []}})
+    .action, 'repair 40 30 security-findings', 'an empty follow-up record follows nothing up');
+});
+
+test('a head that was followed up, a record of an older head, or of another pull request starts no repair', t => {
+  const open = pr(40, 30, {headRefOid: head});
+  const followed = {'security-findings': [finding(40)], 'security-followed-up': [finding(40)]};
+  assert.equal(decide(t, [issue(30)], [open], {state: followed}).action, '');
+  assert.equal(decide(t, [issue(30)], [open], {state: {'security-findings': [finding(40, oldHead)]}}).action, '');
+  assert.equal(decide(t, [issue(30)], [open], {state: {'security-findings': [finding(41)]}}).action, '');
+  const elsewhere = {'security-findings': [finding(40, head, 'Example-Owner/other-project')]};
+  assert.equal(decide(t, [issue(30)], [open], {state: elsewhere}).action, '');
+  const newHead = {'security-findings': [finding(40, oldHead), finding(40)], 'security-followed-up': [finding(40, oldHead)]};
+  assert.equal(decide(t, [issue(30)], [open], {state: newHead}).action, 'repair 40 30 security-findings',
+    'a new head with findings of its own is repaired again');
+});
+
+test('without records, or without a state directory, nothing waits for a security follow-up', t => {
+  const open = pr(40, 30, {headRefOid: head});
+  assert.equal(decide(t, [issue(30)], [open], {state: {}}).action, '');
+  assert.equal(decide(t, [issue(30)], [open]).action, '');
+});
+
+test('conflicts, failing checks and changes requested win over security findings', t => {
+  const state = {'security-findings': [finding(40)]};
+  const failing = [checkRun('build', 'FAILURE', '2026-10-16T10:00:00Z')];
+  const requested = [['CHANGES_REQUESTED', '2026-10-16T12:00:00Z']];
+  for (const [options, reason] of [[{mergeStateStatus: 'DIRTY'}, 'conflicts'], [{checks: failing}, 'failing-checks'],
+    [{reviews: requested}, 'changes-requested']]) {
+    const open = pr(40, 30, {headRefOid: head, ...options});
+    assert.equal(decide(t, [issue(30)], [open], {state}).action, `repair 40 30 ${reason}`);
+  }
+});
+
+test('a security finding on a draft, a held pull request, or one not by the App starts no repair', t => {
+  const state = {'security-findings': [finding(40)]};
+  for (const options of [{isDraft: true}, {labels: ['hold']}, {author: 'stranger'}]) {
+    const open = pr(40, 30, {headRefOid: head, ...options});
+    assert.equal(decide(t, [issue(30)], [open], {state}).action, '', JSON.stringify(options));
+  }
 });
 
 // A repository an organization owns: the organization's login is the repository's owner, and the owner the runner acts

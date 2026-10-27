@@ -18,8 +18,10 @@
 # and the databases whose worktree is gone (prune_worktrees, prune_databases). Then it does at most one thing, in
 # this order:
 #   1. closes a parent issue whose `Slice k of #N` issues are all closed;
-#   2. repairs an open agent pull request that has conflicts, failing checks, or changes the owner requested after
-#      its latest commit;
+#   2. repairs an open agent pull request that has conflicts, failing checks, changes the owner requested after its
+#      latest commit, or security findings on its head not followed up yet (the state directory's security-findings
+#      record, less its security-followed-up record, which this script appends to when such a repair session ends
+#      with exit 0);
 #   3. runs an open issue that the owner or the App opened, whose dependencies (`Depends on #N.`, and slice k-1 of
 #      the same parent) are closed, with no open pull request and no open slices: ready issues labelled `next` first,
 #      lowest number first, then the rest in number order;
@@ -33,8 +35,8 @@
 # its prompt names Triphammer
 # config's modules that are on. When it ends, with the demo module on, the runner publishes the demos it left in that worktree
 # (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
-# of the run (advisory: it comments only on escalated ones that touch Triphammer, and its failures are logged and
-# ignored). With the demo module on, each tick also refreshes the demo gallery (bin/demo-publish --reindex). A
+# of the run (it comments only on escalated ones that touch Triphammer and records the heads whose review found
+# something, and its failures are logged and ignored). With the demo module on, each tick also refreshes the demo gallery (bin/demo-publish --reindex). A
 # module that is off gets none of its steps and no log line.
 # The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` for as long as the run
 # lasts, so the owner sees in GitHub's lists what not to touch. It is information, never a brake or a lock. Each tick
@@ -319,7 +321,7 @@ fi
 
 gh issue list -R "$repo" --state all --limit 1000 --json number,state,author,body,labels,createdAt > "$state/issues.json"
 gh pr list -R "$repo" --state open --limit 30 \
-  --json number,author,isDraft,labels,mergeStateStatus,statusCheckRollup,reviews,commits,closingIssuesReferences \
+  --json number,author,isDraft,labels,mergeStateStatus,statusCheckRollup,reviews,commits,closingIssuesReferences,headRefOid \
   > "$state/prs.json"
 if [ "$plan_only" != --plan ]; then
   prune_worktrees "$state"
@@ -327,9 +329,9 @@ if [ "$plan_only" != --plan ]; then
 fi
 
 # Prints one action: "close <issue>", "repair <pr> <issue> <reason>", "ticket <issue>", "upkeep", or nothing
-# (ticket-decide.py).
+# (ticket-decide.py, which reads the security-findings and security-followed-up records in the state directory).
 action="$(python3 -I "$bin/ticket-decide.py" "$state/issues.json" "$state/prs.json" "$app_author" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$owner")"
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$owner" "$state")"
 if [ "$plan_only" = --plan ]; then echo "${action:-idle}"; exit 0; fi
 mkdir -p "$shared/waiting"
 chmod 700 "$shared" "$shared/waiting"
@@ -432,6 +434,12 @@ else
   add_worktree "$branch" "origin/$branch"
   prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a worktree on its branch $branch. This is run $attempts of 3.$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
   before="$(git -C "$worktree" rev-parse HEAD)"
+fi
+# A security-findings repair follows up the head ticket-decide.py found pending in the security-findings record, the
+# pull request's head in prs.json.
+followed_head=""
+if [ "$reason" = security-findings ]; then
+  followed_head="$(jq -r --argjson n "$number" '.[] | select(.number == $n) | .headRefOid // empty' "$state/prs.json")"
 fi
 
 # The state directory's `current` file names this run for merge-when-ready, which updates every armed pull request's
@@ -633,6 +641,19 @@ if [ -f "$brake_file" ]; then
   rm -f "$brake_file"
   exit 0
 fi
+# A security-findings repair session that ended normally followed its head up: the security-followed-up record gets the
+# head's line, so neither ticket-decide.py nor merge-when-ready waits on it any more. Only the runner writes the record
+# (agent-guard keeps sessions out of the state directory), so no comment can forge a follow-up. A failed or timed-out
+# session records nothing, and the head is repaired again.
+followed=""
+if [ -n "$followed_head" ] && [ "$status" -eq 0 ]; then
+  if printf '%s\n' "$repo $number $followed_head" >> "$state/security-followed-up"; then
+    followed=1
+    log "$kind #$number: followed up the security findings on $followed_head"
+  else
+    log "$kind #$number: could not record the follow-up of $followed_head"
+  fi
+fi
 
 # With the demo module on, publish the demos the session left (bin/publish-demos) before anything can remove the
 # worktree.
@@ -642,7 +663,7 @@ if module_on demo; then
 fi
 
 # The run's pull requests, which the session usually opened, decide its progress below, and with the codex module on
-# each gets the advisory security review. The review never stops the run, and never delays a merge: the session has
+# each gets the security review. Running it never stops the run, and never delays a merge: the session has
 # ended, so `current` stops naming its pull requests and its branch ("-", which no branch can be) and merge-when-ready
 # may update them while the review runs. It still names this live process, so merge-when-ready does not take a missing
 # file for a lock held without one.
@@ -679,6 +700,8 @@ if [ "$kind" = ticket ]; then
   [ -n "$progressed" ] || [ -z "$review_prs" ] || progressed=yes
   [ -n "$progressed" ] || progressed="$(gh issue list -R "$repo" --state all --search "\"of #$number\" in:body" --json number \
     --jq 'if length > 0 then "yes" else "" end')"
+elif [ -n "$followed" ]; then
+  progressed=yes  # a follow-up may only answer the findings in a comment, leaving the head where it was
 else
   progressed="$(gh pr view "$number" -R "$repo" --json state,headRefOid --jq \
     "if .state != \"OPEN\" or .headRefOid != \"$before\" then \"yes\" else \"\" end")"

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Security review of Triphammer's own safety machinery by the Triphammer config's CODEX_SECURITY_MODEL through Codex
 # (bin/local-audit, read-only sandbox, medium effort), prompted with security-review-brief.md next to this script.
-# Advisory only: nothing reads its result to decide a merge. It is part of the config's codex module, and exits 2 when
-# that is off or gives no CODEX_SECURITY_MODEL. See bin/README.md.
+# Nothing reads its comment to decide a merge. A head whose review returned findings starts a repair session, and
+# merge-when-ready holds that head until the session has followed them up. It is part of the config's codex module,
+# and exits 2 when that is off or gives no CODEX_SECURITY_MODEL. See bin/README.md.
 #
 #   security-review --pr <n> [--repo <path>]
 #   security-review --full-area --commit <rev> --output <file> [--repo <path>]
@@ -16,9 +17,12 @@
 # they call as one Codex run, and posts one comment headed
 # "Security review (<model>)", the model's name without a trailing "-latest", naming the head: the findings, or why the review was skipped or failed.
 # Once the comment is posted it appends "<REPO> <n> <head>" to security-reviewed in the Triphammer config's STATE_DIR, which
-# agent-guard.py keeps agents from writing. It does nothing for any other pull request, or for a head that file already
-# names; pull request comments are never read. Exit 0 unless it could not read the pull request or its files, post the
-# comment or record the head (1), or got bad arguments (2).
+# agent-guard.py keeps agents from writing. Before that, when the review ran and returned anything other than the
+# brief's `No findings.` line, it appends the same line to security-findings there; a skipped or failed review, or an
+# empty result, records no findings. ticket-runner appends the line to security-followed-up when the repair session
+# for that head ends. It does nothing for any other pull request, or for a head security-reviewed already names; pull
+# request comments are never read. Exit 0 unless it could not read the pull request or its files, post the comment or
+# record the head or its findings (1), or got bad arguments (2).
 #
 # --full-area audits the whole securityReviewArea at <rev> as one run weighing 4, writes local-audit's <file>, posts
 # nothing, and exits with local-audit's status (0 ran, 1 failed, 2 bad arguments, 3 unavailable, 4 skipped for budget).
@@ -29,7 +33,7 @@ bin="$(dirname "$(readlink -f "$0")")"
 source "$bin/config.sh"
 load_config security-review "$bin/.."
 repo_name="$cfg_repo"
-usage() { sed -n '6,7p' "$0" | sed 's/^# *//'; }
+usage() { sed -n '8,9p' "$0" | sed 's/^# *//'; }
 fail() { echo "security-review: $1" >&2; exit "${2:-1}"; }
 
 pr='' full='' commit='' output=''
@@ -109,8 +113,16 @@ Head: $head
 
 $result
 
-Advisory only: merge-policy and merge-when-ready never read this comment, and it does not block or delay a merge."
+Nothing reads this comment to decide a merge. Findings start a repair session and hold the merge of this head until that session has followed them up. A skipped or failed review never blocks or delays a merge."
 gh pr comment "$pr" -R "$repo_name" --body "$body" > /dev/null || fail "cannot comment on pull request #$pr"
+# The findings are recorded before the head, so a head whose findings could not be recorded is reviewed again.
+trimmed="${result#"${result%%[![:space:]]*}"}"
+trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+if [ "$status" -eq 0 ] && [ -n "$trimmed" ] && [ "$trimmed" != "No findings." ]; then
+  findings="$cfg_state_dir/security-findings"
+  { mkdir -p "$cfg_state_dir" && printf '%s\n' "$record" >> "$findings"; } \
+    || fail "commented on #$pr at $head but cannot record its findings in $findings, so the next run reviews it again"
+fi
 { mkdir -p "$cfg_state_dir" && printf '%s\n' "$record" >> "$reviewed"; } \
   || fail "commented on #$pr at $head but cannot record it in $reviewed, so the next run reviews it again"
 echo "commented on #$pr at $head (local-audit exit $status)"
