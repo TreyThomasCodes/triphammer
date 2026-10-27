@@ -4,7 +4,7 @@ import {execFile} from 'node:child_process';
 import {existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {gitEnv, gitRepo} from '../scripts/test-git-repo.mjs';
-import {fakeCodex, fakeGh, here, projectJson, writeConfig} from './fixture.mjs';
+import {fakeCodex, fakeGh, here, lines, projectJson, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The Triphammer config's CODEX_SECURITY_MODEL; the comment's heading names it without its trailing -latest.
@@ -46,10 +46,9 @@ function reviewSetup(t) {
   const r = {
     root, checkout, head, gh, config, configFile, stateDir,
     // The heads security-review recorded in its state directory, and forgetting them.
-    reviewed: () => existsSync(reviewed) ? readFileSync(reviewed, 'utf8').split('\n').filter(Boolean) : [],
+    reviewed: () => lines(reviewed),
     // The heads whose review returned findings, which hold their merge until a repair session follows them up.
-    findings: () => existsSync(join(stateDir, 'security-findings'))
-      ? readFileSync(join(stateDir, 'security-findings'), 'utf8').split('\n').filter(Boolean) : [],
+    findings: () => lines(join(stateDir, 'security-findings')),
     forget: () => rmSync(reviewed, {force: true}),
     project: fields => writeFileSync(join(checkout, '.triphammer/project.json'), JSON.stringify({name: 'example-project', ...fields})),
     // Pull request #5 as `gh pr view` returns it, whose `files` stops at the first 100 as gh's never pages, and its files

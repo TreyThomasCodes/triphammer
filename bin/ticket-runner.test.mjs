@@ -499,7 +499,7 @@ function securityRepairSetup(t, options = {}) {
   mkdirSync(state, {recursive: true});
   writeFileSync(join(state, 'security-findings'), `${findingsLine}\n`);
   const followedUp = join(state, 'security-followed-up');
-  return {...r, followedUp: () => existsSync(followedUp) ? lines(followedUp) : [],
+  return {...r, followedUp: () => lines(followedUp),
     attempts: join(state, 'attempts/repair-40')};
 }
 
