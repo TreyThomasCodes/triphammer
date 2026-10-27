@@ -118,7 +118,7 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
 
 // Comparisons the scan finds in files the agents' App cannot change (.github/workflows/), which only the owner can
 // lowercase or annotate. Each entry is the file and the exact trimmed line; once the owner fixes the line, the entry
-// matches nothing and the scan fails until it is removed.
+// matches nothing and the scan fails until it is removed. Issue #78 tracks the owner's fix of the two below.
 const owed = [
   // github.repository against job.workflow_repository, equal in Triphammer's own runs. Both name the same repository
   // as GitHub records it, but were they ever to differ in case, the run would take its scripts from WORKFLOW_SHA, a
@@ -136,8 +136,7 @@ test('no script or workflow compares a login, owner or repository name case-sens
   const unused = new Set(owed.map(entry => entry.join('\0')));
   const hits = files.flatMap(file => readFileSync(join(repository, file), 'utf8').split('\n').flatMap((line, i) => {
     const why = caseSensitiveComparison(line);
-    if (why && unused.delete(`${file}\0${line.trim()}`)) return [];
-    return why ? [`${file}:${i + 1}: ${why}`] : [];
+    return !why || unused.delete(`${file}\0${line.trim()}`) ? [] : [`${file}:${i + 1}: ${why}`];
   }));
   assert.deepEqual([...unused].map(entry => entry.replace('\0', ': ')), [],
     'these owed comparisons are fixed or gone, so remove their entries from `owed`');

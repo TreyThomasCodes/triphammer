@@ -80,13 +80,13 @@ utc = lambda at: datetime.fromisoformat(at.replace("Z", "+00:00"))
 now = utc(sys.argv[4])
 repo = sys.argv[5]
 labels = lambda item: {label["name"] for label in item["labels"]}
-author = lambda item: (item.get("author") or {}).get("login")
+author = lambda item: (item.get("author") or {}).get("login") or ""
 # The authors the runner acts for: it repairs only the App's pull requests, and takes, and reads slice declarations
 # from, only issues by the App or the owner. An issue without an author is no one's, so it is skipped. GitHub logins
 # compare case-insensitively.
 owner = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else repo.split("/")[0]
 trusted = {app.lower(), owner.lower()}
-is_trusted = lambda item: (author(item) or "").lower() in trusted
+is_trusted = lambda item: author(item).lower() in trusted
 is_open = lambda n: n in issues and issues[n]["state"] == "OPEN"
 
 def records(name):
@@ -145,7 +145,7 @@ for parent in sorted(slices):
 
 failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"}
 for pr in sorted(prs, key=lambda pr: pr["number"]):
-    if (author(pr) or "").lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):
+    if author(pr).lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):
         continue
     issue = (closing(pr, repo) or [0])[0]
     checks = [c for c in latest_checks(pr["statusCheckRollup"] or [])
@@ -155,7 +155,7 @@ for pr in sorted(prs, key=lambda pr: pr["number"]):
     # logins compare case-insensitively, and a review without an author is no one's. As in the owner-approval brake,
     # the owner's latest review that is not a comment decides: a later approval or dismissal withdraws the request.
     answers = sorted((r for r in pr["reviews"] if r["state"] != "COMMENTED"
-                      and (author(r) or "").lower() == owner.lower()), key=lambda r: r["submittedAt"])
+                      and author(r).lower() == owner.lower()), key=lambda r: r["submittedAt"])
     requested = answers and answers[-1]["state"] == "CHANGES_REQUESTED" and answers[-1]["submittedAt"] > last_commit
     reason = ("conflicts" if pr["mergeStateStatus"] == "DIRTY"
               else "failing-checks" if any((c.get("conclusion") or c.get("state")) in failing for c in checks)
