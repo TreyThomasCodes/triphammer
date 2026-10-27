@@ -540,7 +540,7 @@ working_label add "$labelled" "$number"
 # runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
 # failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
 app_login="$app_author"
-[[ "$app_author" != app/* ]] || app_login="${app_author#app/}[bot]"
+[[ "${app_author,,}" != app/* ]] || app_login="${app_author:4}[bot]"  # case-sensitive: lowered, against a lowercase literal
 # shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
 issue_brake() {
   local facts by closer
@@ -559,7 +559,7 @@ issue_brake() {
       | select(.event == "labeled" and .label.name == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
     if [ -z "$by" ]; then
       log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
-    elif [ "$by" != "$app_login" ]; then
+    elif [ "${by,,}" != "${app_login,,}" ]; then
       echo "labelled needs-owner"
       return 0
     fi
