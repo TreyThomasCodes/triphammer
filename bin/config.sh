@@ -21,7 +21,8 @@
 # ${XDG_STATE_HOME:-~/.local/state}/triphammer.
 #
 # module_on <module>: succeeds when the config turns the module on. module_needs <script name> <module>
-# [<setting>...]: prints why and exits 2 when the module is off or the config leaves one of the settings out.
+# [<setting>...]: prints why and exits 2 when the module is off or the config leaves one of the settings out, and
+# says that triphammer update writes the default of one that has a default (codex_defaults below).
 #
 # check_project <script name> <checkout>: checks <checkout>/.triphammer/project.json, the project's data, or prints what
 # is wrong with it and returns 2. project_get <checkout> <field>: prints a string or boolean field of that file, or
@@ -44,6 +45,11 @@ known_modules=(demo qwen-audit codex)
 optional_settings=(OWNER MODULES STATUS_HOST STATUS_PORT STATUS_ALLOWED_HOSTS DEMO_GALLERY_DIR DEMO_URL
   DEMO_GALLERY_HOST DEMO_GALLERY_PORT QWEN_BASE_URL QWEN_KEY_FILE QWEN_MODEL CODEX_AUDIT_MODEL CODEX_SECURITY_MODEL
   CODEX_WEEKLY_CAP CODEX_FLOOR_PERCENT CODEX_RUN_PERCENT)
+# The codex module's defaults: provision-project writes each one into a config that turns the module on without it,
+# and local-audit falls back to the limits' for a config without them.
+# shellcheck disable=SC2034  # read by the scripts that source this file
+declare -gA codex_defaults=([CODEX_SECURITY_MODEL]=gpt-daybreak-blue-latest [CODEX_AUDIT_MODEL]=gpt-6.1-sol
+  [CODEX_WEEKLY_CAP]=500 [CODEX_FLOOR_PERCENT]=0 [CODEX_RUN_PERCENT]=1)
 
 load_config() {
   local script="$1" own="$2" file name line n=0 key value module pattern
@@ -195,7 +201,7 @@ module_needs() {
   fi
   for key in "$@"; do
     if [ -z "${cfg[$key]:-}" ]; then
-      echo "$script: $cfg_file: the $module module needs $key" >&2
+      echo "$script: $cfg_file: the $module module needs $key${codex_defaults[$key]+; triphammer update writes its default}" >&2
       exit 2
     fi
   done
