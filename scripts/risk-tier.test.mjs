@@ -70,6 +70,22 @@ test('a test case moved into a block comment or an #if false region no longer co
   assert.deepEqual(result.reasons, [`${specPath}: removes test cases (2 before, 1 after)`]);
 });
 
+test('a literal or comment opened in a C# region that never compiles ends with it and hides no removed test', async () => {
+  const path = 'tests/X/PricingTests.cs';
+  const removed = {tier: 'escalate', reasons: [`${path}: removes test cases (2 before, 1 after)`]};
+  // The compiler does not lex a skipped region, so its text opens nothing that runs past the directive ending it.
+  for (const [skip, open, close] of [['#if false', '@"', '"'], ['#if false', '/*', '*/'], ['#if false', '"""', '"""'],
+    ['#if true\n#else', '@"', '"'], ['#if NEVER\n#elif false', '/*', '*/'], ['#if false\n#if NEVER\n#else', '@"', '"']]) {
+    const end = '\n#endif'.repeat(skip.split('#if').length - 1);
+    const base = `class PricingTests{\n[Fact] void A(){}\n${skip}\n${open}${end}\n[Fact] void B(){}\n${skip}\n${close}${end}\n}\n`;
+    assert.deepEqual(await testChange(path, base, base.replace('[Fact] void B(){}\n', '')), removed, `${skip} ${open}`);
+  }
+  // An indented directive ends the region too, and a test after it still counts.
+  const indented = 'class PricingTests{\n[Fact] void A(){}\n#if false\n@"\n  #endif\n[Fact] void B(){}\n}\n';
+  assert.deepEqual(await testChange(path, indented, indented.replace('[Fact] void B(){}\n', '')), removed);
+  assert.deepEqual(await testChange(path, indented, indented.replace('A(){}', 'A2(){}')), {tier: 'auto', reasons: []});
+});
+
 test('a test case moved under an #if on an undefined symbol, or a later branch of one, no longer counts', async () => {
   const before = csharpTests(['[Fact]', 'Prices'], ['[Fact]', 'Rounds']);
   for (const after of [wrapped('#if NEVER'), wrapped('#if !NEVER'), wrapped('#if NEVER // off'), wrapped('#if false', '#elif NEVER'),
@@ -244,6 +260,11 @@ test('where the scanner cannot tell code from text, the declarations there count
   assert.deepEqual(await testChange(tsx, generic, generic.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
   const mismatched = "const e = <div>text</span>;\ntest('a', () => {});\ntest('b', () => {});\n// </div>\n";
   assert.deepEqual(await testChange(tsx, mismatched, mismatched.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0));
+  // A comment between a type parameter list's > and its ( leaves the < unsure as the ( alone does.
+  for (const type of ['type F = <T>/**/(x: T) => T;', 'type F = <T>\n// generic\n(x: T) => T;']) {
+    const commented = `${type}\ntest('b', () => {});\n// </T>\ntest('a', () => {});\n`;
+    assert.deepEqual(await testChange(tsx, commented, commented.replace("test('b', () => {});\n", '')), unread(tsx, 2, 0), type);
+  }
   // A / or < whose meaning hangs on the token before it is unsure unless that token is clearly an operator, or clearly
   // an operand on the same line: a ! at a line's start may follow an inserted semicolon, a } may end a block, and the )
   // of an if may start a statement.

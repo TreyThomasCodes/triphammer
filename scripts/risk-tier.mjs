@@ -309,6 +309,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
   // A name, keyword or number: word characters and anything outside ASCII but whitespace.
   const word = csharp ? /(?:\w|[^\s\0-\x7f])+/y : /(?:[\w$]|[^\s\0-\x7f])+/y;
   let i = 0, top = 0;
+  const regions = conditionalRegions();
   // The $ and @ prefixes and the quotes that open a C# string at from, or null.
   const opening = /(\$*)(@?)(\$*)("+)/y;
   const stringOpener = from => {
@@ -412,12 +413,30 @@ function scan(text, {csharp, jsx: readsJsx}) {
     if (nested) fail();
   }
   // A C# directive line: #if, #elif, #else and #endif stay for withoutDisabledRegions (less any comment), others go.
+  // Where a branch never compiles, the compiler reads only the directive lines up to the one that ends it, and the
+  // text between them, which it does not lex, is blanked.
   function directive() {
-    const end = endOfLine(i);
-    const line = text.slice(i, end);
-    const comment = line.indexOf('//');
-    blank(/^#\s*(?:if|elif|else|endif)\b/.test(line) ? (comment < 0 ? end : i + comment) : i, end);
-    i = end;
+    for (;;) {
+      const end = endOfLine(i);
+      const line = text.slice(i, end);
+      const comment = line.indexOf('//');
+      const conditional = /^#\s*(if|elif|else|endif)\b(.*)$/.exec(comment < 0 ? line : line.slice(0, comment));
+      if (conditional) regions.step(conditional[1], conditional[2]);
+      blank(conditional ? (comment < 0 ? end : i + comment) : i, end);
+      i = end;
+      if (!regions.skipped()) return;
+      for (;;) {
+        if (i >= text.length) return;
+        const indent = match(/\n[^\S\n]*#/y);
+        if (indent) {
+          i += indent.length - 1;
+          break;
+        }
+        const next = endOfLine(i + 1);
+        blank(i, next);
+        i = next;
+      }
+    }
   }
   // A hole of n braces in an interpolated string or a template, from its opening braces past its closing ones.
   function hole(n) {
@@ -541,8 +560,8 @@ function scan(text, {csharp, jsx: readsJsx}) {
   }
   // A JSX element or fragment from its <: attribute strings and text are blanked, {} holes are code. A TSX generic
   // arrow (<T,>() => ..., <T = U>() => ...) read as one does not parse, and a tag followed by extends, or an opening tag
-  // followed by (, is taken for a type parameter list (<T extends U>() => ..., type F = <T>(x: T) => T), so all are
-  // unsure, JSX text that starts with ( included.
+  // followed by ( or a comment, is taken for a type parameter list (<T extends U>() => ..., type F = <T>(x: T) => T,
+  // type F = <T>/**/(x: T) => T), so all are unsure, JSX text that starts with (, // or /* included.
   function jsx() {
     i++;
     if (text[i] === '>') {
@@ -564,7 +583,7 @@ function scan(text, {csharp, jsx: readsJsx}) {
       }
       if (c === '>') {
         i++;
-        if (match(/\s*\(/y)) fail();
+        if (match(/\s*(?:\(|\/[/*])/y)) fail();
         children(tag);
         return;
       }
@@ -635,24 +654,40 @@ function scan(text, {csharp, jsx: readsJsx}) {
 // does not count, nor does a later #elif or #else of it, since which branch compiles is then unknown. The #else of an
 // #if false counts, and a nested conditional counts only inside a branch that counts.
 function withoutDisabledRegions(text) {
-  const branches = [];
-  const active = () => branches.every(branch => branch.active);
+  const regions = conditionalRegions();
   return text.split('\n').filter(line => {
     const directive = /^\s*#\s*(if|elif|else|endif)\b(.*)$/.exec(line);
-    if (!directive) return active();
-    const condition = directive[2].trim();
-    const known = condition === 'true' ? true : condition === 'false' ? false : undefined;
-    const branch = branches.at(-1);
-    if (directive[1] === 'if') branches.push({active: known === true, decided: known !== false});
-    else if (!branch) return false;
-    else if (directive[1] === 'endif') branches.pop();
-    else {
-      // decided: an earlier branch compiled or might have, so no later branch counts for certain.
-      branch.active = !branch.decided && (directive[1] === 'else' || known === true);
-      branch.decided ||= directive[1] === 'else' || known !== false;
-    }
+    if (!directive) return regions.compiles();
+    regions.step(directive[1], directive[2]);
     return false;
   }).join('\n');
+}
+// The C# conditional branches open at a point, stepped through by each #if, #elif, #else and #endif (kind) and its
+// condition (comment removed). A branch is on (compiles for certain), off (never compiles: under false, or after a
+// branch that compiles for certain) or unknown; taken says whether an earlier branch compiled: yes, no or maybe.
+function conditionalRegions() {
+  const branches = [];
+  return {
+    step(kind, condition) {
+      const text = condition.trim();
+      const known = kind === 'else' || text === 'true' ? true : text === 'false' ? false : undefined;
+      const branch = branches.at(-1);
+      if (kind === 'if') {
+        const state = known === true ? 'on' : known === false ? 'off' : 'unknown';
+        branches.push({state, taken: {on: 'yes', off: 'no', unknown: 'maybe'}[state]});
+      } else if (!branch) return;
+      else if (kind === 'endif') branches.pop();
+      else {
+        branch.state = branch.taken === 'yes' || known === false ? 'off'
+          : known === true && branch.taken === 'no' ? 'on' : 'unknown';
+        branch.taken = branch.taken === 'yes' || known === true ? 'yes' : known === false ? branch.taken : 'maybe';
+      }
+    },
+    // Every open branch compiles for certain.
+    compiles: () => branches.every(branch => branch.state === 'on'),
+    // Some open branch never compiles, so the compiler does not lex the lines until the next directive.
+    skipped: () => branches.some(branch => branch.state === 'off'),
+  };
 }
 
 // Every line break rewritten as \n, so a line comment or a directive line ends where the compiler ends it: C# breaks
