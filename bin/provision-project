@@ -16,8 +16,9 @@
 # <checkout>, --set, --modules or --app-author replaces one, --unset removes one, and --modules '' turns every module
 # off. With the codex module on, each of its settings that the result lacks (one --unset removes included) gets its
 # default from config.sh's codex_defaults; a value the config holds or --set gives stays. The file is read as KEY=VALUE
-# lines, never run. A config's checks and a module's needs apply to the settings that result. It prints each setting it adds, keeps, changes or removes (`config: OWNER kept (<login>)`), with its value
-# unless the key's name looks like a secret's.
+# lines, never run. A config's checks and a module's needs apply to the settings that result. It prints each setting it
+# adds, keeps, changes or removes (`config: OWNER kept (<login>)`), with its value unless the key's name looks like a
+# secret's.
 #
 # It installs, each only when it is not there already: the project's checkout, cloned as the service user; the .NET SDK
 # its global.json pins, through dotnet-install into ~/.dotnet, with the drop-in that puts it on ticket-runner@.service's
