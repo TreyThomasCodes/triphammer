@@ -388,6 +388,39 @@ test('a heredoc pull request body that mentions sed -i src/x.cs is allowed', t =
   assert.equal(decide(`git commit -m "Refuse sed -i src/x.cs > src/x.cs"`, dir), null);
 });
 
+test('a <<WORD inside quotes, a comment or $(( )) does not hide the command after it', t => {
+  const {dir} = repo(t);
+  const edit = `sed -i 's/X/Z/' src/x.cs`;
+  for (const command of [
+    `git commit -m "Read <<EOF\nbodies" && ${edit}`,
+    `gh pr create -t 'Adds x' -b 'Reads <<EOF heredocs\n\nCloses #1'\n${edit}`,
+    `git commit -m "Read $(echo '<<EOF')\nbodies"; ${edit}`,
+    `# reads <<EOF\n${edit}`,
+    `echo $((1<<X))\n${edit}`,
+  ]) {
+    assertShellEditDenied(decide(command, dir), 'src/x.cs');
+  }
+  // the body starts after the newline that closes the quote, so the line in it is text
+  const after = `git commit -F - <<EOF; echo "a\nb"\n${edit}\nEOF`;
+  assert.equal(decide(after, dir), null);
+  assertShellEditDenied(decide(`${after}\n${edit}`, dir), 'src/x.cs');
+});
+
+test('a real heredoc body is text and the lines after its terminator are commands', t => {
+  const {dir} = repo(t);
+  const edit = `sed -i 's/X/Z/' src/x.cs`;
+  for (const heredoc of [
+    `cat <<EOF\n${edit}\nEOF`,
+    `cat <<'EOF'\n${edit}\nEOF`,
+    `cat <<"EOF"\n${edit}\nEOF`,
+    `cat <<-EOF\n\t${edit}\n\tEOF`,
+    `cat <<A <<'B'\n${edit}\nA\n${edit}\nB`,
+  ]) {
+    assert.equal(decide(heredoc, dir), null, heredoc);
+    assertShellEditDenied(decide(`${heredoc}\n${edit}`, dir), 'src/x.cs');
+  }
+});
+
 test('reading a tracked src/ file through the shell is allowed', t => {
   const {dir} = repo(t);
   for (const command of [`sed -n '1,5p' src/x.cs`, 'cat src/x.cs > /dev/null 2>&1', 'cp src/x.cs /tmp/copy.cs',
