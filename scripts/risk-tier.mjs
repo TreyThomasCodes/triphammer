@@ -859,12 +859,18 @@ function mergeBases(base) {
 function changedFiles(base, bases) {
   // With several merge bases, base...HEAD diffs against only one of them and can disagree with the merge GitHub makes.
   if (bases.length > 1) return [{status: 'M', path: '(several merge bases with the base branch)'}];
-  const diff = spawnSync('git', ['diff', '--name-status', '--no-renames', `${base}...HEAD`], {encoding: 'utf8'});
+  // -z: paths arrive verbatim and NUL-separated, so rules see the name as written, not core.quotePath's quoted form.
+  const diff = spawnSync('git', ['diff', '-z', '--name-status', '--no-renames', `${base}...HEAD`], {encoding: 'utf8'});
   if (diff.status !== 0) throw Error(diff.stderr.trim() || `git diff against ${base} failed`);
-  return diff.stdout.split('\n').filter(Boolean).map(line => {
-    const [status, path] = line.split('\t');
-    return {status: status[0], path};
-  });
+  const fields = diff.stdout.split('\0');
+  const changes = [];
+  for (let i = 0; i < fields.length - 1;) {
+    const status = fields[i++][0];
+    // A rename or copy (not expected under --no-renames) names the source then the destination; both are judged.
+    const paths = 'RC'.includes(status) ? [fields[i++], fields[i++]] : [fields[i++]];
+    for (const path of paths) changes.push({status, path});
+  }
+  return changes;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
