@@ -161,13 +161,16 @@
 # written, and in a Triphammer session xargs running one of the worktree-only rule's writers (sed -i, perl -i, tee,
 # cp, rm, touch and the rest), a shell (also through script, su, runuser or flock -c), eval, source, python or
 # node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
-# write), or a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, appended
+# write), a wrapper whose own file operand (flock's lock file, script's typescript) the input can give, or a command
+# the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
 # or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
 # what -I's string becomes inside a script. Not
 # covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
 # options the hook does not list (an abbreviated long option, script -t with its file attached), busybox --install,
 # a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
-# from its input (xargs systemctl --user enable, or -I{} ... {}), and outside a Triphammer session the operands
+# from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
+# push, fetch, pull, checkout or switch from its input (xargs git branch with -u or --set-upstream-to in the input,
+# which keeps git branch --merged | xargs git branch -d allowed), and outside a Triphammer session the operands
 # xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
 # and every round of review has found another shell feature this parser misses: this hook is the only line.
 #
@@ -1283,8 +1286,9 @@ def analyze_xargs(command, args, cwd, findings, depth):
     """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
     place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
     rule reads, a shell, eval, source or an interpreter's inline script, git config or git remote (or git with no
-    subcommand), or a wrapper whose file operand (flock's lock file, script's typescript) the input can give, is
-    refused, since the hook cannot read the operands xargs gives it."""
+    subcommand), a wrapper whose file operand (flock's lock file, script's typescript) the input can give, or a
+    command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
+    gives it."""
     i, replace = 0, None
     short, optional, long = XARGS_VALUE_OPTIONS
     while i < len(args):
@@ -1314,15 +1318,20 @@ def analyze_xargs(command, args, cwd, findings, depth):
     analyze(inner, cwd, findings, depth)
     if not triphammer_sessions():
         return
-    # Words standing for those xargs appends from its input, enough to fill a wrapper's options and file operand.
+    if not inner.words:
+        return  # xargs runs echo
+    # A word standing for the first one xargs appends from its input. When the wrappers take it (as an option's value
+    # or their operand) or it is the command, the input gives the command after them, and with it any further wrapper,
+    # option or file, however many words that takes: refused, as a command -I's string stands for is.
     writes = []
-    words = strip_prefix(inner.words + [literal_word(XARGS_INPUT) for _ in range(4)], writes=writes)
-    words = [w for w in words if w.value != XARGS_INPUT]
+    words = strip_prefix(inner.words + [literal_word(XARGS_INPUT)], writes=writes)
     for target, _ in writes:
         if XARGS_INPUT in target.value or replace and replace in target.value:
             findings.unresolved.append("the file a wrapper writes, which the input of xargs can give")
-    if not words:
+    if not words or words[0].value == XARGS_INPUT or replace and replace in words[0].value:
+        findings.unresolved.append("the command xargs runs, which its input can give")
         return
+    words = [w for w in words if w.value != XARGS_INPUT]
     name = os.path.basename(words[0].value)
     if in_place_edit(name, [w.value for w in words[1:]]) or name in SUBSTITUTION_WRITERS:
         findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")

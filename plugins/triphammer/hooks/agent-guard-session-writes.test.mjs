@@ -153,6 +153,23 @@ test('in a Triphammer session xargs running a wrapper whose file operand its inp
   }
 });
 
+test('in a Triphammer session xargs running wrappers whose command its input gives is refused, however long the input',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo "flock ~/.newfile true" | xargs sudo', 'echo "flock ~/.newfile true" | xargs env',
+      'echo "1 flock -w 5 ~/.newfile true" | xargs timeout', 'echo "KILL 1 flock ~/.newfile true" | xargs timeout -s',
+      'echo "-n 1 -w 5 -E 3 flock -w 5 -E 3 -n ~/.newfile true" | xargs sudo nice', 'echo "rm ~/.bashrc" | xargs nohup',
+      'echo "~/.newfile true" | xargs taskset -c', 'echo flock | xargs -I{} {} ~/.newfile true',
+      'echo flock | xargs -I{} sudo {} ~/.newfile true', 'echo x | xargs env -S']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['echo a b | xargs', 'echo a | xargs sudo echo', 'echo 5 | xargs timeout 1 sleep',
+      'echo a | xargs -I{} sudo echo {}']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
 test('in a Triphammer session the letters of an attached xargs option value are not read as options', t => {
   const s = triphammerSession(t);
   if (!s) return;
