@@ -1629,31 +1629,32 @@ const labelEvent = (event, login, name = 'needs-owner') => ({event, label: {name
 const ownerThenApp = [labelEvent('labeled', 'Example-Owner'), labelEvent('unlabeled', 'example-agents[bot]')];
 const ownerAppApp = [...ownerThenApp, labelEvent('labeled', 'Example-Agents[bot]', 'Needs-Owner')];
 const ownerThenOwner = [labelEvent('labeled', 'example-owner'), labelEvent('unlabeled', 'Example-Owner', 'Needs-Owner')];
+// Serves events as issue #number's events to the rig's gh.
+const serveEvents = (r, number, events) => {
+  r.gh.json('events.json', events);
+  r.gh.respond({[eventsCall(number)]: {file: 'events.json'}});
+};
 
 test("an issue whose needs-owner the owner added and the App removed is not started; the owner's removal lifts it", t => {
   const braked = ticketSetup(t, [issue(7), issue(8)]);
-  braked.gh.json('events.json', ownerThenApp);
-  braked.gh.respond({[eventsCall(7)]: {file: 'events.json'}});
+  serveEvents(braked, 7, ownerThenApp);
   assert.equal(braked.tick({}, ['--plan']).trim(), 'ticket 8');
 
   const alone = ticketSetup(t, [upkeepIssue(1, 1, 'CLOSED'), issue(7)]);
-  alone.gh.json('events.json', ownerThenApp);
-  alone.gh.respond({[eventsCall(7)]: {file: 'events.json'}});
+  serveEvents(alone, 7, ownerThenApp);
   alone.tick();
   assert.equal(alone.ran(), false);
   assert.match(alone.log(), /#7: skipped: the owner added needs-owner, and only the owner's removal lifts it/);
 
   const lifted = ticketSetup(t, [issue(7), issue(8)]);
-  lifted.gh.json('events.json', ownerThenOwner);
-  lifted.gh.respond({[eventsCall(7)]: {file: 'events.json'}});
+  serveEvents(lifted, 7, ownerThenOwner);
   assert.equal(lifted.tick({}, ['--plan']).trim(), 'ticket 7');
 });
 
 test("a parent whose needs-owner the owner added and the App removed stays open when its last slice closes", t => {
   const parent = {...issue(10), body: ''};
   const r = ticketSetup(t, [parent, {...issue(11, {state: 'CLOSED'}), body: 'Slice 1 of #10.'}, issue(20)]);
-  r.gh.json('events.json', ownerThenApp);
-  r.gh.respond({[eventsCall(10)]: {file: 'events.json'}});
+  serveEvents(r, 10, ownerThenApp);
   assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 20');
 });
 

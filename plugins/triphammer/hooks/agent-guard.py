@@ -2061,8 +2061,8 @@ def gh_api_removes_label(endpoint, options):
     (or whose --input body the hook does not read). A method computed at run time counts as any."""
     methods = [value for name, value in options if name in ("-X", "--method") and value is not None]
     fields = [value for name, value in options if name in ("-f", "--raw-field", "-F", "--field")]
-    given = bool(fields) or any(name == "--input" for name, _ in options)
-    method = methods[-1].value.upper() if methods else "POST" if given else "GET"
+    has_input = any(name == "--input" for name, _ in options)
+    method = methods[-1].value.upper() if methods else "POST" if fields or has_input else "GET"
     if methods and computed(methods[-1]):
         method = None
     # gh sends neither the query nor the fragment as part of the path; cut them after each decoding as well. gh sends
@@ -2083,8 +2083,7 @@ def gh_api_removes_label(endpoint, options):
     if match.group(0).lower().endswith("labels"):
         return method in (None, "PUT", "DELETE")
     return method in (None, "PATCH", "POST", "PUT") and (
-        any(name == "--input" for name, _ in options)
-        or any(value is None or gh_field_sets_labels(value) for value in fields))
+        has_input or any(value is None or gh_field_sets_labels(value) for value in fields))
 
 
 def gh_field_sets_labels(field):
