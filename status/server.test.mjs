@@ -422,6 +422,24 @@ test('a stop-agents label gh reports pauses the page even while the runner\'s fi
   });
 });
 
+test('a Stop-Agents label in any case pauses the page, and brake labels in any case get the brake badge', async () => {
+  // GitHub matches label names in any case, and so does the runner.
+  const {dir} = stateDir();
+  await withServer(dir, async get => {
+    const page = await get('/');
+    assert.match(page.body, /Paused: stop-agents on #9/);
+    assert.ok(page.body.includes('<span class="label brake">Stop-Agents</span>'));
+    assert.ok(page.body.includes('<span class="label brake">Needs-Owner</span>'));
+    assert.ok(page.body.includes('<span class="label brake">HOLD</span>'));
+    assert.ok(page.body.includes('Next action: none while paused.'));
+  }, {
+    titles: async () => ({value: {
+      issues: ok([{number: 9, title: 'Nine', labels: [{name: 'Stop-Agents'}]}, {number: 10, title: 'Ten', labels: [{name: 'Needs-Owner'}]}]),
+      prs: ok([{number: 12, title: 'Twelve', labels: [{name: 'HOLD'}]}]),
+    }, at: Date.now()}),
+  });
+});
+
 test('a held lock with an unended start older than the lock holder is busy, not that old run', async () => {
   // A killed run leaves a start line with no end; the runner takes its lock on every timer start before logging.
   const {dir} = stateDir();
@@ -583,6 +601,35 @@ test('Waiting on you lists brakes first, then every kind of row oldest waiting f
     assert.ok(!section.includes('Nothing is waiting on you'));
     assert.ok(!/<(button|form|input)\b/.test(section));
   }, {titles: waitingGh().titles});
+});
+
+test('Waiting on you reads the hold, needs-owner and stop-agents labels and their label events in any case', async () => {
+  // The items' labels are capitalized and the events' upper case, so each is compared without regard to case.
+  const {dir} = stateDir();
+  release(dir);
+  const {fixture} = waitingGh();
+  const capitalized = (/** @type {string} */ name) => name.replace(/(^|-)(\w)/g, (_, dash, letter) => dash + letter.toUpperCase());
+  for (const item of [...fixture.issues, ...fixture.prs]) item.labels = item.labels.map((/** @type {any} */ label) => ({name: capitalized(label.name)}));
+  const {issues, pullRequests} = fixture.labelEvents.data.repository;
+  for (const node of [...issues.nodes, ...pullRequests.nodes]) {
+    for (const event of node.timelineItems.nodes) event.label.name = event.label.name.toUpperCase();
+  }
+  await withServer(dir, async get => {
+    const section = waitingSection((await get('/')).body);
+    // The same order as with lower-case labels, which needs the label times: #21 was opened before every other item.
+    assert.deepEqual(rowHeads(section), [
+      'https://github.com/o/r/issues/23',
+      'https://github.com/o/r/pull/31',
+      'https://github.com/o/r/issues/21',
+      'https://github.com/o/r/pull/30',
+      'https://github.com/o/r/issues/20',
+      'https://github.com/o/r/pull/32',
+    ]);
+    assert.ok(section.includes('labelled stop-agents: the agents are paused'));
+    assert.ok(section.includes('labelled needs-owner<br>escalate, no owner approval: '));
+    assert.ok(section.includes('PR #32</a> Held fix <span class="muted">'));
+    assert.ok(!/arm with <code>gh pr merge 32 /.test(section), 'a Hold pull request is not asked to be armed');
+  }, {titles: async () => ({value: {issues: ok(fixture.issues), prs: ok(fixture.prs), labelEvents: ok(fixture.labelEvents)}, at: Date.now()})});
 });
 
 test('a pull request waits for approval exactly when the risk-tier workflow posted an escalate status on its head', async () => {
