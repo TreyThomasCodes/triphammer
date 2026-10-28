@@ -290,10 +290,9 @@ export function checkoutSetup(t, files = {}, config = {}) {
 }
 
 // A machine whose checkout holds this branch's ticket-runner, config.sh, labels.sh, ticket-decide.py, update-checkout
-// and session-sandbox, the
-// example project's .triphammer/project.json (or `project`), plus `files`, and a runner that executes the checkout's
-// copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its Triphammer config is Triphammer's,
-// with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
+// and session-sandbox, the example project's .triphammer/project.json (or `project`), plus `files`, and a runner that
+// executes the checkout's copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its
+// Triphammer config is Triphammer's, with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a

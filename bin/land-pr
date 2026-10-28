@@ -41,8 +41,6 @@ main() {
   script="$(git -C "$main_git" show refs/remotes/origin/main:scripts/land-pr.sh)" \
     || { echo "land-pr: cannot read main's scripts/land-pr.sh; nothing ran" >&2; exit 1; }
   # land-pr.sh is fed on stdin, as `bash -s` expects, and closes stdin for everything it starts.
-  status=0
-  TRIPHAMMER_CHECKOUT="$main_git" bash -s -- "$pr" <<< "$script" || status=$?
-  exit "$status"
+  TRIPHAMMER_CHECKOUT="$main_git" bash -s -- "$pr" <<< "$script"
 }
 main "$@"

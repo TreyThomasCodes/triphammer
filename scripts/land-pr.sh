@@ -33,7 +33,8 @@ main() {
 
   # Main's wrapper and main's classifier, fully qualified so a tag named origin/main cannot stand in for it. Both come
   # from $TRIPHAMMER_CHECKOUT, a repository holding Triphammer's main (bin/land-pr sets it to the temporary one it
-  # fetched, and risk-tier-base.sh reads it too), or this repository when that is unset; the diff and the rules come from this repository's origin/main.
+  # fetched, and risk-tier-base.sh reads it too), or this repository when that is unset; the diff and the rules come
+  # from this repository's origin/main.
   from=(git)
   [ -z "${TRIPHAMMER_CHECKOUT:-}" ] || from=(git -C "$TRIPHAMMER_CHECKOUT")
   tier=0

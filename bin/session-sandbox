@@ -48,10 +48,10 @@
 #
 # Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
 # session may create or replace it), such as a ~/.codex/AGENTS.md or ~/.nuget/NuGet/NuGet.Config the machine does not
-# have; anything a writable path
-# above lets a later session read (a cache, ~/.claude.json, Codex's databases, local-audit's run count, or buildx's
-# builder state, which picks the builder a later docker build uses); and the Docker socket, or any other socket of a service outside, which the command can still reach: a container
-# started through Docker can write anywhere on the machine.
+# have; anything a writable path above lets a later session read (a cache, ~/.claude.json, Codex's databases,
+# local-audit's run count, or buildx's builder state, which picks the builder a later docker build uses); and the
+# Docker socket, or any other socket of a service outside, which the command can still reach: a container started
+# through Docker can write anywhere on the machine.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout or bwrap fails.
 set -euo pipefail
