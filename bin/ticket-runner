@@ -434,7 +434,7 @@ if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo
      | select((.repository | not)
          or ((.repository.owner.login // "") + "/" + (.repository.name // "") | ascii_downcase) == ($repo | ascii_downcase))
      | .number] end) as $own
-  | [.[] | select(.number as $i | $own | index($i)) | select(any(.labels[]?; .name == "cleanup")) | "#\(.number)"]
+  | [.[] | select((.number | IN($own[])) and any(.labels[]?; .name == "cleanup")) | "#\(.number)"]
   | join(" ")' "$state/issues.json" 2>/dev/null)"; then
   no_proposals="could not look up whether the run's issue is labelled cleanup"
 elif [ -n "$cleanup_issues" ]; then
@@ -681,7 +681,7 @@ proposals_limit=10
 # (ticket-decide.py ignores blockquotes).
 # shellcheck disable=SC2016  # the jq variables are jq's
 file_proposals() {
-  local open line at=0 filed=0 entry slug title body marker url where=issue
+  local open line at=0 filed=0 count entry slug title body marker url where=issue
   local -A seen=()
   [ "$kind" = ticket ] || where="pull request"
   if [ -L "$proposals" ] || { [ -e "$proposals" ] && [ ! -f "$proposals" ]; }; then
@@ -690,8 +690,8 @@ file_proposals() {
   fi
   [ -e "$proposals" ] || return 0
   if [ -n "$no_proposals" ]; then
-    grep -q '[^[:space:]]' "$proposals" || return 0
-    log "$kind #$number: $no_proposals; filing none of the session's $(grep -c '[^[:space:]]' "$proposals") proposals"
+    # grep -c fails on a file with no non-blank line, which has no proposals to skip.
+    count="$(grep -c '[^[:space:]]' "$proposals")" && log "$kind #$number: $no_proposals; filing none of the session's $count proposals"
     return 0
   fi
   if [ "$(stat -c %s "$proposals")" -gt 262144 ]; then
