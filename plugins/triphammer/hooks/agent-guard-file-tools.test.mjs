@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, relative} from 'node:path';
-import {decideFile, machineHome, configuredSetup, validConf, fileTools} from './agent-guard-fixture.mjs';
+import {decideFile, machineHome, configuredSetup, validConf, fileTools, assertNoOverrideHint} from './agent-guard-fixture.mjs';
 
 // The file tools under the persistence rule.
 
@@ -12,8 +12,8 @@ function assertFilePersistenceDenied(reason, path) {
   assert.ok(reason, `expected a deny: ${path}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /the owner does that/);
-  assert.match(reason, /# guard-override: <reason>/);
-  assert.match(reason, /only to Bash commands/);
+  assert.match(reason, /Leave this change to the owner and report it/);
+  assertNoOverrideHint(reason, path);
 }
 
 test('a Write, Edit or NotebookEdit under each persistence directory is refused, without an override', t => {

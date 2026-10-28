@@ -214,6 +214,7 @@ share the shared directory, `$TRIPHAMMER_SHARED_DIR` or else `${XDG_STATE_HOME:-
 | `stop` | The owner's shared brake: while it exists no project's runner or merge queue does anything. The `stop` file in a project's state directory stops only that project. |
 | `last` | The project whose run started last. |
 | `waiting/<project>` | The time a tick of that project last had a run to start; removed when it starts one or has nothing to do. |
+| `guard-overrides.log` | One JSON line per `# guard-override:` the plugin's `agent-guard.py` honors (`time`, `session`, `rule`, `reason`, `command`), from any session on the machine. The override lifts only the shell-edit rule; upkeep reads the log. The hook creates the directory and the file when missing; a session cannot write the log itself. |
 
 Projects take turns when the slots run out: a tick that took the last free slot yields when its project is the one in
 `last` and another project's `waiting` mark is at most 30 minutes old (three ticks). It logs `<project> ran last and
@@ -249,8 +250,9 @@ the plugin's. The plugin's hooks run in the session and its subagents. The runne
 the plugin's `agent-guard.py` that Triphammer started it: such a session writes only inside that worktree (not its `.git`)
 and the temporary directories, writes no git configuration (`git config` and `git remote` only read, and an upstream is
 set only for its own branch in its worktree), sets no one-command `git -c` key that makes git run a command or changes
-what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`; the hook's header lists what it checks and what it
-does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
+what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`. A `# guard-override:`
+token lifts none of these, only the shell-edit rule, and the hook logs each override it honors to `guard-overrides.log`
+in the shared directory; the hook's header lists what it checks and what it does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
 that are on. A tick whose Triphammer `origin/main` has no
 `plugins/triphammer/skills/ticket-run/SKILL.md` starts no session.
 
