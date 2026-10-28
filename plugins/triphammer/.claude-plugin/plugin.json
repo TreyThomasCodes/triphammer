@@ -1,5 +1,5 @@
 {
   "name": "triphammer",
   "version": "0.1.0",
-  "description": "Triphammer's workflow skills, agents and guard hooks for unattended ticket runs: ticket-run, review-loop, merge-policy, plan-work, upkeep and review-checklist; the orchestrator, builder, reviewer, searcher and simplifier agents; the agent-guard and text-lint hooks."
+  "description": "Triphammer's workflow skills, agents and guard hooks for unattended ticket runs: ticket-run, review-loop, merge-policy, plan-work, upkeep and review-checklist; the orchestrator, builder, builder-light, reviewer, searcher and simplifier agents; the agent-guard and text-lint hooks."
 }

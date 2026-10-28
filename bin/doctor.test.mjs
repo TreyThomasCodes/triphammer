@@ -10,7 +10,7 @@ const sentinel = 'SENTINEL-CREDENTIAL-CONTENT-4c1f';
 const qwenUrl = 'http://model.example.invalid:8080';
 const dotNetDropIn = '[Service]\nEnvironment=PATH=%h/.local/bin:%h/.dotnet:%h/.dotnet/tools:/usr/local/bin:/usr/bin:/bin\n'
   + 'Environment=DOTNET_ROOT=%h/.dotnet\n';
-const repoLabels = ['agent-working', 'bug', 'Hold', 'needs-owner', 'next', 'stop-agents', 'upkeep'];
+const repoLabels = ['agent-working', 'bug', 'Hold', 'Light', 'needs-owner', 'next', 'stop-agents', 'upkeep'];
 const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rollForward, allowPrerelease: false}});
 
 // A machine whose checkout has this branch's doctor and ticket-runner@.service, a global.json pinning 10.0.400
@@ -401,12 +401,12 @@ test('each label Triphammer uses that the repository lacks is reported, with tri
   r.gh.respond({'label list': {stdout: 'bug\nnext\nAgent-Working\n'}});
   const result = r.doctor();
   assert.equal(result.status, 1, result.output);
-  assert.deepEqual(result.problems, ['hold', 'needs-owner', 'stop-agents'].map(name =>
+  assert.deepEqual(result.problems, ['hold', 'needs-owner', 'stop-agents', 'light'].map(name =>
     `Example-Owner/example-project has no label ${name}, which Triphammer reads or sets. Fix: run triphammer add `
     + 'Example-Owner/example-project again, with the options it was added with (bin/README.md, Labels)'));
-  assert.match(result.output, /^3 problem\(s\) found$/m);
+  assert.match(result.output, /^4 problem\(s\) found$/m);
   r.gh.respond({'label list': {stdout: ''}});
-  assert.equal(r.doctor().problems.length, 5);
+  assert.equal(r.doctor().problems.length, 6);
 });
 
 test('labels that cannot be listed are reported, not passed', t => {

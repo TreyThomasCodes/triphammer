@@ -27,7 +27,7 @@ With no closed upkeep issue, the window is the last 7 days.
 
 `STATE_DIR` is the runner's state directory, the `STATE_DIR` line of the project's Triphammer config `${XDG_CONFIG_HOME:-~/.config}/triphammer/<name>.conf`, where `<name>` is the `name` in `.triphammer/project.json` (`bin/README.md`, Configuration). The merge queue's log is `${XDG_STATE_HOME:-~/.local/state}/merge-when-ready-<name>.log` under the `merge-when-ready@<name>` unit, and `merge-when-ready.log` in the same directory under the plain `merge-when-ready` unit.
 
-- Ticket and repair runs: `$STATE_DIR/log` has one line per run start and finish (`ticket #N: run k of 3 starting; transcript <path>`, `repair #N (<reason>): run k of 3 starting`, `run k finished (exit c)`). The transcripts are `$STATE_DIR/runs/<UTC stamp>-ticket-N.jsonl` and `-repair-N.jsonl`, stream-JSON with one `"type":"result"` line at the end.
+- Ticket and repair runs: `$STATE_DIR/log` has one line per run start and finish (`ticket #N: run k of 3 starting; transcript <path>`, `repair #N (<reason>): run k of 3 starting`, `run k finished (exit c)`). The transcripts are `$STATE_DIR/runs/<UTC stamp>-ticket-N.jsonl` and `-repair-N.jsonl`, stream-JSON with one `"type":"result"` line at the end. Beside each is its record, the same name ending `.json`: the builder model, the exit status, whether a pull request was opened, the review rounds and whether it handed over (`bin/README.md`, Run records).
 - Repair runs that changed nothing: the pull request has no commit between the run's start and finish (`gh pr view <n> --json commits`).
 - Merges: the merge queue's log (`<repo>#N: merged by merge-when-ready`) and `gh pr list --state merged --search "merged:>=<window start>"`.
 - Reviewer blocking findings: each merged pull request's comment lists its review rounds (`gh pr view <n> --comments`); the `triphammer:reviewer` reports are also in the run transcripts. Count them by `triphammer:review-checklist` class, and put findings that fit no class under "unclassified".
@@ -97,4 +97,4 @@ Post one comment on the upkeep issue covering the window, with its start and end
 - auto-mode classifier denials, and hook overrides (`guard-override`, `text-lint-override`) with their reasons;
 - links to every issue you filed or commented on, and the suspicions you could not reproduce.
 
-Then close the issue (`gh issue close <n>`). End with one line saying how many issues you filed and that the upkeep issue is closed.
+Then close the issue (`gh issue close <n>`). End with one line saying how many issues you filed and that the upkeep issue is closed, followed by the run record line of `triphammer:ticket-run` (Run record).
