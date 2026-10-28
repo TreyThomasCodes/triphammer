@@ -325,7 +325,8 @@ of these fails the run. Agents never run `demo-publish`.
 The owner's brakes stop a session in progress, not only the next one. While a session runs, `ticket-runner` checks
 them every `TICKET_RUNNER_BRAKE_SECONDS` (a positive number, default 60): the project's and the shared `stop` files, an open `stop-agents`
 issue, `hold` on a ticket's issue, the owner's `needs-owner` on it, the ticket's issue being closed, and `hold` on the
-pull request a repair works on. `needs-owner` that someone other than the App added brakes until someone other than the
+pull request a repair works on. So do 100 labels or more on the ticket's issue or the repair's pull request, as `gh`
+reads only the first 100 and a `hold` or `needs-owner` may be past them. `needs-owner` that someone other than the App added brakes until someone other than the
 App removes it, whether or not the label is still on the issue: the runner reads the issue's `labeled` and `unlabeled`
 events for it (the issue events API, oldest first, where the App is `<APP_AUTHOR without app/>[bot]`), and the brake
 is on when the last such `labeled` event by anyone but the App comes after the last such `unlabeled` one. The App's
@@ -404,6 +405,11 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
   issue's label events; when the owner's brake is on, or the lookup fails, it logs why, adds the issue to the state
   directory's `owner-brakes` record (rewritten each tick), which `ticket-decide.py` skips, and decides again. Only the
   issue it would act on is looked up, never the whole list.
+- An issue or pull request with 99 labels or more besides `agent-working`, in any case, counts as braked. `gh` reads
+  only the first 100, so a brake may be past them, and the session brakes (Sessions) stop a session at 100; the runner
+  adds `agent-working` before its first brake check, so an item picked at 99 would be braked there, uncounted, on every
+  tick. Such a parent stays open, such a pull request is not repaired and such an issue is not taken, and each is
+  printed to standard error.
 - A `Depends on #N.` is satisfied only when `#N` is a known, closed issue. A number missing from the issue list (a pull
   request, a typo, an issue past the list limit) keeps the issue waiting, and the reason is printed to standard error.
 - Ready issues labelled `next` are taken before other ready issues, lowest number first. The label never makes an issue
@@ -428,7 +434,8 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
 
 The runner and `merge-when-ready` read `hold`, `needs-owner`, `stop-agents`, `next` and `cleanup` in any case, as
-GitHub matches label names, so `Hold` brakes as `hold` does; `light` and `upkeep` they read as written.
+GitHub matches label names, so `Hold` brakes as `hold` does; `light` and `upkeep` they read as written. Their jq label
+checks share one definition, `labelled_jq` in `bin/labels.sh`.
 
 `ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
 are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine

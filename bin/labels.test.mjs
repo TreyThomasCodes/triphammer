@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {join} from 'node:path';
-import {runnerSetup} from './fixture.mjs';
+import {manyLabels, runnerSetup} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The labels bin/labels.sh defines, with the color and description each is created with.
@@ -51,4 +51,27 @@ test('--labels fails when the labels cannot be listed, creating none, and tries 
   assert.equal(refused.result.status, 1);
   assert.deepEqual(refused.labelCalls, [list, ...Object.keys(labels).map(create)]);
   assert.match(refused.result.stderr, /could not create the label hold in Example-Owner\/example-project/);
+});
+
+// `filter` (labelled("hold") by default) through bin/labels.sh's $labelled_jq, on `input` (a JSON value), as jq prints it.
+function labelled(input, filter = 'labelled("hold")') {
+  const result = spawnSync('bash', ['-c', 'source "$1" && jq -c "$labelled_jq$2"', 'bash',
+    join(import.meta.dirname, 'labels.sh'), filter], {input: JSON.stringify(input), encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+test('labelled_jq matches a label in any case, in both the gh --json and the GraphQL shapes', () => {
+  for (const name of ['hold', 'Hold', 'HOLD']) {
+    assert.equal(labelled({labels: [{name: 'bug'}, {name}]}), 'true', name);
+    assert.equal(labelled({labels: {nodes: [{name: 'bug'}, {name}]}}), 'true', `${name} in nodes`);
+  }
+  for (const input of [{labels: [{name: 'holds'}]}, {labels: {nodes: [{name: 'on-hold'}]}}, {labels: []},
+    {labels: {nodes: []}}, {labels: null}, {}]) assert.equal(labelled(input), 'false', JSON.stringify(input));
+});
+
+test('labels_unread is true when gh returned 100 labels or more, as a brake may be past them', () => {
+  const labels = count => manyLabels(count).map(name => ({name}));
+  for (const count of [0, 1, 99]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'false', `${count}`);
+  for (const count of [100, 101]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'true', `${count}`);
 });

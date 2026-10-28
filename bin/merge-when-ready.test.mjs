@@ -5,7 +5,7 @@ import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writ
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
-import {fakeGh, here, lines, toolingEnv, withUmask, writeConfig} from './fixture.mjs';
+import {fakeGh, here, lines, manyLabels, toolingEnv, withUmask, writeConfig} from './fixture.mjs';
 
 // The fake gh's routes: the installation's repositories (repos.json), each repository's pull requests
 // (graphql-<owner>_<name>-.json), one pull request's head and checks (graphql-<owner>_<name>-<number>.json) and
@@ -26,7 +26,8 @@ const summary = ([, command, number, ...rest]) =>
 
 const pr = (number, mergeStateStatus, labels = []) => ({
   number, baseRefName: 'main', headRefName: `branch-${number}`, headRefOid: `${number}`.padEnd(40, 'a'), mergeStateStatus,
-  autoMergeRequest: {enabledAt: '2026-10-17T00:00:00Z'}, labels: {nodes: labels.map(name => ({name}))},
+  autoMergeRequest: {enabledAt: '2026-10-17T00:00:00Z'},
+  labels: {pageInfo: {hasNextPage: false}, nodes: labels.map(name => ({name}))},
 });
 
 // An armed pull request whose auto-merge was enabled at `enabledAt` and whose head carries `checks` (CheckRun and
@@ -205,6 +206,19 @@ test('a pull request labelled Hold, in another case, is neither merged nor updat
   assert.deepEqual(r.calls(), [`merge o/a#3 ${pr(3).headRefOid}`]);
   assert.match(r.log(), /o\/a#1: labelled hold; not merging or updating it/);
   assert.match(r.log(), /o\/a#2: labelled hold; not merging or updating it/);
+});
+
+test('a pull request with more labels than one page, or with no page info, is neither merged nor updated', t => {
+  const r = queueSetup(t);
+  const many = pr(1, 'CLEAN', manyLabels(100));
+  many.labels.pageInfo.hasNextPage = true;
+  const unread = pr(2, 'BEHIND');
+  delete unread.labels.pageInfo;
+  r.pulls('o/a', [many, unread, pr(3, 'CLEAN')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#3 ${pr(3).headRefOid}`]);
+  assert.match(r.log(), /o\/a#1: more labels than merge-when-ready reads, so it may be labelled hold; not merging or updating it/);
+  assert.match(r.log(), /o\/a#2: more labels than merge-when-ready reads/);
 });
 
 test('while ticket-runner holds its lock with no current file, branches are not updated but clean pull requests still merge', async t => {
