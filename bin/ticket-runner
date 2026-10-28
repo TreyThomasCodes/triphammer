@@ -14,7 +14,8 @@
 #
 # Each start first fast-forwards Triphammer's checkout (the one this script lives in) to origin/main
 # (bin/update-checkout), and the project's main checkout too when that is another repository, and runs the
-# updated copy of this script once if that changed it. It then sweeps: it removes the runner worktrees no run will use again
+# updated copy of this script once if that changed it; an update that finds a checkout's files differ from its commit
+# creates the shared `stop` file and the tick ends there. It then sweeps: it removes the runner worktrees no run will use again
 # and the databases whose worktree is gone (prune_worktrees, prune_databases). Then it does at most one thing, in
 # this order:
 #   1. closes a parent issue whose `Slice k of #N` issues are all closed;
@@ -277,8 +278,12 @@ same_repo "$triphammer" "$checkout" || separate=1
 if [ "$plan_only" != --plan ] && [ -z "${TICKET_RUNNER_UPDATED:-}" ]; then
   self="$(cat "$bin/ticket-runner")"
   for target in "$triphammer" ${separate:+"$checkout"}; do
-    "$bin/update-checkout" "$target" 2>&1 | while IFS= read -r line; do log "$line"; done \
-      || log "self-update failed; continuing with the checkout as it is"
+    if ! TRIPHAMMER_SHARED_DIR="$shared" "$bin/update-checkout" "$target" 2>&1 \
+        | while IFS= read -r line; do log "$line"; done; then
+      # A checkout whose files differ from its commit leaves the shared stop file, and then nothing else runs.
+      [ -z "$(stop_file_brake)" ] || exit 0
+      log "self-update failed; continuing with the checkout as it is"
+    fi
   done
   # Bash reads a script as it runs, so the rest of this tick runs the updated copy from its start, once. The copy is
   # always the one next to this script, in Triphammer's checkout.

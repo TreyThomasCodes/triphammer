@@ -48,7 +48,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
-| `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. `ticket-runner` calls it; see below. |
+| `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. When the updated checkout's files differ from its commit, it creates the shared `stop` file and restarts nothing. `ticket-runner` calls it; see below. |
 | `demo-gallery` | The `demo` module's web server: serves `DEMO_GALLERY_DIR` read-only at `http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/` until stopped. GET and HEAD only (anything else gets 405); a directory serves its `index.html` and is never listed; a path that leaves the gallery, by `..` or by a symlink whose target lies outside it, and anything but a regular file get 404. With the module off, `DEMO_GALLERY_DIR` missing or the config malformed it exits 2 naming why. `DEMO_URL` is the address the owner publishes, which may be this server itself or a proxy in front of it. |
 | `demo-publish` | The `demo` module. `demo-publish <pr> --summary <line> <folder>` publishes the screenshots and videos under one folder to the gallery in the config's `DEMO_GALLERY_DIR` and prints its `DEMO_URL`, and `demo-publish --reindex` refreshes pull request states, which `ticket-runner` does every tick; with the module off, or either setting missing, it exits 2 naming it. Any other form prints the usage and exits nonzero. It never follows a symlink inside the folder and refuses a folder argument that is itself a symlink (a symlinked parent directory in the argument's path is followed), never copies a file with more than one hard link (another name may lie outside the folder) and never copies a file whose real path is outside the folder; it names each one it skips. When no media survives these checks, or a file cannot be copied or converted, it exits nonzero with one line on stderr and leaves the pull request's earlier demo in place: it builds the new entry in a hidden folder in the gallery and swaps it in only once every file and `meta.json` are written. |
 | `publish-demos` | The `demo` module. Runs `demo-publish` for each demo a session left in its worktree; `ticket-runner` calls it when a session ends. See below. |
@@ -607,8 +607,18 @@ that is another repository:
   `systemctl --user restart triphammer-status.service`.
 - When the fast-forward changed `bin/demo-gallery` or `bin/config.sh`, it runs
   `systemctl --user try-restart 'demo-gallery@*.service'`, which restarts every running gallery and starts none.
-- A failure (a fetch that cannot reach GitHub, a failed restart) is logged and the tick carries on; a failed restart
-  does not stop the other one.
+- After a fast-forward, before any restart, it checks that every tracked file holds what the new commit holds. It
+  reads the commit into a fresh index of its own and runs `git status --porcelain` against it, so git compares each
+  file's content rather than trusting the stat data the checkout's index recorded. That catches a file written after the
+  checkout and a planted loose object, whose id names the commit's blob but which holds other content. An untracked
+  file counts too. When anything differs, or the check itself fails, it creates the shared `stop` file (Several
+  projects), logs the checkout and each path that differs, restarts nothing and exits 3; the tick ends there, updates
+  no other checkout and does not re-execute the runner, and every project's runner and merge queue stay paused. The
+  owner then inspects the checkout (`git status`, `git diff`, `git fsck --full`, which reports a planted object as a
+  hash-path mismatch), removes the bad objects or reclones, checks that `git status --porcelain` is empty, and removes the
+  `stop` file.
+- Any other failure (a fetch that cannot reach GitHub, a failed restart) is logged and the tick carries on; a failed
+  restart does not stop the other one.
 - `ticket-runner --plan` never updates the checkout.
 
 Bash reads a script while it runs it, so a pull that rewrites `ticket-runner` must not change the run in progress. The
