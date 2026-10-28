@@ -93,6 +93,17 @@ test('under the limit, the main checkout, Triphammer\'s checkout and the home di
   assert.equal(git(r.main, 'status', '--porcelain', '--untracked-files=no'), '');
 });
 
+test("under the limit, Triphammer's checkout's .git is read-only, so no config or hook there reaches the next tick", {skip}, t => {
+  const r = sandboxRig(t);
+  const config = join(r.triphammer, '.git/config');
+  const before = readFileSync(config, 'utf8');
+  const fsmonitor = r.inside(`git -C '${r.triphammer}' config core.fsmonitor 'echo planted > tracked; false'`);
+  assert.notEqual(fsmonitor.status, 0, 'core.fsmonitor was set');
+  assert.match(fsmonitor.output, /Read-only file system|could not lock config file/, fsmonitor.output);
+  assert.equal(readFileSync(config, 'utf8'), before);
+  assertReadOnly(r, [config, join(r.triphammer, '.git/hooks/post-merge')]);
+});
+
 test('under the limit, the worktree, its commits, /tmp and what Claude Code, Codex, local-audit and the hooks write are writable', {skip}, t => {
   const r = sandboxRig(t);
   const scratch = mkdtempSync('/tmp/session-sandbox-test-');

@@ -184,10 +184,12 @@
 # xargs adds from its input. Every round of review has found another shell feature this parser misses, so behind this
 # hook a session ticket-runner starts runs under an OS-level write limit (bin/session-sandbox; bin/README.md, The write
 # limit): the file system is read-only to it and to everything it starts but for its worktree, the main checkout's .git
-# and Triphammer's checkout's .git (both writable until each run gets a clone of its own), the temporary directories,
-# the caches and what Claude Code and these hooks write in the home directory. The limit does not cover what the
-# session reaches through a socket, such as Docker's, and a session started any other way has no such limit: this hook
-# is its only line.
+# (writable until each run gets a clone of its own, #93), the temporary directories, the caches and what Claude Code
+# and these hooks write in the home directory. Triphammer's checkout's .git, unless it is the main checkout's, is not
+# among them: land-pr fetches main into a temporary repository. The limit does not cover what the session reaches
+# through a socket, such as Docker's, nor the next tick's git commands in the main checkout, which run outside the
+# limit and so run a config (core.fsmonitor, core.hooksPath) or hook the session writes into that .git, until #93
+# gives each run a clone of its own; a session started any other way has no such limit: this hook is its only line.
 #
 # `# guard-override: <reason>` anywhere in a Bash command lifts only the shell-edit rule, the false positives it exists
 # for: a git-tracked file under a shellEditRoots path rewritten through the shell. It does not lift the persistence
