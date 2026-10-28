@@ -276,6 +276,7 @@ if tool python3 "Python 3" "install python3 $units_path"; then
   python_version="$(python3 --version 2>&1 || true)"
   [[ "$python_version" =~ ^Python\ 3\. ]] || problem "python3 is ${python_version:-unknown}, not Python 3" "install Python 3 as python3 $units_path"
 fi
+tool shellcheck ShellCheck "install shellcheck $units_path: sudo apt-get install shellcheck, or rerun provision" || true
 
 # The App's credential files and, with qwen-audit on, the Qwen key file: by path, owner and mode only.
 # credential <path> <the fix's subject>: reports a file that is missing, not a regular file, someone else's, or not
