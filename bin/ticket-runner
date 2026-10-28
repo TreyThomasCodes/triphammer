@@ -52,6 +52,8 @@
 #
 # The owner only brakes:
 #   - a `hold` label on an issue or pull request skips it;
+#   - `needs-owner` that anyone but the App added skips its issue until anyone but the App removes it, whether or not
+#     the label is still there (the issue's label events, owner_brake; a lookup that fails skips it too);
 #   - closing an issue drops it;
 #   - an open issue labelled `stop-agents`, or the file `stop` in the state directory, pauses this project; the file
 #     `stop` in the shared directory pauses every project;
@@ -60,8 +62,8 @@
 # `light`, unless the owner restarted its counter, and triphammer:builder (Opus) for every other run. Each run that ends
 # leaves a record beside its transcript (write_record).
 # The brakes also stop a run in progress: at least once a minute while a session runs, the runner checks the stop
-# files, a stop-agents issue, `hold` on the run's issue, `needs-owner` on it that anyone but the App added (a session
-# adds it itself when it stops for the owner), the issue being closed (a ticket that is not upkeep, whose session closes
+# files, a stop-agents issue, `hold` on the run's issue, the owner's `needs-owner` on it, label or no label (a session
+# adds the label itself when it stops for the owner), the issue being closed (a ticket that is not upkeep, whose session closes
 # its own issue, and not by a merged pull request, the run's own), and `hold` on the pull request a repair works on.
 # When one applies, it ends the session and every process it started, Bash tool commands in sessions of their own
 # included, as `systemctl stop` would (SIGTERM, then SIGKILL after 90 seconds), logs the brake, removes
@@ -338,10 +340,51 @@ if [ "$plan_only" != --plan ]; then
   prune_databases
 fi
 
+# The App's login in the issue events API, where it acts as `<app>[bot]`.
+app_login="$app_author"
+[[ "${app_author,,}" != app/* ]] || app_login="${app_author:4}[bot]"  # case-sensitive: lowered, against a lowercase literal
+# owner_brake <issue>: whether the owner's `needs-owner` brakes the issue, from its label events (the issue events API,
+# oldest first): "on" when the last `labeled` event for needs-owner by anyone but the App comes after the last such
+# `unlabeled` one, whether or not the label is still on the issue, "off" when it does not, and "none" when the issue
+# has no event for needs-owner yet. The App's events count for nothing either way: it adds the label
+# when a session stops for the owner, and its removal never lifts the owner's brake. Label names and logins compare
+# case-insensitively. Fails when the lookup fails.
+# shellcheck disable=SC2016  # the jq string interpolations are jq's
+owner_brake() {
+  local events event actor found=none
+  events="$(gh api "repos/$repo/issues/$1/events" --paginate --jq '.[]
+    | select((.event == "labeled" or .event == "unlabeled") and (.label.name | ascii_downcase) == "needs-owner")
+    | "\(.event) \(.actor.login // "")"' 2>/dev/null)" || return 1
+  while read -r event actor; do
+    [ -n "$event" ] || continue
+    [ "$found" != none ] || found=off
+    [ "${actor,,}" != "${app_login,,}" ] || continue
+    if [ "$event" = labeled ]; then found=on; else found=off; fi
+  done <<< "$events"
+  echo "$found"
+}
+
 # Prints one action: "close <issue>", "repair <pr> <issue> <reason>", "ticket <issue>", "upkeep", or nothing
 # (ticket-decide.py, which reads the security-findings and security-followed-up records in the state directory).
-action="$(python3 -I "$bin/ticket-decide.py" "$state/issues.json" "$state/prs.json" "$app_author" \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$owner" "$state")"
+# Before it closes or starts an issue, the runner looks up the owner's needs-owner brake on it (owner_brake), which
+# outlives the label; an issue it brakes, or whose lookup fails, goes into the state directory's `owner-brakes` record,
+# which ticket-decide.py skips, and ticket-decide.py decides again.
+: > "$state/owner-brakes"
+while :; do
+  action="$(python3 -I "$bin/ticket-decide.py" "$state/issues.json" "$state/prs.json" "$app_author" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$repo" "$owner" "$state")"
+  read -r kind number _ <<< "$action"
+  [ "$kind" = ticket ] || [ "$kind" = close ] || break
+  if ! braked="$(owner_brake "$number")"; then
+    note="#$number: could not look up who added or removed needs-owner on issue #$number; skipping it this tick"
+  elif [ "$braked" = on ]; then
+    note="#$number: skipped: the owner added needs-owner, and only the owner's removal lifts it"
+  else
+    break
+  fi
+  if [ "$plan_only" = --plan ]; then echo "$note" >&2; else log "$note"; fi
+  echo "$number" >> "$state/owner-brakes"
+done
 if [ "$plan_only" = --plan ]; then echo "${action:-idle}"; exit 0; fi
 mkdir -p "$shared/waiting"
 chmod 700 "$shared" "$shared/waiting"
@@ -593,18 +636,17 @@ write_current() {
 write_current "$branch" "$prs"
 working_label add "$labelled" "$number"
 
-# The brakes on a ticket's issue: `hold`; `needs-owner` that anyone but the App added (the session adds it itself when
-# it stops for the owner, as review-loop step 4 and ticket-run tell it to; the events API's actor tells the App, as
-# `<app>[bot]`, from the owner); 100 labels or more (labels_unread: gh reads only the first 100, so hold or needs-owner
-# may be past them); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
-# own issue) or a merged pull request closed it (the run's own, which merge-when-ready may merge while the session still
-# runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
-# failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
-app_login="$app_author"
-[[ "${app_author,,}" != app/* ]] || app_login="${app_author:4}[bot]"  # case-sensitive: lowered, against a lowercase literal
+# The brakes on a ticket's issue: `hold`; the owner's `needs-owner` (owner_brake), on until the owner removes it, with
+# or without the label (the session adds the label itself when it stops for the owner, as review-loop step 4 and
+# ticket-run tell it to, and the App's events count for nothing); 100 labels or more (labels_unread: gh reads only the
+# first 100, so hold or needs-owner may be past them); and the issue being closed, unless it is labelled upkeep (an
+# upkeep session closes its own issue) or a merged pull request closed it (the run's own, which merge-when-ready may
+# merge while the session still runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first
+# that applies, or nothing; a failed lookup is logged and is no brake, and so is an actor or closer GitHub does not
+# report yet.
 # shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
 issue_brake() {
-  local facts by closer
+  local facts braked closer
   if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq "$labelled_jq"'
       [if labelled("hold") then "hold" else empty end,
        if labelled("needs-owner") then "needs-owner" else empty end,
@@ -616,15 +658,14 @@ issue_brake() {
   fi
   facts=" $facts "
   if [[ "$facts" == *" hold "* ]]; then echo "labelled hold"; return 0; fi
-  if [[ "$facts" == *" needs-owner "* ]]; then
-    by="$(gh api "repos/$repo/issues/$number/events" --paginate --jq '.[]
-      | select(.event == "labeled" and (.label.name | ascii_downcase) == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
-    if [ -z "$by" ]; then
-      log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
-    elif [ "${by,,}" != "${app_login,,}" ]; then
-      echo "labelled needs-owner"
-      return 0
-    fi
+  if ! braked="$(owner_brake "$number")"; then
+    log "$kind #$number: could not look up who added or removed needs-owner on issue #$number" >&2
+  elif [ "$braked" = on ]; then
+    if [[ "$facts" == *" needs-owner "* ]]; then echo "labelled needs-owner"
+    else echo "under the owner's needs-owner, which the App removed"; fi
+    return 0
+  elif [[ "$facts" == *" needs-owner "* ]] && [ "$braked" = none ]; then
+    log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
   fi
   if [[ "$facts" == *" unread "* ]]; then echo "labelled more than the runner reads, so it may be labelled hold or needs-owner"; return 0; fi
   [[ "$facts" == *" closed "* ]] || return 0

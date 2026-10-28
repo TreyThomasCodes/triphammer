@@ -7,7 +7,8 @@
 # `now` is the tick's time in UTC (2026-10-17T12:00:00Z), and `owner-login` the person the runner acts for (Triphammer
 # config's OWNER), by default the owner part of owner/repo, and `state-dir` the runner's state directory, whose
 # `security-findings` and `security-followed-up` records say which pull request heads wait for a security-findings
-# repair (none without it). Prints one action, "close <issue>",
+# repair (none without it), and whose `owner-brakes` record lists the issues the owner's needs-owner brakes with or
+# without the label (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
 # or an issue labelled `next`, waits, on why a parent whose slices are all closed stays open (a brake label), and on
 # each issue or pull request skipped for more labels than gh reads, go to stderr. With --closed it prints, one per
@@ -107,6 +108,9 @@ def records(name):
 # lines match, so a record of an older head starts nothing.
 pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
+# The issues ticket-runner found braked by the owner's needs-owner, label or no label, or could not look up
+# (its owner_brake), one number per line; it never closes or starts them either.
+owner_brakes = records("owner-brakes")
 # `gh --json labels` returns only an item's first 100 labels, so a brake may be past them: the runner's session brakes
 # (labels_unread in bin/labels.sh) stop a session on an item with 100 labels or more. The runner adds `agent-working`
 # before its first brake check, so an item picked with 99 others would reach 100 there and be braked, uncounted, on
@@ -152,6 +156,9 @@ for parent in sorted(slices):
         if brakes := sorted(labels(issues[parent]) & BRAKES):
             print(f"skip close {parent}: labelled {', '.join(brakes)}", file=sys.stderr)
             continue
+        if str(parent) in owner_brakes:
+            print(f"skip close {parent}: the owner's needs-owner brakes it", file=sys.stderr)
+            continue
         if unread(issues[parent]):
             print(f"skip close {parent}: {UNREAD_NOTE}", file=sys.stderr)
             continue
@@ -187,7 +194,7 @@ cite = lambda numbers: ", ".join(f"#{d}" for d in numbers)
 # Ready issues labelled `next` first, then the rest but those labelled `cleanup` (the proposals sessions leave, which
 # ticket-runner files), then those, each lowest number first; `next` never makes an issue ready.
 for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), "cleanup" in labels(issues[n]), n)):
-    if not is_open(n) or labels(issues[n]) & BRAKES:
+    if not is_open(n) or labels(issues[n]) & BRAKES or str(n) in owner_brakes:
         continue
     if unread(issues[n]):
         print(f"#{n} waits: {UNREAD_NOTE}", file=sys.stderr)
