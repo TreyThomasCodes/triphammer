@@ -157,16 +157,21 @@ test("the session runs as the plugin's orchestrator agent on Opus", t => {
 
 // The builder the prompt names (bin/README.md, Sessions) and the run record (Run records).
 
-// A tick of ticket #7 with `labels`, after `before` runs left its attempts counter at that value (none when undefined).
-function builderTick(t, labels, before, env = {}) {
+// Ticket #7 with `labels`, after `before` runs left its attempts counter at that value (none when undefined).
+function ticketAfter(t, labels, before) {
   const r = ticketSetup(t, [issue(7, {labels})]);
   const attempts = join(r.root, 'state/ticket-runner/attempts');
   if (before !== undefined) {
     mkdirSync(attempts, {recursive: true});
     writeFileSync(join(attempts, 'ticket-7'), `${before}\n`);
   }
-  r.tick(env);
-  return {...r, prompt: r.probe('claude-args'), resetFile: join(attempts, 'ticket-7.reset')};
+  return {...r, attempts};
+}
+// A tick of that ticket.
+function builderTick(t, labels, before) {
+  const r = ticketAfter(t, labels, before);
+  r.tick();
+  return {...r, prompt: r.probe('claude-args'), resetFile: join(r.attempts, 'ticket-7.reset')};
 }
 const lightBrief = /This is run 1 of 3\. This is a light run: brief triphammer:builder-light for every builder, never triphammer:builder/;
 const opusBrief = /This is run \d of 3\. Brief triphammer:builder for every builder\./;
@@ -209,10 +214,7 @@ test('after the owner removes needs-owner, run 1 of the restarted counter of a l
   assert.equal(record(r).builderModel, 'opus');
 
   // The restart outlives a run the brake stops, which is not counted, and goes with the counter once a run progresses.
-  const braked = ticketSetup(t, [issue(7, {labels: ['light']})]);
-  const brakedAttempts = join(braked.root, 'state/ticket-runner/attempts');
-  mkdirSync(brakedAttempts, {recursive: true});
-  writeFileSync(join(brakedAttempts, 'ticket-7'), '3\n');
+  const braked = ticketAfter(t, ['light'], 3);
   const stop = join(braked.root, 'state/ticket-runner/stop');
   brakeSession(braked)({BRAKE_FILE: stop});
   assert.match(braked.log(), /ended by the owner's brake/);
@@ -220,14 +222,11 @@ test('after the owner removes needs-owner, run 1 of the restarted counter of a l
   braked.tick();
   assert.match(braked.probe('claude-args'), /This is run 1 of 3\. Brief triphammer:builder for every builder\./);
 
-  const progressed = ticketSetup(t, [issue(7, {labels: ['light']})]);
-  const attempts = join(progressed.root, 'state/ticket-runner/attempts');
-  mkdirSync(attempts, {recursive: true});
-  writeFileSync(join(attempts, 'ticket-7'), '3\n');
+  const progressed = ticketAfter(t, ['light'], 3);
   progressed.gh.respond({'issue view 7': {stdout: 'yes\n'}});
   progressed.tick();
-  assert.equal(existsSync(join(attempts, 'ticket-7')), false);
-  assert.equal(existsSync(join(attempts, 'ticket-7.reset')), false);
+  assert.equal(existsSync(join(progressed.attempts, 'ticket-7')), false);
+  assert.equal(existsSync(join(progressed.attempts, 'ticket-7.reset')), false);
 });
 
 test('an unlabelled ticket briefs the Opus builder on every run, restarted or not, with no word of a light run', t => {

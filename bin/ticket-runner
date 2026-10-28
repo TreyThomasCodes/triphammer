@@ -416,13 +416,11 @@ echo "$attempts" > "$attempts_file"
 # triphammer:builder-light (Sonnet); every other run, a restarted counter's and every repair's, with triphammer:builder
 # (Opus). Only the builder changes; the orchestrator, reviewer and simplifier stay on Opus.
 light=""
+builder=triphammer:builder builder_model=opus
 if [ "$kind" = ticket ] && jq -e --argjson n "$number" \
     'any(.[] | select(.number == $n) | .labels[]?; .name == "light")' "$state/issues.json" >/dev/null 2>&1; then
   light=1
-fi
-builder=triphammer:builder builder_model=opus
-if [ -n "$light" ] && [ "$attempts" -eq 1 ] && [ ! -e "$reset_file" ]; then
-  builder=triphammer:builder-light builder_model=sonnet
+  [ "$attempts" -gt 1 ] || [ -e "$reset_file" ] || builder=triphammer:builder-light builder_model=sonnet
 fi
 
 # A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
