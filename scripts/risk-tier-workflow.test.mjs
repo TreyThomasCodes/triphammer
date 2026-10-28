@@ -9,6 +9,7 @@ const workflow = readFileSync(new URL('../.github/workflows/risk-tier.yml', impo
 const filters = [...workflow.matchAll(/jq -r --arg owner "\$OWNER"[^']*'([^']*)'/g)].map(match => match[1]);
 const [brake, approval, pushes] = filters;
 const authorCheck = workflow.match(/if (\[ "\$\{?PULL_REQUEST_AUTHOR\b[^\]]*\])/)?.[1];
+const holdCheck = workflow.match(/if (grep [^;]*\bhold <<< "\$labels");/)?.[1];
 
 const jq = (filter, input, owner) => {
   const result = spawnSync('jq', ['-r', '--arg', 'owner', owner, '--arg', 'since', '', filter],
@@ -18,9 +19,19 @@ const jq = (filter, input, owner) => {
 };
 const review = (login, state) => ({user: login === null ? null : {login}, state, commit_id: 'abc123', submitted_at: '2026-10-26T00:00:00Z'});
 
-test('the workflow has the three owner filters and the author check the tests run', () => {
+test('the workflow has the three owner filters, the author check and the hold check the tests run', () => {
   assert.equal(filters.length, 3);
   assert.ok(authorCheck);
+  assert.ok(holdCheck);
+});
+
+test('a hold label holds the pull request whatever its case', () => {
+  const held = labels => spawnSync('bash', ['-c', holdCheck], {env: {labels}}).status;
+  assert.equal(held('bug\nhold'), 0);
+  assert.equal(held('Hold'), 0);
+  assert.equal(held('HOLD\nescalated'), 0);
+  assert.notEqual(held('bug\nholder\non-hold'), 0);
+  assert.notEqual(held(''), 0);
 });
 
 test("the owner's change request holds the pull request whatever the case of either login", () => {
