@@ -77,6 +77,9 @@ umask 077
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
+# The labels Triphammer reads and sets, and labelled_jq, which every label check below reads them through.
+# shellcheck source=bin/labels.sh
+source "$bin/labels.sh"
 # --doctor lists what is missing or wrong on the machine (bin/doctor) and does nothing else.
 [ "${1:-}" != --doctor ] || exec "$bin/doctor" "${@:2}"
 load_config ticket-runner "$bin/.."
@@ -87,8 +90,6 @@ project="$cfg_project" shared="$cfg_shared_dir"
 export GITHUB_APP_OWNER="${repo%%/*}"
 # --labels creates the labels Triphammer reads and sets that the repository lacks (bin/labels.sh) and does nothing else.
 if [ "${1:-}" = --labels ]; then
-  # shellcheck source=bin/labels.sh
-  source "$bin/labels.sh"
   create_labels "$repo"
   exit
 fi
@@ -434,12 +435,12 @@ fi
 # reason; a failed lookup files none either.
 # shellcheck disable=SC2016  # the jq variables are jq's
 no_proposals=""
-if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo "$repo" --slurpfile prs "$state/prs.json" '
+if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo "$repo" --slurpfile prs "$state/prs.json" "$labelled_jq"'
   (if $kind == "ticket" then [$n] else [$prs[0][] | select(.number == $n) | .closingIssuesReferences[]?
      | select((.repository | not)
          or ((.repository.owner.login // "") + "/" + (.repository.name // "") | ascii_downcase) == ($repo | ascii_downcase))
      | .number] end) as $own
-  | [.[] | select((.number | IN($own[])) and any(.labels[]?; .name | ascii_downcase == "cleanup")) | "#\(.number)"]
+  | [.[] | select((.number | IN($own[])) and labelled("cleanup")) | "#\(.number)"]
   | join(" ")' "$state/issues.json" 2>/dev/null)"; then
   no_proposals="could not look up whether the run's issue is labelled cleanup"
 elif [ -n "$cleanup_issues" ]; then
@@ -587,7 +588,8 @@ working_label add "$labelled" "$number"
 
 # The brakes on a ticket's issue: `hold`; `needs-owner` that anyone but the App added (the session adds it itself when
 # it stops for the owner, as review-loop step 4 and ticket-run tell it to; the events API's actor tells the App, as
-# `<app>[bot]`, from the owner); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
+# `<app>[bot]`, from the owner); 100 labels or more (labels_unread: gh reads only the first 100, so hold or needs-owner
+# may be past them); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
 # own issue) or a merged pull request closed it (the run's own, which merge-when-ready may merge while the session still
 # runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
 # failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
@@ -596,10 +598,11 @@ app_login="$app_author"
 # shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
 issue_brake() {
   local facts by closer
-  if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq '(.labels | map(.name)) as $names | ($names | map(ascii_downcase)) as $lower
-      | [if $lower | index("hold") then "hold" else empty end,
-         if $lower | index("needs-owner") then "needs-owner" else empty end,
-         if .state != "OPEN" and ($names | index("upkeep") | not) then "closed" else empty end] | join(" ")' 2>/dev/null)"
+  if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq "$labelled_jq"'
+      [if labelled("hold") then "hold" else empty end,
+       if labelled("needs-owner") then "needs-owner" else empty end,
+       if labels_unread then "unread" else empty end,
+       if .state != "OPEN" and (.labels | map(.name) | index("upkeep") | not) then "closed" else empty end] | join(" ")' 2>/dev/null)"
   then
     log "$kind #$number: could not look up the brakes on issue #$number" >&2
     return 0
@@ -616,6 +619,7 @@ issue_brake() {
       return 0
     fi
   fi
+  if [[ "$facts" == *" unread "* ]]; then echo "labelled more than the runner reads, so it may be labelled hold or needs-owner"; return 0; fi
   [[ "$facts" == *" closed "* ]] || return 0
   if ! closer="$(gh api graphql -F number="$number" -f owner="${repo%%/*}" -f name="${repo#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { issue(number: $number) {
@@ -630,8 +634,8 @@ issue_brake() {
 }
 
 # The brakes that end a session in progress: the project's (stop_file_brake, stop_agents_brake), the ticket's issue's
-# (issue_brake), and `hold` on the pull request a repair works on. Prints the first that applies, or nothing; a failed
-# lookup is logged and is no brake.
+# (issue_brake), and `hold` on the pull request a repair works on, or 100 labels or more on it (labels_unread). Prints
+# the first that applies, or nothing; a failed lookup is logged and is no brake.
 run_brake() {
   local found
   found="$(stop_file_brake)"
@@ -641,7 +645,8 @@ run_brake() {
     [ -z "$found" ] || found="issue #$number is $found"
   elif [ -z "$found" ]; then
     found="$(gh pr view "$number" -R "$repo" --json labels \
-      --jq 'if .labels | map(.name | ascii_downcase) | index("hold") then "labelled hold" else "" end' 2>/dev/null)" \
+      --jq "$labelled_jq"'if labelled("hold") then "labelled hold"
+        elif labels_unread then "labelled more than the runner reads, so it may be labelled hold" else "" end' 2>/dev/null)" \
       || { log "$kind #$number: could not look up the brakes on pull request #$number" >&2; found=""; }
     [ -z "$found" ] || found="pull request #$number is $found"
   fi
@@ -862,7 +867,7 @@ fi
 
 if [ "$kind" = ticket ]; then
   progressed="$(gh issue view "$number" -R "$repo" --json state,labels --jq \
-    'if .state != "OPEN" or (.labels | map(.name | ascii_downcase) | index("needs-owner")) then "yes" else "" end')"
+    "$labelled_jq"'if .state != "OPEN" or labelled("needs-owner") then "yes" else "" end')"
   # An open pull request GitHub links as closing the issue: the list above.
   [ -n "$progressed" ] || [ -z "$review_prs" ] || progressed=yes
   [ -n "$progressed" ] || progressed="$(gh issue list -R "$repo" --state all --search "\"of #$number\" in:body" --json number \

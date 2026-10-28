@@ -9,9 +9,9 @@
 # `security-findings` and `security-followed-up` records say which pull request heads wait for a security-findings
 # repair (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
-# or an issue labelled `next`, waits, and on why a parent whose slices are all closed stays open (a brake label), go
-# to stderr. With --closed it prints, one per line, the issues of owner/repo that the pull requests close
-# (ticket-runner's worktree sweep). With --declarations it prints, as JSON, the slice and depends
+# or an issue labelled `next`, waits, on why a parent whose slices are all closed stays open (a brake label), and on
+# each issue or pull request skipped for more labels than gh reads, go to stderr. With --closed it prints, one per
+# line, the issues of owner/repo that the pull requests close (ticket-runner's worktree sweep). With --declarations it prints, as JSON, the slice and depends
 # declarations it reads in each issue body. ticket-decide.test.mjs covers each decision.
 import json, re, sys
 from datetime import datetime, timedelta
@@ -107,6 +107,14 @@ def records(name):
 # lines match, so a record of an older head starts nothing.
 pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
+# `gh --json labels` returns only an item's first 100 labels, so a brake may be past them: the runner's session brakes
+# (labels_unread in bin/labels.sh) stop a session on an item with 100 labels or more. The runner adds `agent-working`
+# before its first brake check, so an item picked with 99 others would reach 100 there and be braked, uncounted, on
+# every tick. So an item whose labels other than `agent-working` would reach that limit with it added is skipped here.
+GH_LABELS_READ = 100
+UNREAD = GH_LABELS_READ - 1  # leaves room for the `agent-working` the runner adds
+unread = lambda item: len(labels(item) - {"agent-working"}) >= UNREAD
+UNREAD_NOTE = f"{UNREAD} labels or more besides agent-working, {GH_LABELS_READ} with it, so a brake may be past them"
 
 slices = {}  # parent -> {k: [issues claiming slice k]}; several issues may claim the same k
 for n, issue in sorted(issues.items()):
@@ -144,11 +152,17 @@ for parent in sorted(slices):
         if brakes := sorted(labels(issues[parent]) & BRAKES):
             print(f"skip close {parent}: labelled {', '.join(brakes)}", file=sys.stderr)
             continue
+        if unread(issues[parent]):
+            print(f"skip close {parent}: {UNREAD_NOTE}", file=sys.stderr)
+            continue
         print(f"close {parent}"); sys.exit()
 
 failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"}
 for pr in sorted(prs, key=lambda pr: pr["number"]):
     if author(pr).lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):
+        continue
+    if unread(pr):
+        print(f"skip repair {pr['number']}: {UNREAD_NOTE}", file=sys.stderr)
         continue
     issue = (closing(pr, repo) or [0])[0]
     checks = [c for c in latest_checks(pr["statusCheckRollup"] or [])
@@ -174,6 +188,9 @@ cite = lambda numbers: ", ".join(f"#{d}" for d in numbers)
 # ticket-runner files), then those, each lowest number first; `next` never makes an issue ready.
 for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), "cleanup" in labels(issues[n]), n)):
     if not is_open(n) or labels(issues[n]) & BRAKES:
+        continue
+    if unread(issues[n]):
+        print(f"#{n} waits: {UNREAD_NOTE}", file=sys.stderr)
         continue
     if not is_trusted(issues[n]):
         who = author(issues[n]) or "nobody"

@@ -4,6 +4,7 @@ import {spawnSync} from 'node:child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {manyLabels} from './fixture.mjs';
 
 // Runs ticket-decide.py on made-up issues and pull requests in the shapes `gh issue list` / `gh pr list` return for the
 // fields ticket-runner requests, at the tick time `now`, and returns what it printed. Unless `upkeepDone` is false, the
@@ -286,6 +287,41 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
   const issues = [issue(50, '', {labels: ['hold']}), issue(51, '', {labels: ['needs-owner']}),
     issue(52, '', {labels: ['stop-agents']}), issue(53), issue(54)];
   assert.equal(decide(t, issues, [pr(60, 53)]).action, 'ticket 54');
+});
+
+// `gh --json labels` reads only the first 100 labels, so a brake may be past them (labels_unread in bin/labels.sh).
+// The runner adds agent-working before its first brake check, so 99 other labels already reach that limit there.
+
+test('an issue with 99 labels or more besides agent-working is skipped, and the runner says why', t => {
+  for (const labels of [manyLabels(99), manyLabels(101), [...manyLabels(99), 'Agent-Working']]) {
+    const {action, log} = decide(t, [issue(50, '', {labels}), issue(51)]);
+    assert.equal(action, 'ticket 51', String(labels.length));
+    assert.match(log, /#50 waits: 99 labels or more besides agent-working/);
+  }
+});
+
+test('an issue with 98 labels besides agent-working, in any case, is taken', t => {
+  for (const labels of [manyLabels(98), [...manyLabels(98), 'Agent-Working']]) {
+    assert.equal(decide(t, [issue(50, '', {labels}), issue(51)]).action, 'ticket 50', String(labels.length));
+  }
+});
+
+test('a pull request with 99 labels or more besides agent-working is not repaired; 98 are read in full', t => {
+  const dirty = {mergeStateStatus: 'DIRTY'};
+  const {action, log} = decide(t, [issue(30), issue(31)],
+    [pr(40, 30, {...dirty, labels: manyLabels(99)}), pr(41, 31, dirty)]);
+  assert.equal(action, 'repair 41 31 conflicts');
+  assert.match(log, /skip repair 40: 99 labels or more besides agent-working/);
+  for (const labels of [manyLabels(98), [...manyLabels(98), 'agent-working']]) {
+    assert.equal(decide(t, [issue(30)], [pr(40, 30, {...dirty, labels})]).action, 'repair 40 30 conflicts');
+  }
+});
+
+test('a parent with 99 labels or more besides agent-working stays open when its last slice closes', t => {
+  const {action, log} = decide(t, [issue(10, '', {labels: manyLabels(99)}), closed(11, 'Slice 1 of #10.'), issue(20)]);
+  assert.equal(action, 'ticket 20');
+  assert.match(log, /skip close 10: 99 labels or more besides agent-working/);
+  assert.equal(decide(t, [issue(10, '', {labels: manyLabels(98)}), closed(11, 'Slice 1 of #10.')]).action, 'close 10');
 });
 
 test('an issue waits for an open dependency and the previous slice, and starts once they are closed', t => {
