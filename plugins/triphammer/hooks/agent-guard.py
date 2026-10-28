@@ -145,8 +145,8 @@
 #               only someone other than the App lifts: gh issue edit or gh pr edit with --remove-label naming it (also
 #               in a comma-separated list, as --remove-label=..., or computed at run time); gh label delete of it, or
 #               gh label edit of it with -n/--name; and gh api on the REST label endpoints with DELETE of
-#               issues/<n>/labels/<label> or DELETE or PATCH of labels/<label> naming it (URL-encoded or computed at
-#               run time too), PUT or DELETE of issues/<n>/labels (which replace or clear every label), and PATCH, POST
+#               issues/<n>/labels/<label> or DELETE or PATCH of labels/<label> naming it (URL-encoded, computed at run
+#               time or followed by a ?query or #fragment too), PUT or DELETE of issues/<n>/labels (which replace or clear every label), and PATCH, POST
 #               or PUT of issues/<n> with a `labels` field, a field whose key is computed at run time, or an --input
 #               body. A method computed at run time counts as any. xargs running gh api, gh label, gh issue edit or gh pr
 #               edit (or gh whose subcommand its input or -I's string gives) is refused too, since the input can name
@@ -2037,9 +2037,10 @@ def gh_api_removes_label(endpoint, options):
     method = methods[-1].value.upper() if methods else "POST" if given else "GET"
     if methods and computed(methods[-1]):
         method = None
-    path = GH_COMPUTED_PART.sub("\0", endpoint.value).split("?")[0]
+    # gh sends neither the query nor the fragment as part of the path; cut them after each decoding as well.
+    path = re.split(r"[?#]", GH_COMPUTED_PART.sub("\0", endpoint.value))[0]
     for _ in range(3):
-        path = urllib.parse.unquote(path)
+        path = re.split(r"[?#]", urllib.parse.unquote(path))[0]
     match = GH_LABEL_ENDPOINT.search(path.rstrip("/"))
     if match is None:
         return False
