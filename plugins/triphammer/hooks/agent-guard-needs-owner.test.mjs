@@ -14,6 +14,16 @@ const removals = [
   'gh issue edit 7 --remove-label "bug, Needs-Owner"',
   'gh issue edit 7 --add-label ready --remove-label NEEDS-OWNER',
   'gh issue -R owner/name edit 7 --remove-label needs-owner',
+  'gh -R o/r issue edit 7 --remove-label needs-owner',
+  'gh --repo o/r issue edit 7 --remove-label needs-owner',
+  'gh --repo=o/r issue edit 7 --remove-label needs-owner',
+  'gh -Ro/r issue edit 7 --remove-label needs-owner',
+  'gh -R o/r pr edit 3 --remove-label needs-owner',
+  'gh -R o/r label delete needs-owner --yes',
+  'gh -R o/r -R o/s label delete needs-owner --yes',
+  'gh --repo o/r api -X DELETE repos/o/r/labels/needs-owner',
+  'gh --unknown issue edit 7 --remove-label needs-owner',
+  'gh --unknown x issue view 7',
   'gh issue edit 7 --repo owner/name --title x --remove-label needs-owner',
   'gh issue edit 7 --remove-label "$LABEL"',
   'gh issue edit 7 --remove-label needs-owner && echo done',
@@ -71,6 +81,10 @@ const removals = [
   'echo repos/o/r/issues/7/labels/needs-owner | xargs gh api -X DELETE',
   'echo "issue edit 7 --remove-label needs-owner" | xargs gh',
   'echo issue | xargs -I{} gh {} edit 7 --remove-label needs-owner',
+  'echo 7 | xargs gh -R o/r issue edit --remove-label needs-owner',
+  'echo needs-owner | xargs gh -R o/r label delete',
+  'echo 7 | xargs gh --unknown issue view',
+  'echo "issue edit 7 --remove-label needs-owner" | xargs gh -R o/r',
 ];
 
 const allowed = [
@@ -102,6 +116,12 @@ const allowed = [
   'gh issue edit 7 --attach shot.png --remove-label bug',
   'echo 7 | xargs gh issue view',
   'echo 12 | xargs gh pr view --json labels',
+  'gh -R o/r issue edit 7 --remove-label bug',
+  'gh --repo=o/r issue view 7 --json labels',
+  'gh -R o/r label list',
+  'gh --version',
+  'gh --help',
+  'echo 7 | xargs gh -R o/r issue view',
 ];
 
 test('in a Triphammer session a gh command that may take needs-owner off an issue or pull request is refused', t => {

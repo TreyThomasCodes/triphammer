@@ -1463,10 +1463,11 @@ def xargs_gh_may_edit_labels(args, replace):
     gh label, gh issue edit or gh pr edit (or a subcommand not yet written, or one -I's string stands for)."""
     if replace and any(replace in w.value for w in args):
         return True
-    if not args or args[0].value in ("api", "label"):
+    i = gh_subcommand_index(args)
+    if i is None or i == len(args) or args[i].value in ("api", "label"):
         return True
-    if args[0].value in ("issue", "pr"):
-        operands = split_options(args[1:], *GH_EDIT_VALUE_OPTIONS)[0]
+    if args[i].value in ("issue", "pr"):
+        operands = split_options(args[i + 1:], *GH_EDIT_VALUE_OPTIONS)[0]
         return not operands or operands[0].value == "edit"
     return False
 
@@ -2007,10 +2008,14 @@ def is_owner_label(word, text):
 def analyze_gh(args, findings):
     """gh issue edit and gh pr edit with --remove-label needs-owner, gh label delete or edit of needs-owner, and gh api
     calls on the label endpoints that remove it, replace or clear an issue's labels."""
-    if not args or computed(args[0]):
-        return
     text = f"`gh {' '.join(w.value for w in args)}`"
-    sub = args[0].value
+    i = gh_subcommand_index(args)
+    if i is None:
+        findings.label_removals.append(text)
+        return
+    if i == len(args) or computed(args[i]):
+        return
+    sub, args = args[i].value, args[i:]
     if sub in ("issue", "pr"):
         operands, options = split_options(args[1:], *GH_EDIT_VALUE_OPTIONS)
         if operands and operands[0].value == "edit" and any(
@@ -2028,6 +2033,25 @@ def analyze_gh(args, findings):
         operands, options = split_options(args[1:], *GH_API_VALUE_OPTIONS)
         if operands and gh_api_removes_label(operands[0], options):
             findings.label_removals.append(text)
+
+
+def gh_subcommand_index(args):
+    """The index of gh's subcommand after the options gh accepts before it: -R or --repo with its repository (gh
+    applies it to the subcommand), and --help, -h and --version, which run nothing. len(args) when no subcommand
+    follows them; None when another option comes first, since the hook cannot tell which word gh takes as the
+    subcommand then."""
+    i = 0
+    while i < len(args):
+        v = args[i].value
+        if v in ("-R", "--repo"):
+            i += 2
+        elif v.startswith(("--repo=", "-R")) or v in ("--help", "-h", "--version"):
+            i += 1
+        elif v.startswith("-"):
+            return None
+        else:
+            return i
+    return len(args)
 
 
 def gh_api_removes_label(endpoint, options):
