@@ -13,8 +13,15 @@
 #   bin/demo-gallery or bin/config.sh every running demo gallery, with $DEMO_GALLERY_RESTART
 #                                                     (default `systemctl --user try-restart 'demo-gallery@*.service'`,
 #                                                     which leaves alone a gallery unit that is not running)
+# After a fast-forward, and before any restart, it checks that every tracked file holds what the new commit holds. It
+# compares the files' content with the commit through a fresh index, so it catches a planted object that checked out
+# other content than the commit names as well as a file written after the checkout, and it counts untracked files too.
+# When anything differs, or the check itself fails, it creates the shared `stop` file ($TRIPHAMMER_SHARED_DIR, else
+# ${XDG_STATE_HOME:-~/.local/state}/triphammer, where bin/config.sh finds it), which pauses every project on the
+# machine, prints the checkout and the paths that differ, restarts nothing and exits 3.
 # Every line it prints is meant for the caller's log; nothing is printed when the checkout is already current. It exits
-# non-zero only when git or a restart fails; a failed restart is printed and the other restart still runs.
+# non-zero only when git or a restart fails or that check fires; a failed restart is printed and the other restart
+# still runs.
 set -euo pipefail
 
 checkout="${1:-}"
@@ -47,6 +54,28 @@ fi
 after="$(git -C "$checkout" rev-parse HEAD)"
 [ "$before" != "$after" ] || exit 0
 echo "self-update: fast-forwarded $checkout from ${before:0:7} to ${after:0:7}"
+
+# An index read from the commit holds no stat data, so git status hashes every tracked file instead of trusting the
+# checkout's index, which records the files as they were written.
+index="" problem=""
+trap 'rm -f "$index"' EXIT
+if index="$(mktemp)" && GIT_INDEX_FILE="$index" git -C "$checkout" read-tree "$after" \
+    && differs="$(GIT_INDEX_FILE="$index" git -C "$checkout" status --porcelain)"; then
+  [ -z "$differs" ] || problem="has files that differ from ${after:0:7}:"
+else
+  differs="" problem="could not be compared with ${after:0:7}"
+fi
+if [ -n "$problem" ]; then
+  stop="${TRIPHAMMER_SHARED_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/triphammer}/stop"
+  echo "self-update: stopping every project: $checkout $problem"
+  [ -z "$differs" ] || printf '%s\n' "$differs" | sed 's/^/self-update:   /'
+  if mkdir -p "${stop%/*}" && touch "$stop"; then
+    echo "self-update: created $stop; inspect the checkout (bin/README.md, Self-update), then remove it"
+  else
+    echo "self-update: could not create $stop"
+  fi
+  exit 3
+fi
 
 failed=0
 # restart <name> <command> <path>...: runs <command> when the update changed any <path>, naming the ones it changed.
