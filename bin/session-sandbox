@@ -18,17 +18,23 @@
 #     state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm and ~/.nuget;
 #   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
 #     ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer*) and agent-guard.py's guard-overrides.log* in the shared
-#     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone.
-# Inside the Claude Code directory, the parts that would change later sessions stay read-only: settings*.json,
-# CLAUDE.md, agents, commands, skills, hooks and plugins, the ones that exist when the command starts.
+#     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone;
+#   - what the upkeep audits write through local-audit --model codex: its run count in
+#     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and ${CODEX_HOME:-~/.codex}, where Codex writes its databases,
+#     logs, sessions, caches and refreshed login in the directory itself.
+# Inside these directories, the parts that would change later sessions stay read-only, the ones that exist when the
+# command starts: in Claude Code's, settings*.json, CLAUDE.md, agents, commands, skills, hooks and plugins; in Codex's,
+# *.toml (config.toml*, created empty when the directory exists, as Codex itself adds to it), .env, AGENTS*.md,
+# hooks.json, agents, rules, prompts, skills, plugins and themes; and local-audit's codex-settings.
 #
 # The command also gets a /dev of its own, and a process namespace of its own with its /proc, so it cannot see or
 # signal the machine's other processes; the processes outside still see it, so ticket-runner's brake stops it. The
 # network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
 # when the command exits.
 #
-# Not covered: a ~/.claude part named above that does not exist when the command starts, or that is a symlink (the
-# session may create or replace it); anything a writable path above lets a later session read (a cache, ~/.claude.json);
+# Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
+# session may create or replace it), such as a ~/.codex/AGENTS.md the machine does not have; anything a writable path
+# above lets a later session read (a cache, ~/.claude.json, Codex's databases, local-audit's run count);
 # and the Docker socket, or any other socket of a service outside, which the command can still reach: a container
 # started through Docker can write anywhere on the machine.
 #
@@ -49,9 +55,13 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}"
 claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 humanizer="${TRIPHAMMER_HUMANIZER_STATE:-$state/triphammer/humanizer}"
 overrides="${TRIPHAMMER_SHARED_DIR:-$state/triphammer}/guard-overrides.log"
+codex="${CODEX_HOME:-$HOME/.codex}"
 mkdir -p -- "$HOME/.cache"
 [ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
-(umask 077 && mkdir -p -- "$humanizer" && mkdir -p -- "$(dirname "$overrides")" && : >> "$overrides")
+(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" && mkdir -p -- "$(dirname "$overrides")" && : >> "$overrides")
+# Codex adds a project's trust level to its config.toml itself, so a missing one would be created inside; an empty one
+# reads as none and is kept read-only below.
+[ ! -d "$codex" ] || (umask 077 && : >> "$codex/config.toml")
 
 args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc)
 # bind <option> <path...>: mounts each path that exists onto itself, symlinks resolved, after what came before, so a
@@ -66,9 +76,12 @@ bind() {
   done
 }
 bind --bind "$common" "$triphammer_git" "$run_dir" /tmp "${TMPDIR:-}" \
-  "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "$humanizer" "$overrides"
+  "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "$humanizer" "$overrides" \
+  "$state/local-audit" "$codex"
 bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$claude/commands" "$claude/skills" \
-  "$claude/hooks" "$claude/plugins"
+  "$claude/hooks" "$claude/plugins" "$state/local-audit/codex-settings" \
+  "$codex"/*.toml "$codex/.env" "$codex"/AGENTS*.md "$codex/hooks.json" "$codex/agents" "$codex/rules" \
+  "$codex/prompts" "$codex/skills" "$codex/plugins" "$codex/themes"
 bind --bind "$claude/plugins/data"
 
 exec bwrap "${args[@]}" -- "$@"

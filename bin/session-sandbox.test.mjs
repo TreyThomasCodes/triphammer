@@ -12,7 +12,8 @@ const skip = userns ? false : 'bwrap is missing or cannot create a user namespac
 // A rig outside /tmp, which the limit leaves writable: in the repository, which this test may write in a session too.
 // It holds a bare origin, a main checkout cloned from it with a worktree `.worktrees/issue-1` on ticket/1, a separate
 // Triphammer checkout holding this branch's session-sandbox, and a home directory with a Claude Code directory whose
-// settings.json and skills are there. `inside` runs a shell command under the limit in the worktree, as the runner
+// settings.json and skills are there, a Codex directory with its config.toml and rules, and local-audit's
+// codex-settings. `inside` runs a shell command under the limit in the worktree, as the runner
 // does, and returns its exit status and output.
 function sandboxRig(t) {
   const root = mkdtempSync(join(here, '..', '.session-sandbox-test-'));
@@ -36,7 +37,11 @@ function sandboxRig(t) {
   git(triphammer, 'commit', '-q', '-m', 'first');
   mkdirSync(join(home, '.claude/skills'), {recursive: true});
   writeFileSync(join(home, '.claude/settings.json'), '{}\n');
-  const {TMPDIR, XDG_STATE_HOME, CLAUDE_CONFIG_DIR, TRIPHAMMER_HUMANIZER_STATE, ...env} = gitEnv;
+  mkdirSync(join(home, '.codex/rules'), {recursive: true});
+  writeFileSync(join(home, '.codex/config.toml'), '');
+  mkdirSync(join(home, '.local/state/local-audit'), {recursive: true});
+  writeFileSync(join(home, '.local/state/local-audit/codex-settings'), 'weekly_cap=1\n');
+  const {TMPDIR, XDG_STATE_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, ...env} = gitEnv;
   const inside = command => {
     const result = spawnSync(join(triphammer, 'bin/session-sandbox'), [worktree, 'sh', '-c', command],
       {cwd: worktree, env: {...env, HOME: home}, encoding: 'utf8'});
@@ -56,6 +61,9 @@ test('under the limit, the main checkout, Triphammer\'s checkout and the home di
     'a file in the home directory': join(r.home, 'outside'),
     "Claude Code's settings.json": join(r.home, '.claude/settings.json'),
     "a file in Claude Code's skills": join(r.home, '.claude/skills/planted.md'),
+    "Codex's config.toml": join(r.home, '.codex/config.toml'),
+    "a file in Codex's rules": join(r.home, '.codex/rules/planted.rules'),
+    "local-audit's codex-settings": join(r.home, '.local/state/local-audit/codex-settings'),
   };
   for (const [what, path] of Object.entries(targets)) {
     const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -69,7 +77,7 @@ test('under the limit, the main checkout, Triphammer\'s checkout and the home di
   assert.equal(git(r.main, 'status', '--porcelain', '--untracked-files=no'), '');
 });
 
-test('under the limit, the worktree, its commits, /tmp and what Claude Code and the hooks write are writable', {skip}, t => {
+test('under the limit, the worktree, its commits, /tmp and what Claude Code, Codex, local-audit and the hooks write are writable', {skip}, t => {
   const r = sandboxRig(t);
   const scratch = mkdtempSync('/tmp/session-sandbox-test-');
   t.after(() => rmSync(scratch, {recursive: true, force: true}));
@@ -81,13 +89,30 @@ echo tmp > '${scratch}/file'
 mkdir -p '${r.home}/.claude/projects/p' && echo session > '${r.home}/.claude/projects/p/session.jsonl'
 echo cache > '${r.home}/.cache/file'
 echo ran > '${r.home}/.local/state/triphammer/humanizer/marker'
-echo override >> '${r.home}/.local/state/triphammer/guard-overrides.log'`);
+echo override >> '${r.home}/.local/state/triphammer/guard-overrides.log'
+echo 1 > '${r.home}/.local/state/local-audit/codex-runs.new'
+mv '${r.home}/.local/state/local-audit/codex-runs.new' '${r.home}/.local/state/local-audit/codex-runs'
+echo state > '${r.home}/.codex/state_5.sqlite'
+mkdir -p '${r.home}/.codex/sessions' && echo session > '${r.home}/.codex/sessions/s.jsonl'`);
   assert.equal(status, 0, output);
   assert.equal(git(r.worktree, 'log', '-1', '--format=%s'), 'work');
   assert.equal(git(r.main, 'rev-parse', 'ticket/1'), git(r.worktree, 'rev-parse', 'HEAD'), "the commit is in the main checkout's .git");
   assert.equal(readFileSync(join(scratch, 'file'), 'utf8'), 'tmp\n');
   assert.equal(readFileSync(join(r.home, '.claude/projects/p/session.jsonl'), 'utf8'), 'session\n');
   assert.equal(readFileSync(join(r.home, '.local/state/triphammer/guard-overrides.log'), 'utf8'), 'override\n');
+  assert.equal(readFileSync(join(r.home, '.local/state/local-audit/codex-runs'), 'utf8'), '1\n');
+  assert.equal(readFileSync(join(r.home, '.codex/state_5.sqlite'), 'utf8'), 'state\n');
+  assert.equal(readFileSync(join(r.home, '.codex/sessions/s.jsonl'), 'utf8'), 'session\n');
+});
+
+test('a Codex directory without a config.toml gets an empty one, read-only under the limit', {skip}, t => {
+  const r = sandboxRig(t);
+  const config = join(r.home, '.codex/config.toml');
+  rmSync(config);
+  const {status, output} = r.inside(`echo 'notify = ["planted"]' > '${config}'`);
+  assert.notEqual(status, 0, 'config.toml was written');
+  assert.match(output, /Read-only file system/);
+  assert.equal(readFileSync(config, 'utf8'), '');
 });
 
 test('under the limit, the command cannot see or signal the processes outside', {skip}, t => {

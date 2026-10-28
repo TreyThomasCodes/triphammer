@@ -284,7 +284,15 @@ and only these paths writable:
   not the parts that would change later sessions, `settings*.json`, `CLAUDE.md`, `agents`, `commands`, `skills`,
   `hooks` and `plugins` (apart from `plugins/data`, where plugin hooks keep their data), which stay read-only;
 - the caches commands fill: `~/.cache`, `~/.npm` and `~/.nuget`;
-- the plugin hooks' own files: `text-lint.py`'s humanizer records and `agent-guard.py`'s `guard-overrides.log`.
+- the plugin hooks' own files: `text-lint.py`'s humanizer records and `agent-guard.py`'s `guard-overrides.log`;
+- what the upkeep audits write through `local-audit --model codex` (and `security-review --full-area`, which runs
+  it): `~/.local/state/local-audit`, where it counts Codex runs, but not its `codex-settings`, which stays read-only;
+  and `~/.codex` (or `$CODEX_HOME`), where Codex keeps its SQLite databases and their journals, logs, sessions,
+  caches and refreshed login in the directory itself, but not the parts that change how later Codex runs work,
+  `*.toml`, `.env`, `AGENTS*.md`, `hooks.json`, `agents`, `rules`, `prompts`, `skills`, `plugins` and `themes`, which
+  stay read-only. Codex adds a project's trust level to `config.toml` itself, so `session-sandbox` first creates an
+  empty one when `~/.codex` has none. Under the limit Codex can neither save that trust level nor refresh its plugin
+  cache; it carries on without them.
 
 Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
 directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:
@@ -296,16 +304,15 @@ while the runner still sees the session's and its brake stops them. The network 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
 covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
-the machine; a protected `~/.claude` part that does not exist when the session starts, or is a symlink; and what a
-writable path above lets a later session read, such as a cache.
+the machine; a protected `~/.claude`, `~/.codex` or `local-audit` part that does not exist when the session starts,
+or is a symlink, such as a `~/.codex/AGENTS.md` the machine does not have; and what a writable path above lets a later
+session read, such as a cache or Codex's databases.
 
 Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without
 `bwrap` or where `bwrap` cannot create a user namespace, the runner logs why, starts no session and exits 1; `ticket-runner
 --doctor` names the fix. `provision` installs bubblewrap and the AppArmor profile `/etc/apparmor.d/bwrap` that lets it
-create user namespaces on Ubuntu. The upkeep session runs under the limit too, where `local-audit --model codex` and
-`security-review --full-area` exit 1 before Codex starts, as `local-audit` cannot write its run counter under
-`~/.local/state/local-audit` (and Codex would write `~/.codex`). `~/.codex` stays read-only on purpose: the security
-review after each session runs Codex outside the limit, with its settings there.
+create user namespaces on Ubuntu. The upkeep session runs under the limit too, with its Codex audits; Codex's
+settings stay read-only because the security review after each session runs Codex outside the limit with them.
 
 ### Run records
 
