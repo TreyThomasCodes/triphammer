@@ -52,6 +52,9 @@ stall_minutes=45
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
+# labelled_jq, which the hold check below reads labels through.
+# shellcheck source=bin/labels.sh
+source "$bin/labels.sh"
 load_config merge-when-ready "$bin/.."
 # The repository ticket-runner serves, and its state directory.
 served="$cfg_repo" runner_state="$cfg_state_dir"
@@ -234,10 +237,11 @@ declare -A branch_of  # each armed pull request's head branch, by number
 for repository in $repositories; do
   owner="${repository%/*}" name="${repository#*/}"
   # Armed pull requests into the default branch, oldest auto-merge first.
-  armed="$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" --jq '
+  # shellcheck disable=SC2016  # the jq variables are jq's
+  armed="$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" --jq "$labelled_jq"'
     .data.repository as $r | [$r.pullRequests.nodes[]
     | select(.autoMergeRequest != null and .baseRefName == $r.defaultBranchRef.name)] | sort_by(.autoMergeRequest.enabledAt, .number)[]
-    | "\(.number) \(.headRefOid) \(.mergeStateStatus) \(if any(.labels.nodes[]; .name | ascii_downcase == "hold") then "hold" else "-" end) \(.headRefName)"')"
+    | "\(.number) \(.headRefOid) \(.mergeStateStatus) \(if labelled("hold") then "hold" else "-" end) \(.headRefName)"')"
   queue=() branch_of=()
   merge_number="" merge_head=""
   while read -r number head state hold branch; do

@@ -52,3 +52,20 @@ test('--labels fails when the labels cannot be listed, creating none, and tries 
   assert.deepEqual(refused.labelCalls, [list, ...Object.keys(labels).map(create)]);
   assert.match(refused.result.stderr, /could not create the label hold in Example-Owner\/example-project/);
 });
+
+// labelled("hold") through bin/labels.sh's $labelled_jq, on `input` (a JSON value), as jq prints it.
+function labelled(input) {
+  const result = spawnSync('bash', ['-c', 'source "$1" && jq -c "$labelled_jq"\'labelled("hold")\'', 'bash',
+    join(import.meta.dirname, 'labels.sh')], {input: JSON.stringify(input), encoding: 'utf8'});
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+test('labelled_jq matches a label in any case, in both the gh --json and the GraphQL shapes', () => {
+  for (const name of ['hold', 'Hold', 'HOLD']) {
+    assert.equal(labelled({labels: [{name: 'bug'}, {name}]}), 'true', name);
+    assert.equal(labelled({labels: {nodes: [{name: 'bug'}, {name}]}}), 'true', `${name} in nodes`);
+  }
+  for (const input of [{labels: [{name: 'holds'}]}, {labels: {nodes: [{name: 'on-hold'}]}}, {labels: []},
+    {labels: {nodes: []}}, {labels: null}, {}]) assert.equal(labelled(input), 'false', JSON.stringify(input));
+});

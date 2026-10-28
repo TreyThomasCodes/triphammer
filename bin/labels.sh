@@ -17,6 +17,13 @@ triphammer_labels=(
   "cleanup|BFD4F2|A cleanup a session proposed; Triphammer takes it after the other ready issues"
 )
 
+# $labelled_jq: a jq prelude defining labelled($name), true when the input's labels include $name, given in lowercase,
+# in any case, as GitHub matches label names. It reads both shapes the scripts get: `.labels[].name` (gh --json) and
+# `.labels.nodes[].name` (GraphQL). ticket-runner and merge-when-ready prefix their label filters with it:
+# --jq "$labelled_jq"'labelled("hold")'.
+# shellcheck disable=SC2034,SC2016  # read by the scripts that source this file; the $ is jq's
+labelled_jq='def labelled($name): any((.labels | if type == "object" then .nodes else . end)[]?; .name | ascii_downcase == $name); '
+
 # missing_labels <owner/repo>: prints the name of each label of triphammer_labels the repository lacks, one per line,
 # comparing names case-insensitively as GitHub does. Fails, printing nothing, when the labels cannot be listed.
 missing_labels() {
