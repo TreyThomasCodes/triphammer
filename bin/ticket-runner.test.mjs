@@ -162,6 +162,7 @@ test("the session runs as the plugin's orchestrator agent on Opus", t => {
 
 // Cleanup proposals (bin/README.md, Cleanup proposals).
 
+const flagValue = (call, flag) => call[call.indexOf(flag) + 1];
 const proposal = (mechanism, extra = {}) => ({title: `Share ${mechanism}`, mechanism,
   locations: ['bin/a:10', 'bin/b:20', 'bin/c:30'], fix: `One helper for ${mechanism} in bin/shared.sh`, ...extra});
 const markerOf = slug => `<!-- triphammer-cleanup: ${slug} -->`;
@@ -171,10 +172,8 @@ function proposalsTick(t, content, routes = {}) {
   if (content !== undefined) writeFileSync(join(r.root, 'proposals.jsonl'), content);
   r.gh.respond(routes);
   r.tick();
-  const filed = r.creates().map(call => {
-    const value = flag => call[call.indexOf(flag) + 1];
-    return {title: value('--title'), label: value('--label'), body: value('--body')};
-  });
+  const filed = r.creates().map(call =>
+    ({title: flagValue(call, '--title'), label: flagValue(call, '--label'), body: flagValue(call, '--body')}));
   return {...r, filed, path: r.probe('proposals-path')};
 }
 const openBodies = `issue list -R ${repo} --state open --limit 1000 --json body`;
@@ -450,7 +449,6 @@ test('a main without the plugin\'s ticket-run skill starts no session', t => {
 const isoDaysAgo = days => new Date(Date.now() - days * 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 const upkeepIssue = (number, days, state) =>
   ({...issue(number, {state, labels: ['upkeep']}), createdAt: isoDaysAgo(days)});
-const flagValue = (call, flag) => call[call.indexOf(flag) + 1];
 
 test('with no upkeep issue in the last 7 days and nothing else to do, a tick opens one and runs it', t => {
   const r = ticketSetup(t, [upkeepIssue(5, 8, 'CLOSED')]);
