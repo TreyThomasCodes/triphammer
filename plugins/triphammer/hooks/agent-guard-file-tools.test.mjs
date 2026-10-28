@@ -12,8 +12,8 @@ function assertFilePersistenceDenied(reason, path) {
   assert.ok(reason, `expected a deny: ${path}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /the owner does that/);
-  assert.match(reason, /# guard-override: <reason>/);
-  assert.match(reason, /only to Bash commands/);
+  assert.match(reason, /Leave this change to the owner and report it/);
+  assert.doesNotMatch(reason, /# guard-override/);
 }
 
 test('a Write, Edit or NotebookEdit under each persistence directory is refused, without an override', t => {

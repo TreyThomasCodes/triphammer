@@ -184,8 +184,17 @@
 # xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
 # and every round of review has found another shell feature this parser misses: this hook is the only line.
 #
-# `# guard-override: <reason>` anywhere in the command lets that one Bash command through. A file tool has no command
-# text to carry it, so its refusals have no override: the owner makes that change. Heredoc bodies, here-strings
+# `# guard-override: <reason>` anywhere in a Bash command lifts only the shell-edit rule, the false positives it exists
+# for: a git-tracked file under a shellEditRoots path rewritten through the shell. It does not lift the persistence
+# rule (units, timers, ~/.local/bin, config, state, text the hook cannot read), the worktree-only rule (writes outside
+# the worktree, hard links, paths the hook cannot work out, running out of time), the git-command rule (git
+# configuration, remotes, upstreams, `git -c` settings), the scheduler rule or the self-kill rule: a command one of
+# those refuses stays refused with the token, and their messages do not name it. A file tool has no command text to
+# carry it, so its refusals have no override: the owner makes that change. Each override the hook honors (a command
+# the shell-edit rule alone refuses, with the token) appends one JSON line (time, session, rule, reason, command) to
+# guard-overrides.log in $TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer, which the
+# persistence rule keeps sessions from writing; a token on a command no rule refuses is not logged. A failure to write
+# the log prints one line on stderr and still allows the command. Heredoc bodies, here-strings
 # and quoted arguments (a PR --body, a commit -m) are prose, not commands, unless a shell or interpreter reads them:
 # as its -c script, as env -S's command line, or on its stdin from a heredoc, a here-string or an echo or printf in
 # the same pipeline. A `<<WORD` inside quotes, a comment or $(( )) is text, not a heredoc, and a heredoc's body
@@ -232,8 +241,11 @@ import subprocess
 import sys
 import time
 
-OVERRIDE = re.compile(r"#\s*guard-override:\s*\S")
+OVERRIDE = re.compile(r"#\s*guard-override:[ \t]*(\S[^\n]*)")
 OVERRIDE_HINT = "rerun it with `# guard-override: <reason>` appended"
+# The one rule the override lifts; decide() returns its refusal only when no other rule refuses the command.
+SHELL_EDIT_RULE = "agent-guard shell-edit rule"
+OVERRIDE_LOG = "guard-overrides.log"
 PROJECT_FILE = os.path.join(".triphammer", "project.json")
 DEADLINE = time.monotonic() + 7  # well inside the 10-second hook timeout
 # The parse, brace and glob expansion and the path checks stop here, well before DEADLINE and the hook timeout; a machine
@@ -2141,14 +2153,19 @@ def tracked_edits(edits):
     return tracked
 
 
+def shared_dir():
+    """Triphammer's shared state directory: $TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer."""
+    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    return os.environ.get("TRIPHAMMER_SHARED_DIR") or os.path.join(state, "triphammer")
+
+
 def persistence_roots():
     """The directories that hold Triphammer's persistence: its installed scripts, units, config and state."""
     home = os.path.expanduser("~")
     config = [os.path.join(home, ".config")] + ([os.environ["XDG_CONFIG_HOME"]] if os.environ.get("XDG_CONFIG_HOME")
                                                 else [])
-    state = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
     roots = [os.path.join(home, ".local", "bin"), os.path.join(home, ".local", "state", "ticket-runner"),
-             os.environ.get("TRIPHAMMER_SHARED_DIR") or os.path.join(state, "triphammer")]
+             shared_dir()]
     roots += configured_paths(home, "STATE_DIR")
     roots += [os.path.join(c, sub) for c in config for sub in (os.path.join("systemd", "user"), "triphammer")]
     return {os.path.normpath(r) for root in roots if os.path.isabs(root) for r in (root, os.path.realpath(root))}
@@ -2251,16 +2268,14 @@ def decide_file(tool, path, cwd):
         if triphammer_sessions() and (outside_session(path, False) or outside_session(raw, False)):
             return (f"agent-guard worktree-only rule: this {tool} writes {path}, outside the places a session the "
                     f"Triphammer started may write: {session_places()}. Leave a change anywhere else to the owner and "
-                    f"report it; a file tool has no override.")
+                    f"report it.")
         if triphammer_sessions() and hard_linked(path):
-            return worktree_hard_link(path, f"this {tool} writes", "leave the change to the owner and report it; a "
-                                      "file tool has no override")
+            return worktree_hard_link(path, f"this {tool} writes")
         return None
     return (f"agent-guard persistence rule: this {tool} changes Triphammer's persistence ({listed(changed)}). Agents "
             f"never install or change Triphammer's systemd units, the scripts in ~/.local/bin (or the files they link "
             f"to), Triphammer's checkout, its config or its state; the owner does "
-            f"that. The override, `# guard-override: <reason>`, applies only to Bash commands, so leave this change "
-            f"to the owner and report it.")
+            f"that. Leave this change to the owner and report it.")
 
 
 SESSION_MARKER = "TRIPHAMMER_SESSION"
@@ -2442,10 +2457,11 @@ def hard_linked(path):
     return stat.S_ISREG(status.st_mode) and status.st_nlink > 1
 
 
-def worktree_hard_link(paths, what, then):
+def worktree_hard_link(paths, what):
     return (f"agent-guard worktree-only rule: {what} {paths}, a file with more than one hard link, whose other names "
             f"may lie outside the places a session Triphammer started may write: {session_places()}. Write a new file "
-            f"instead (remove this name first, which leaves the others alone), or {then}.")
+            f"instead (remove this name first, which leaves the others alone), or leave the change to the owner and "
+            f"report it.")
 
 
 def bracket(pattern):
@@ -2477,13 +2493,12 @@ def decide(cmd, cwd):
                 f"({listed(persistence)}). Agents never install or change Triphammer's systemd units, the scripts in "
                 f"~/.local/bin, its config or its state; the owner does that. If the command is text you meant to "
                 f"write to a file, a heredoc terminator that turns up early in that text (or an unbalanced quote) runs "
-                f"the rest as commands: pick a unique terminator. If the change really is yours to make, "
-                f"{OVERRIDE_HINT}.")
+                f"the rest as commands: pick a unique terminator.")
     if unreadable:
         return (f"agent-guard persistence rule: this command runs text the hook cannot read before it runs "
                 f"({listed(unreadable)}), so it cannot tell whether that text changes Triphammer's persistence, which "
                 f"agents never do. Write the command out in the command itself instead of building it at run time or "
-                f"writing it to a file first. If the text really is safe, {OVERRIDE_HINT}.")
+                f"writing it to a file first.")
     if triphammer_sessions():
         reached = ([path for path, _, _ in findings.session_paths] + [path for path, _ in findings.link_sources]
                    + findings.symlink_targets)
@@ -2503,72 +2518,88 @@ def decide(cmd, cwd):
             return (f"agent-guard worktree-only rule: this command writes, links or removes {listed(outside)}, "
                     f"outside the places a session Triphammer started may write: {session_places()}. Write inside "
                     f"the worktree or a temporary directory, and leave a change anywhere else to the owner and report "
-                    f"it. If the write really is yours to make, {OVERRIDE_HINT}.")
+                    f"it.")
         linked = list(dict.fromkeys(path for path, tree, content in findings.session_paths
                                     if content and not tree and hard_linked(path)))
         if linked:
-            return worktree_hard_link(listed(linked), "this command writes", OVERRIDE_HINT)
+            return worktree_hard_link(listed(linked), "this command writes")
         if findings.unresolved:
             return (f"agent-guard worktree-only rule: this command writes, links or removes a path the hook cannot "
                     f"work out before it runs ({listed(list(dict.fromkeys(findings.unresolved)))}), so it cannot "
                     f"tell whether it lies inside the places a session Triphammer started may write: "
                     f"{session_places()}. Spell the path out: literally, after a cd the hook can follow, or starting "
-                    f"with $HOME, $TMPDIR or $PWD (which the command does not set). If the write really is yours to "
-                    f"make, {OVERRIDE_HINT}.")
+                    f"with $HOME, $TMPDIR or $PWD (which the command does not set).")
         if findings.git_settings:
             return (f"agent-guard git-command rule: this command writes git configuration, sets git configuration "
                     f"that makes git run a command, or changes where or what git fetches, merges and pushes "
                     f"({listed(findings.git_settings)}), which a session Triphammer started never does: the worktree "
                     f"shares its repository's configuration, so git would use it later, in this worktree, the main "
                     f"checkout or the owner's sessions. Reading configuration stays allowed, and so does `git -c` with "
-                    f"other keys for one command. If the setting really is yours to make, {OVERRIDE_HINT}.")
+                    f"other keys for one command. Leave a setting that really is needed to the owner and report it.")
         if findings.schedules:
             return (f"agent-guard scheduler rule: {listed(findings.schedules)} schedules a command to run later, "
-                    f"outside the session, which a session Triphammer started never does (`crontab -l` stays allowed). "
-                    f"If it really is yours to do, {OVERRIDE_HINT}.")
+                    f"outside the session, which a session Triphammer started never does (`crontab -l` stays "
+                    f"allowed).")
     if findings.kills:
         name, pattern = findings.kills[0]
         effect = "kills that shell (exit code 144)" if name == "pkill" else "lists that shell as well"
         return (f"agent-guard self-kill rule: `{name} -f {pattern}` also matches the command line of the shell that "
                 f"runs it, so it {effect}. Write the pattern in bracket form (`{name} -f '{bracket(pattern)}'`), "
                 f"kill the PID you saved when you started the process (`kill \"$pid\"`), or use `kill %1` for a job "
-                f"this shell started. If the pattern really is right, {OVERRIDE_HINT}.")
+                f"this shell started.")
     if findings.signals:
         target, process = findings.signals[0]
         return (f"agent-guard self-kill rule: `kill {target}` signals {process}, so it ends the command or the "
                 f"session itself. Kill the PID you saved when you started the process (`kill \"$pid\"`), or use "
-                f"`kill %1` for a job this shell started. If the target really is right, {OVERRIDE_HINT}.")
+                f"`kill %1` for a job this shell started.")
     if findings.xargs_signals:
         name = findings.xargs_signals[0]
         return (f"agent-guard self-kill rule: `xargs {name}` takes what it signals or lists from its input, which the "
                 f"hook cannot read, so it may end the command or the session itself. Write the target out: kill the "
                 f"PID you saved when you started the process (`kill \"$pid\"`), use `kill %1` for a job this shell "
-                f"started, or give pkill -f or pgrep -f a pattern in bracket form (`'[p]attern'`). If it really is "
-                f"safe, {OVERRIDE_HINT}.")
+                f"started, or give pkill -f or pgrep -f a pattern in bracket form (`'[p]attern'`).")
     files = tracked_edits(findings.edits)
     if files:
-        return (f"agent-guard shell-edit rule: this command rewrites git-tracked {listed(files, 5, ', ')} through the "
+        return (f"{SHELL_EDIT_RULE}: this command rewrites git-tracked {listed(files, 5, ', ')} through the "
                 f"shell. Make the change with Edit (or Write for a new or wholly replaced file), so the language "
                 f"server's diagnostics arrive after it. If the shell really is the right tool, {OVERRIDE_HINT}.")
     return None
 
 
 def out_of_time(tool):
-    then = ("leave the change to the owner and report it; a file tool has no override" if tool in FILE_TOOLS
-            else f"split it into shorter commands with fewer brace expansions and globs, or if it really is "
-                 f"safe, {OVERRIDE_HINT}")
+    then = ("leave the change to the owner and report it" if tool in FILE_TOOLS
+            else "split it into shorter commands with fewer brace expansions and globs")
     return (f"agent-guard worktree-only rule: the hook ran out of time ({parse_seconds():g} seconds) working out what "
             f"this {'command' if tool == 'Bash' else tool} writes, so it cannot tell whether it stays inside the "
             f"places a session Triphammer started may write: {session_places()}. Instead, {then}.")
 
 
+def log_override(session_id, reason, cmd):
+    """Append the override the hook honors to guard-overrides.log in the shared state directory; a failure goes to
+    stderr and leaves the decision alone."""
+    log = os.path.join(shared_dir(), OVERRIDE_LOG)
+    entry = {"time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+             "session": {"session_id": session_id if isinstance(session_id, str) else None,
+                         SESSION_MARKER: os.environ.get(SESSION_MARKER)},
+             "rule": "shell-edit", "reason": reason.strip(), "command": cmd}
+    try:
+        if not os.path.isabs(log):
+            raise OSError(f"{log} is not an absolute path")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as out:
+            out.write(json.dumps(entry) + "\n")
+    except Exception as error:
+        print(f"agent-guard: could not log the override to {log}: {error}", file=sys.stderr)
+
+
 def judge(tool, tool_input, cwd):
-    """The deny reason for the tool call, or None to allow it."""
+    """The deny reason for the tool call, before any override, or None to allow it."""
     try:
         if tool in FILE_TOOLS:
             return decide_file(tool, tool_input.get("file_path") or tool_input.get("notebook_path"), cwd)
         cmd = tool_input.get("command")
-        if not isinstance(cmd, str) or OVERRIDE.search(cmd):
+        if not isinstance(cmd, str):
             return None
         return decide(cmd, cwd)
     except OutOfTime:
@@ -2624,6 +2655,10 @@ def main():
     if tool not in FILE_TOOLS and tool != "Bash":
         return
     reason = watched(tool, tool_input, cwd) if triphammer_sessions() and hasattr(os, "fork") else judge(tool, tool_input, cwd)
+    override = OVERRIDE.search(tool_input["command"]) if tool == "Bash" and reason else None
+    if override and reason.startswith(SHELL_EDIT_RULE):
+        log_override(data.get("session_id"), override.group(1), tool_input["command"])
+        reason = None
     if reason:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                  "permissionDecisionReason": reason}}))

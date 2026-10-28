@@ -49,7 +49,7 @@ test('in a Triphammer session a path inside the worktree that a symlink leads ou
   }
 });
 
-test('in a Triphammer session a shell write outside its worktree and temporary directories is refused, naming the override',
+test('in a Triphammer session a shell write outside its worktree and temporary directories is refused, not naming the override',
   t => {
     const s = triphammerSession(t);
     if (!s) return;

@@ -1,18 +1,20 @@
 // agent-guard.py: Shell commands that change Triphammer's persistence, the override, and the hook's own failures.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, relative} from 'node:path';
 import {
-  inTriphammerSession, run, decide, repo, pyEdit, machineHome, configuredSetup, validConf,
+  guard, python, inTriphammerSession, run, decide, repo, pyEdit, machineHome, configuredSetup, validConf,
+  assertNotLifted,
 } from './agent-guard-fixture.mjs';
 
 function assertPersistenceDenied(reason, command) {
   assert.ok(reason, `expected a deny: ${command}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /the owner does that/);
-  assert.match(reason, /# guard-override: <reason>/);
+  assert.doesNotMatch(reason, /# guard-override/);
 }
 
 // README install text whose heredoc ends at an EOF line inside it, so bash runs the rest, apostrophe and all.
@@ -149,7 +151,7 @@ function assertUnreadableDenied(reason, command) {
   assert.ok(reason, `expected a deny: ${command}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /cannot read/);
-  assert.match(reason, /# guard-override: <reason>/);
+  assert.doesNotMatch(reason, /# guard-override/);
 }
 
 for (const command of [
@@ -228,31 +230,72 @@ test('a missing or malformed Triphammer config leaves the default protection and
 
 // The override.
 
-// main() checks the token once on the raw command, before any parsing, so one command of each class of refusal shows
-// it lets every form of that class through.
-test('every class of refused command is allowed with the override token appended', t => {
+const shellEdits = [
+  `sed -i 's/X/Z/' src/x.cs`,
+  `cat > tests/App.Tests/X.cs <<EOF\nclass Z {}\nEOF`,
+  pyEdit('src/App/Y.cs'),
+  'cp -f /tmp/x src/x.cs',
+  `bash -c 'sed -i s/a/b/ src/x.cs'`,
+];
+
+function readLog(shared) {
+  return readFileSync(join(shared, 'guard-overrides.log'), 'utf8').trimEnd().split('\n').map(line => JSON.parse(line));
+}
+
+for (const [where, session] of [['outside a Triphammer session', false], ['in a Triphammer session', true]]) {
+  test(`${where} the override token lifts the shell-edit rule, and the hook logs it`, t => {
+    const {dir} = repo(t);
+    const {env, home} = machineHome(t, session ? {TRIPHAMMER_SESSION: dir} : {});
+    if (!session) delete env.TRIPHAMMER_SESSION;
+    const shared = join(home, 'shared', 'triphammer');
+    const withShared = {...env, TRIPHAMMER_SHARED_DIR: shared};
+    for (const command of shellEdits) {
+      assert.match(decide(command, dir, {env: withShared}) ?? '', /shell-edit rule/, command);
+      assert.equal(decide(`${command}  # guard-override: regenerating a fixture`, dir, {env: withShared}), null,
+        command);
+    }
+    const entries = readLog(shared);
+    assert.equal(entries.length, shellEdits.length);
+    shellEdits.forEach((command, i) => {
+      const entry = entries[i];
+      assert.match(entry.time, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      assert.deepEqual(entry.session, {session_id: 's1', TRIPHAMMER_SESSION: session ? dir : null});
+      assert.equal(entry.rule, 'shell-edit');
+      assert.equal(entry.reason, 'regenerating a fixture');
+      assert.equal(entry.command, `${command}  # guard-override: regenerating a fixture`);
+    });
+    const xdg = join(home, 'xdg-state');
+    const viaXdg = {...env, XDG_STATE_HOME: xdg};
+    assert.equal(decide(`sed -i 's/X/Z/' src/x.cs # guard-override: via XDG`, dir, {env: viaXdg}), null);
+    assert.equal(readLog(join(xdg, 'triphammer'))[0].reason, 'via XDG');
+    assert.equal(decide('ls  # guard-override: nothing to lift', dir, {env: viaXdg}), null);
+    assert.equal(readLog(join(xdg, 'triphammer')).length, 1, 'a token that lifts nothing is not logged');
+  });
+}
+
+test('a failure to write the override log is reported on stderr and still allows the command', t => {
   const {dir} = repo(t);
-  const refused = [
-    `sed -i 's/X/Z/' src/x.cs`,
-    `cat > tests/App.Tests/X.cs <<EOF\nclass Z {}\nEOF`,
-    pyEdit('src/App/Y.cs'),
-    'cp -f /tmp/x src/x.cs',
-    `bash -c 'sed -i s/a/b/ src/x.cs'`,
-    'pkill -f web-e2e',
-    'pgrep -f "dotnet test"',
-    'kill $PPID',
-    'kill $$',
-  ];
-  for (const command of refused) {
-    assert.ok(decide(command, dir), `expected a deny without the override: ${command}`);
-    assert.equal(decide(`${command}  # guard-override: regenerating a fixture`, dir), null, command);
-  }
+  const {env, home} = machineHome(t);
+  writeFileSync(join(home, 'blocker'), 'a file, not a directory\n');
+  const input = JSON.stringify({session_id: 's1', hook_event_name: 'PreToolUse', tool_name: 'Bash',
+    tool_input: {command: `sed -i 's/X/Z/' src/x.cs  # guard-override: fixture`}, cwd: dir});
+  const result = spawnSync(python, ['-I', guard], {input, encoding: 'utf8', timeout: 15000,
+    env: {...env, TRIPHAMMER_SHARED_DIR: join(home, 'blocker', 'triphammer')}});
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /^agent-guard: could not log the override to .*guard-overrides\.log: .+\n$/);
+});
+
+test('the override token does not lift the persistence rule, even with a shell edit in the same command', t => {
   const {env, cwd} = machineHome(t);
   for (const command of ['systemctl --user disable --now ticket-runner.timer', 'ln -sfn x ~/.local/bin/ticket-runner',
-    earlyEof('systemctl --user daemon-reload'), 'eval "$cmd"', 'systemctl --user exit']) {
-    assert.ok(decide(command, cwd, {env}), `expected a deny without the override: ${command}`);
-    assert.equal(decide(`${command}\n# guard-override: the owner asked for this relink`, cwd, {env}), null, command);
+    earlyEof('systemctl --user daemon-reload'), 'systemctl --user exit', 'touch ~/.local/state/triphammer/stop',
+    'echo forged >> ~/.local/state/triphammer/guard-overrides.log']) {
+    assertNotLifted(command, 'persistence', cwd, {env});
   }
+  assertNotLifted('eval "$cmd"', 'persistence', cwd, {env});
+  const {dir} = repo(t);
+  assertNotLifted(`sed -i 's/X/Z/' src/x.cs && systemctl --user daemon-reload`, 'persistence', dir, {env});
 });
 
 // The hook never blocks on its own failure.
