@@ -1518,6 +1518,17 @@ test('a repair whose pull request has 100 labels or more, which may hide hold, e
     {kind: 'repair', number: 40, labelled: 'pr edit 40'});
 });
 
+// The runner adds agent-working before its first brake check, so an issue with 99 other labels would reach 100 there,
+// be braked uncounted and be picked again on every tick. It is not picked.
+test('an issue with 99 labels besides agent-working is not picked, so no session starts and is braked', t => {
+  const r = ticketSetup(t, [recentUpkeep, issue(7, {labels: manyLabels.slice(1)})]);
+  r.gh.json('brake-unread.json', issue(7, {labels: [...manyLabels.slice(1), 'agent-working']}));
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
+  assert.equal(r.ran(), false);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'no run of #7 started');
+  assert.equal(labelCalls(r.ghCalls()).length, 0, 'agent-working is never added');
+});
+
 test('a session that labels its own issue Needs-Owner, in another case, ends as a run that progressed', t => {
   const r = ticketSetup(t, [issue(7)]);
   r.gh.json('self-needs-owner.json', issue(7, {labels: ['agent-working', 'Needs-Owner']}));

@@ -107,11 +107,14 @@ def records(name):
 # lines match, so a record of an older head starts nothing.
 pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
-# `gh --json labels` returns only an item's first 100 labels, so a brake may be past them: an issue or pull request
-# with that many is braked too. The threshold matches labels_unread in bin/labels.sh (the runner's session brakes).
-UNREAD = 100
-unread = lambda item: len(item["labels"]) >= UNREAD
-UNREAD_NOTE = f"{UNREAD} labels or more, so a brake may be past the ones gh reads"
+# `gh --json labels` returns only an item's first 100 labels, so a brake may be past them: the runner's session brakes
+# (labels_unread in bin/labels.sh) stop a session on an item with 100 labels or more. The runner adds `agent-working`
+# before its first brake check, so an item picked with 99 others would reach 100 there and be braked, uncounted, on
+# every tick. So an item whose labels other than `agent-working` would reach that limit with it added is skipped here.
+GH_LABELS_READ = 100
+UNREAD = GH_LABELS_READ - 1  # leaves room for the `agent-working` the runner adds
+unread = lambda item: len(labels(item) - {"agent-working"}) >= UNREAD
+UNREAD_NOTE = f"{UNREAD} labels or more besides agent-working, {GH_LABELS_READ} with it, so a brake may be past them"
 
 slices = {}  # parent -> {k: [issues claiming slice k]}; several issues may claim the same k
 for n, issue in sorted(issues.items()):

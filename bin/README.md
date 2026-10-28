@@ -396,9 +396,11 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
 - Several issues may claim the same `Slice k of #N`. Any open one keeps parent `#N` open and holds back slice `k+1`.
   A parent labelled `hold`, `needs-owner` or `stop-agents` stays open after its last slice closes, and the reason is
   printed to standard error.
-- An issue or pull request with 100 labels or more counts as braked, as in the session brakes (Sessions): `gh` reads
-  only the first 100, so a brake may be past them. Such a parent stays open, such a pull request is not repaired and
-  such an issue is not taken, and each is printed to standard error.
+- An issue or pull request with 99 labels or more besides `agent-working`, in any case, counts as braked. `gh` reads
+  only the first 100, so a brake may be past them, and the session brakes (Sessions) stop a session at 100; the runner
+  adds `agent-working` before its first brake check, so an item picked at 99 would be braked there, uncounted, on every
+  tick. Such a parent stays open, such a pull request is not repaired and such an issue is not taken, and each is
+  printed to standard error.
 - A `Depends on #N.` is satisfied only when `#N` is a known, closed issue. A number missing from the issue list (a pull
   request, a typo, an issue past the list limit) keeps the issue waiting, and the reason is printed to standard error.
 - Ready issues labelled `next` are taken before other ready issues, lowest number first. The label never makes an issue
