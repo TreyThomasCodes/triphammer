@@ -583,7 +583,8 @@ working_label add "$labelled" "$number"
 
 # The brakes on a ticket's issue: `hold`; `needs-owner` that anyone but the App added (the session adds it itself when
 # it stops for the owner, as review-loop step 4 and ticket-run tell it to; the events API's actor tells the App, as
-# `<app>[bot]`, from the owner); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
+# `<app>[bot]`, from the owner); 100 labels or more (labels_unread: gh reads only the first 100, so hold or needs-owner
+# may be past them); and the issue being closed, unless it is labelled upkeep (an upkeep session closes its
 # own issue) or a merged pull request closed it (the run's own, which merge-when-ready may merge while the session still
 # runs: the issue timeline's last ClosedEvent names it as the closer). Prints the first that applies, or nothing; a
 # failed lookup is logged and is no brake, and so is an actor or closer GitHub does not report yet.
@@ -595,6 +596,7 @@ issue_brake() {
   if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq "$labelled_jq"'
       [if labelled("hold") then "hold" else empty end,
        if labelled("needs-owner") then "needs-owner" else empty end,
+       if labels_unread then "unread" else empty end,
        if .state != "OPEN" and (.labels | map(.name) | index("upkeep") | not) then "closed" else empty end] | join(" ")' 2>/dev/null)"
   then
     log "$kind #$number: could not look up the brakes on issue #$number" >&2
@@ -612,6 +614,7 @@ issue_brake() {
       return 0
     fi
   fi
+  if [[ "$facts" == *" unread "* ]]; then echo "labelled more than the runner reads, so it may be labelled hold or needs-owner"; return 0; fi
   [[ "$facts" == *" closed "* ]] || return 0
   if ! closer="$(gh api graphql -F number="$number" -f owner="${repo%%/*}" -f name="${repo#*/}" -f query='query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { issue(number: $number) {
@@ -626,7 +629,7 @@ issue_brake() {
 }
 
 # The brakes that end a session in progress: the project's (stop_file_brake, stop_agents_brake), the ticket's issue's
-# (issue_brake), and `hold` on the pull request a repair works on. Prints the first that applies, or nothing; a failed
+# (issue_brake), and `hold` on the pull request a repair works on, or 100 labels or more on it (labels_unread). Prints the first that applies, or nothing; a failed
 # lookup is logged and is no brake.
 run_brake() {
   local found
@@ -637,7 +640,8 @@ run_brake() {
     [ -z "$found" ] || found="issue #$number is $found"
   elif [ -z "$found" ]; then
     found="$(gh pr view "$number" -R "$repo" --json labels \
-      --jq "$labelled_jq"'if labelled("hold") then "labelled hold" else "" end' 2>/dev/null)" \
+      --jq "$labelled_jq"'if labelled("hold") then "labelled hold"
+        elif labels_unread then "labelled more than the runner reads, so it may be labelled hold" else "" end' 2>/dev/null)" \
       || { log "$kind #$number: could not look up the brakes on pull request #$number" >&2; found=""; }
     [ -z "$found" ] || found="pull request #$number is $found"
   fi

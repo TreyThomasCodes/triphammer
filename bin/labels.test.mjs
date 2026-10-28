@@ -53,10 +53,10 @@ test('--labels fails when the labels cannot be listed, creating none, and tries 
   assert.match(refused.result.stderr, /could not create the label hold in Example-Owner\/example-project/);
 });
 
-// labelled("hold") through bin/labels.sh's $labelled_jq, on `input` (a JSON value), as jq prints it.
-function labelled(input) {
-  const result = spawnSync('bash', ['-c', 'source "$1" && jq -c "$labelled_jq"\'labelled("hold")\'', 'bash',
-    join(import.meta.dirname, 'labels.sh')], {input: JSON.stringify(input), encoding: 'utf8'});
+// `filter` (labelled("hold") by default) through bin/labels.sh's $labelled_jq, on `input` (a JSON value), as jq prints it.
+function labelled(input, filter = 'labelled("hold")') {
+  const result = spawnSync('bash', ['-c', 'source "$1" && jq -c "$labelled_jq$2"', 'bash',
+    join(import.meta.dirname, 'labels.sh'), filter], {input: JSON.stringify(input), encoding: 'utf8'});
   assert.equal(result.status, 0, result.stderr);
   return result.stdout.trim();
 }
@@ -68,4 +68,10 @@ test('labelled_jq matches a label in any case, in both the gh --json and the Gra
   }
   for (const input of [{labels: [{name: 'holds'}]}, {labels: {nodes: [{name: 'on-hold'}]}}, {labels: []},
     {labels: {nodes: []}}, {labels: null}, {}]) assert.equal(labelled(input), 'false', JSON.stringify(input));
+});
+
+test('labels_unread is true when gh returned 100 labels or more, as a brake may be past them', () => {
+  const labels = count => Array.from({length: count}, (_, i) => ({name: `label-${i}`}));
+  for (const count of [0, 1, 99]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'false', `${count}`);
+  for (const count of [100, 101]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'true', `${count}`);
 });

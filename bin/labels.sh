@@ -20,9 +20,11 @@ triphammer_labels=(
 # $labelled_jq: a jq prelude defining labelled($name), true when the input's labels include $name, given in lowercase,
 # in any case, as GitHub matches label names. It reads both shapes the scripts get: `.labels[].name` (gh --json) and
 # `.labels.nodes[].name` (GraphQL). ticket-runner and merge-when-ready prefix their label filters with it:
-# --jq "$labelled_jq"'labelled("hold")'.
+# --jq "$labelled_jq"'labelled("hold")'. It also defines labels_unread, true when the input's `.labels` (the gh --json
+# shape) holds 100 labels or more: gh reads only the first 100 and says nothing of the rest, so a brake may be among them.
 # shellcheck disable=SC2034,SC2016  # read by the scripts that source this file; the $ is jq's
-labelled_jq='def labelled($name): any((.labels | if type == "object" then .nodes else . end)[]?; .name | ascii_downcase == $name); '
+labelled_jq='def labelled($name): any((.labels | if type == "object" then .nodes else . end)[]?; .name | ascii_downcase == $name);
+  def labels_unread: (.labels | length) >= 100; '
 
 # missing_labels <owner/repo>: prints the name of each label of triphammer_labels the repository lacks, one per line,
 # comparing names case-insensitively as GitHub does. Fails, printing nothing, when the labels cannot be listed.

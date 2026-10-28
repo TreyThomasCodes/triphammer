@@ -1500,6 +1500,24 @@ test('Hold, in another case, on the pull request a repair works on ends the repa
   assertBrakeEnded(r, 'pull request #40 is labelled hold', {kind: 'repair', number: 40, labelled: 'pr edit 40'});
 });
 
+// gh's --json labels reads only the first 100 labels, so one hundred labels may hide hold or needs-owner.
+const manyLabels = Array.from({length: 100}, (_, i) => `label-${i}`);
+
+test('a ticket whose issue has 100 labels or more, which may hide a brake, ends the session in progress', t => {
+  const r = ticketSetup(t);
+  r.gh.json('brake-unread.json', issue(7, {labels: manyLabels}));
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
+  assertBrakeEnded(r, 'issue #7 is labelled more than the runner reads, so it may be labelled hold or needs-owner');
+});
+
+test('a repair whose pull request has 100 labels or more, which may hide hold, ends the session in progress', t => {
+  const r = repairSetup(t);
+  r.gh.json('brake-pr.json', {labels: manyLabels.map(name => ({name}))});
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  assertBrakeEnded(r, 'pull request #40 is labelled more than the runner reads, so it may be labelled hold',
+    {kind: 'repair', number: 40, labelled: 'pr edit 40'});
+});
+
 test('a session that labels its own issue Needs-Owner, in another case, ends as a run that progressed', t => {
   const r = ticketSetup(t, [issue(7)]);
   r.gh.json('self-needs-owner.json', issue(7, {labels: ['agent-working', 'Needs-Owner']}));
