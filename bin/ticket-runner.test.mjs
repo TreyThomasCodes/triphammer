@@ -1128,8 +1128,11 @@ test('a ticket runs on the repository, checkout, App author and state directory 
   // The owner lookup is the one call about an account rather than the repository: the owner part of REPO.
   assert.ok(ghCalls.some(call => call.join(' ') === 'api users/acme --jq .type'));
   for (const call of ghCalls.filter(call => !(call[0] === 'api' && call[1].startsWith('users/')))) {
-    assert.equal(call[call.findIndex(arg => arg === '-R' || arg === '--repo') + 1], served, call.join(' '));
+    if (call[0] === 'api') assert.ok(call[1].startsWith(`repos/${served}/`), call.join(' '));
+    else assert.equal(call[call.findIndex(arg => arg === '-R' || arg === '--repo') + 1], served, call.join(' '));
   }
+  assert.ok(ghCalls.some(call => call.join(' ').startsWith(`api repos/${served}/issues/8/events`)),
+    "the owner's needs-owner brake on #8 was looked up before it started");
   const calls = gitCalls();
   assert.ok(calls.some(({args}) => args.includes('worktree') && args.includes('add')), 'the worktree was added through git');
   // The script's own checkout is Triphammer's, which the tick keeps current and reads the plugin from, and the
@@ -1618,6 +1621,71 @@ test('a needs-owner actor or a closer that cannot be looked up is logged and doe
   assert.match(log, /ticket #7: could not look up who labelled issue #7 needs-owner/);
   assert.match(log, /ticket #7: could not look up what closed issue #7/);
   assert.doesNotMatch(log, /owner's brake/);
+});
+
+// The owner's needs-owner brake outlives its label: it is on from the owner's last `labeled` event for it until a later
+// `unlabeled` one by anyone but the App, whatever the App does in between.
+const labelEvent = (event, login, name = 'needs-owner') => ({event, label: {name}, actor: {login}});
+const ownerThenApp = [labelEvent('labeled', 'Example-Owner'), labelEvent('unlabeled', 'example-agents[bot]')];
+const ownerAppApp = [...ownerThenApp, labelEvent('labeled', 'Example-Agents[bot]', 'Needs-Owner')];
+const ownerThenOwner = [labelEvent('labeled', 'example-owner'), labelEvent('unlabeled', 'Example-Owner', 'Needs-Owner')];
+// Serves events as issue #number's events to the rig's gh.
+const serveEvents = (r, number, events) => {
+  r.gh.json('events.json', events);
+  r.gh.respond({[eventsCall(number)]: {file: 'events.json'}});
+};
+
+test("an issue whose needs-owner the owner added and the App removed is not started; the owner's removal lifts it", t => {
+  const braked = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(braked, 7, ownerThenApp);
+  assert.equal(braked.tick({}, ['--plan']).trim(), 'ticket 8');
+
+  const alone = ticketSetup(t, [upkeepIssue(1, 1, 'CLOSED'), issue(7)]);
+  serveEvents(alone, 7, ownerThenApp);
+  alone.tick();
+  assert.equal(alone.ran(), false);
+  assert.match(alone.log(), /#7: skipped: the owner added needs-owner, and only the owner's removal lifts it/);
+
+  const lifted = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(lifted, 7, ownerThenOwner);
+  assert.equal(lifted.tick({}, ['--plan']).trim(), 'ticket 7');
+});
+
+test("a parent whose needs-owner the owner added and the App removed stays open when its last slice closes", t => {
+  const parent = {...issue(10), body: ''};
+  const r = ticketSetup(t, [parent, {...issue(11, {state: 'CLOSED'}), body: 'Slice 1 of #10.'}, issue(20)]);
+  serveEvents(r, 10, ownerThenApp);
+  assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 20');
+});
+
+test('an issue whose needs-owner events cannot be looked up is not started', t => {
+  const r = ticketSetup(t, [upkeepIssue(1, 1, 'CLOSED'), issue(7)]);
+  r.gh.respond({[eventsCall(7)]: {stderr: 'gh: HTTP 502\n', exit: 1}});
+  assert.equal(r.tick({}, ['--plan']).trim(), 'idle');
+  r.tick();
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /#7: could not look up who added or removed needs-owner on issue #7; skipping it this tick/);
+});
+
+test("the owner's needs-owner ends a session in progress after the App removed it, or after the App added it again", t => {
+  for (const [labels, events, reason] of [[[], ownerThenApp, "issue #7 is under the owner's needs-owner, which the App removed"],
+    [['Needs-Owner'], ownerAppApp, 'issue #7 is labelled needs-owner']]) {
+    const r = ticketSetup(t);
+    r.gh.json('braked.json', issue(7, {labels: ['agent-working', ...labels]}));
+    r.gh.json('events.json', events);
+    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'braked.json'}, [eventsCall(7)]: {file: 'events.json'}})});
+    assertBrakeEnded(r, reason);
+  }
+});
+
+test("needs-owner the owner added and removed again does not end the session", t => {
+  const r = ticketSetup(t);
+  r.gh.json('events.json', ownerThenOwner);
+  r.gh.respond({'issue view 7 -R': {stdout: 'yes\n'}});  // and progressed
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[eventsCall(7)]: {file: 'events.json'}}), SESSION_SECONDS: '1'});
+  assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'the events were looked up');
+  assert.doesNotMatch(r.log(), /owner's brake|could not look up/);
+  assert.match(r.log(), /ticket #7: run 1 finished \(exit 0\)/);
 });
 
 test('a failed brake lookup is logged and does not end the session', t => {

@@ -289,6 +289,16 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
   assert.equal(decide(t, issues, [pr(60, 53)]).action, 'ticket 54');
 });
 
+test("an issue the owner's needs-owner brakes after its label is gone (the owner-brakes record) is neither started nor closed", t => {
+  assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['51']}}).action, 'ticket 52');
+  assert.equal(decide(t, [issue(51, '', {labels: ['next']}), issue(52)], [],{state: {'owner-brakes': ['51']}}).action, 'ticket 52');
+  const parent = decide(t, [issue(10), closed(11, 'Slice 1 of #10.'), issue(20)], [], {state: {'owner-brakes': ['10']}});
+  assert.equal(parent.action, 'ticket 20');
+  assert.match(parent.log, /skip close 10: the owner's needs-owner brakes it/);
+  assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['5']}}).action, 'ticket 51',
+    'whole lines only');
+});
+
 // `gh --json labels` reads only the first 100 labels, so a brake may be past them (labels_unread in bin/labels.sh).
 // The runner adds agent-working before its first brake check, so 99 other labels already reach that limit there.
 
