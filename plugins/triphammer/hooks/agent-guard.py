@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Claude Code PreToolUse hook for Bash, Write, Edit and NotebookEdit, part of the Triphammer plugin (its hooks/hooks.json
 # runs it; a project's .claude/settings.json may run it too). It refuses three kinds of Bash command in every session,
-# file-tool writes under the persistence rule below, and in a session Triphammer started three more (worktree-only,
-# git-command, scheduler), each with a reason that says what to do instead:
+# file-tool writes under the persistence rule below, and in a session Triphammer started four more (worktree-only,
+# git-command, scheduler, needs-owner), each with a reason that says what to do instead:
 #
 #   persistence  a change to Triphammer's persistence, which agents never make (the owner does): a systemctl --user
 #               verb that acts on the whole manager (daemon-reload, daemon-reexec, preset-all, exit, isolate,
@@ -141,6 +141,20 @@
 #               run time counts. Reading config (--get, --get-all, --get-regexp, --list, get, list and the like), git
 #               remote -v, show, get-url and prune, and git -c with other keys stay allowed.
 #   scheduler   crontab other than -l, at, batch and systemd-run.
+#   needs-owner a gh command that may take the `needs-owner` label (in any case) off an issue or pull request, which
+#               only someone other than the App lifts: gh issue edit or gh pr edit with --remove-label naming it (also
+#               in a comma-separated list, as --remove-label=..., or computed at run time); gh label delete of it, or
+#               gh label edit of it with -n/--name; and gh api on the REST label endpoints with DELETE of
+#               issues/<n>/labels/<label> or DELETE or PATCH of labels/<label> naming it (URL-encoded or computed at
+#               run time too), PUT or DELETE of issues/<n>/labels (which replace or clear every label), and PATCH, POST
+#               or PUT of issues/<n> with a `labels` field, a field whose key is computed at run time, or an --input
+#               body. A method computed at run time counts as any. xargs running gh api, gh label, gh issue edit or gh pr
+#               edit (or gh whose subcommand its input or -I's string gives) is refused too, since the input can name
+#               the label. Adding labels, removing other labels by name and reading stay allowed. Not covered: gh api
+#               graphql (removeLabelsFromLabelable, clearLabelsFromLabelable, updateIssue), an endpoint the command
+#               builds at run time beyond its owner, repository, number or label parts (gh api -X DELETE "$url"), gh
+#               aliases and extensions, a gh subcommand computed at run time, and any other client of the API (curl
+#               with a token, a script, an interpreter).
 #
 # These rules judge only the paths and keys a command names: the caches dotnet, npm or npx playwright write, git's
 # own writes for a commit, a fetch, a worktree or an init (git -C ~ init), and every other write a program the
@@ -188,7 +202,8 @@
 # for: a git-tracked file under a shellEditRoots path rewritten through the shell. It does not lift the persistence
 # rule (units, timers, ~/.local/bin, config, state, text the hook cannot read), the worktree-only rule (writes outside
 # the worktree, hard links, paths the hook cannot work out, running out of time), the git-command rule (git
-# configuration, remotes, upstreams, `git -c` settings), the scheduler rule or the self-kill rule: a command one of
+# configuration, remotes, upstreams, `git -c` settings), the scheduler rule, the needs-owner rule or the self-kill
+# rule: a command one of
 # those refuses stays refused with the token, and their messages do not name it. A file tool has no command text to
 # carry it, so its refusals have no override: the owner makes that change. Each override the hook honors (a command
 # the shell-edit rule alone refuses, with the token) appends one JSON line (time, session, rule, reason, command) to
@@ -240,6 +255,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.parse
 
 OVERRIDE = re.compile(r"#\s*guard-override:[ \t]*(\S[^\n]*)")
 # The one rule the override lifts; decide() returns its refusal only when no other rule refuses the command.
@@ -870,6 +886,7 @@ class Findings:
         self.unreadable = []  # text the command runs that the hook cannot read, as its description
         self.git_settings = []  # git settings that make git run a command, as their description
         self.schedules = []  # crontab, at, batch and systemd-run invocations, as their text
+        self.label_removals = []  # gh commands that may take needs-owner off an issue or pull request, as their text
         # For the worktree-only rule: (absolute path, whether every file under it, whether its content changes) of
         # each path written, linked or removed, the sources of hard links, and the targets it cannot work out.
         self.session_paths = []
@@ -1315,6 +1332,8 @@ def analyze(command, cwd, findings, depth):
         analyze_systemctl(args, findings)
     elif name == "git":
         analyze_git(args, cwd, findings)
+    elif name == "gh":
+        analyze_gh(args, findings)
     elif name in SCHEDULERS and not (name == "crontab" and "-l" in values and not {"-e", "-r", "-i"} & set(values)):
         findings.schedules.append(f"`{' '.join([name] + values)}`")
     elif name in ("pkill", "pgrep"):
@@ -1432,6 +1451,21 @@ def analyze_xargs(command, args, cwd, findings, depth):
         # string can also stand for the subcommand, a -c value or an environment assignment before git.
         findings.git_settings.append(f"`{' '.join(w.value for w in words)}` with words from the input of xargs, "
                                      f"which can write git configuration")
+    elif name == "gh" and xargs_gh_may_edit_labels(words[1:], replace):
+        findings.label_removals.append(f"`{' '.join(w.value for w in words)}` with words from the input of xargs")
+
+
+def xargs_gh_may_edit_labels(args, replace):
+    """Whether gh run by xargs with these written words can take a label off once the input's words follow: gh api,
+    gh label, gh issue edit or gh pr edit (or a subcommand not yet written, or one -I's string stands for)."""
+    if replace and any(replace in w.value for w in args):
+        return True
+    if not args or args[0].value in ("api", "label"):
+        return True
+    if args[0].value in ("issue", "pr"):
+        operands = split_options(args[1:], *GH_EDIT_VALUE_OPTIONS)[0]
+        return not operands or operands[0].value == "edit"
+    return False
 
 
 def git_subcommand(args):
@@ -1941,6 +1975,88 @@ def git_environment(assignments, findings):
             if computed(word) or any(git_command_setting(derived(word, key), derived(word, value.strip("'")) if value
                                                        else None) for key, value in pairs):
                 findings.git_settings.append(f"GIT_CONFIG_PARAMETERS={word.value}")
+
+
+# The label a session never removes: the owner's brake, which only someone other than the App lifts.
+OWNER_LABEL = "needs-owner"
+# The options of gh issue edit and gh pr edit that take a value, and of gh api.
+GH_EDIT_VALUE_OPTIONS = ("RbFmtB", {"--repo", "--add-label", "--remove-label", "--add-assignee", "--remove-assignee",
+                                     "--add-project", "--remove-project", "--add-reviewer", "--remove-reviewer",
+                                     "--body", "--body-file", "--milestone", "--title", "--base", "--attach",
+                                     "--add-blocked-by", "--remove-blocked-by", "--add-blocking", "--remove-blocking",
+                                     "--add-sub-issue", "--remove-sub-issue", "--parent", "--type"})
+GH_API_VALUE_OPTIONS = ("XfFHqtp", {"--method", "--raw-field", "--field", "--header", "--input", "--jq",
+                                    "--template", "--hostname", "--cache", "--preview"})
+# Parts of a gh api endpoint the hook cannot read: a shell expansion, or gh's own {owner}, {repo} and {branch}.
+GH_COMPUTED_PART = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)|\$\w+|\$.|`[^`]*`|\{(?:owner|repo|branch)\}")
+# The REST endpoints that can take a label off an issue or pull request (whose labels are its issue's): one label of an
+# issue (group 1), all of an issue's labels, the issue itself (a PATCH with `labels` replaces them), and a repository
+# label (group 2), whose deletion or rename takes it off every issue.
+GH_LABEL_ENDPOINT = re.compile(r"(?:^|/)(?:issues/[^/]+/labels/([^/]+)|issues/[^/]+/labels|issues/[^/]+"
+                               r"|labels/([^/]+))$", re.IGNORECASE)
+
+
+def is_owner_label(word, text):
+    """Whether text, a label name from word, is needs-owner (in any case) or computed at run time, so it may be."""
+    return (word.dynamic and bool(re.search(r"[$`]", text))) or text.strip().strip("\"'").lower() == OWNER_LABEL
+
+
+def analyze_gh(args, findings):
+    """gh issue edit and gh pr edit with --remove-label needs-owner, gh label delete or edit of needs-owner, and gh api
+    calls on the label endpoints that remove it, replace or clear an issue's labels."""
+    if not args or computed(args[0]):
+        return
+    text = f"`gh {' '.join(w.value for w in args)}`"
+    sub = args[0].value
+    if sub in ("issue", "pr"):
+        operands, options = split_options(args[1:], *GH_EDIT_VALUE_OPTIONS)
+        if operands and operands[0].value == "edit" and any(
+                name == "--remove-label" and value is not None
+                and any(is_owner_label(value, label) for label in value.value.split(","))
+                for name, value in options):
+            findings.label_removals.append(text)
+    elif sub == "label":
+        operands, options = split_options(args[1:], "Rcdn", {"--repo", "--color", "--description", "--name"})
+        renames = any(name in ("-n", "--name") for name, _ in options)
+        if (len(operands) > 1 and (operands[0].value == "delete" or operands[0].value == "edit" and renames)
+                and is_owner_label(operands[1], operands[1].value)):
+            findings.label_removals.append(text)
+    elif sub == "api":
+        operands, options = split_options(args[1:], *GH_API_VALUE_OPTIONS)
+        if operands and gh_api_removes_label(operands[0], options):
+            findings.label_removals.append(text)
+
+
+def gh_api_removes_label(endpoint, options):
+    """Whether gh api on endpoint with options may take needs-owner off an issue: DELETE or PATCH of the label (on an
+    issue or the repository), PUT or DELETE of an issue's whole label set, or a write to the issue that sets `labels`
+    (or whose --input body the hook does not read). A method computed at run time counts as any."""
+    methods = [value for name, value in options if name in ("-X", "--method") and value is not None]
+    fields = [value for name, value in options if name in ("-f", "--raw-field", "-F", "--field")]
+    given = bool(fields) or any(name == "--input" for name, _ in options)
+    method = methods[-1].value.upper() if methods else "POST" if given else "GET"
+    if methods and computed(methods[-1]):
+        method = None
+    path = GH_COMPUTED_PART.sub("\0", endpoint.value).split("?")[0]
+    for _ in range(3):
+        path = urllib.parse.unquote(path)
+    match = GH_LABEL_ENDPOINT.search(path.rstrip("/"))
+    if match is None:
+        return False
+    label = match.group(1) or match.group(2)
+    if label is not None:
+        return method in (None, "DELETE", "PATCH") and ("\0" in label or label.strip().lower() == OWNER_LABEL)
+    if match.group(0).lower().endswith("labels"):
+        return method in (None, "PUT", "DELETE")
+    return method in (None, "PATCH", "POST", "PUT") and (
+        any(name == "--input" for name, _ in options)
+        or any(value is None or gh_field_sets_labels(value) for value in fields))
+
+
+def gh_field_sets_labels(field):
+    """Whether a gh api -f or -F `key=value` field sets `labels` (or `labels[]`), or has a key computed at run time."""
+    key = field.value.partition("=")[0]
+    return (field.dynamic and bool(re.search(r"[$`]", key))) or key.strip().lower().startswith("labels")
 
 
 # The shell variables a kill operand can name the shell itself ($$) or its parent, the Claude Code session ($PPID) by.
@@ -2539,6 +2655,12 @@ def decide(cmd, cwd):
             return (f"agent-guard scheduler rule: {listed(findings.schedules)} schedules a command to run later, "
                     f"outside the session, which a session Triphammer started never does (`crontab -l` stays "
                     f"allowed).")
+        if findings.label_removals:
+            return (f"agent-guard needs-owner rule: {listed(findings.label_removals)} may take `needs-owner` off an "
+                    f"issue or pull request, which a session Triphammer started never does: the label stops work for "
+                    f"the owner, and only someone other than the App lifts it. Leave the label in place, comment on "
+                    f"the issue what you need from the owner, and end. Adding labels and removing other labels by "
+                    f"name stay allowed.")
     if findings.kills:
         name, pattern = findings.kills[0]
         effect = "kills that shell (exit code 144)" if name == "pkill" else "lists that shell as well"
