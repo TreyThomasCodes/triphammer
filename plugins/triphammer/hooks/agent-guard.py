@@ -155,8 +155,9 @@
 #               the label. Adding labels, removing other labels by name and reading stay allowed. Not covered: gh api
 #               graphql (removeLabelsFromLabelable, clearLabelsFromLabelable, updateIssue), an endpoint the command
 #               builds at run time beyond its owner, repository, number or label parts (gh api -X DELETE "$url"), gh
-#               aliases and extensions, a gh subcommand computed at run time, and any other client of the API (curl
-#               with a token, a script, an interpreter).
+#               aliases and extensions, a gh subcommand computed at run time, a gh whose leading word is computed at
+#               run time (gh "$X" issue edit 7 --remove-label needs-owner, with $X expanding to --repo=o/r), and any
+#               other client of the API (curl with a token, a script, an interpreter).
 #
 # These rules judge only the paths and keys a command names: the caches dotnet, npm or npx playwright write, git's
 # own writes for a commit, a fetch, a worktree or an init (git -C ~ init), and every other write a program the
