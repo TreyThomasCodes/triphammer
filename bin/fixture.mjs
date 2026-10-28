@@ -265,7 +265,8 @@ export function checkoutSetup(t, files = {}, config = {}) {
   const settings = {REPO: 'Example-Owner/example-project', CHECKOUT: checkout, APP_AUTHOR: 'app/example-agents',
     STATE_DIR: join(root, 'state/ticket-runner')};
   writeConfig(configFile, {...settings, ...config});
-  const env = {...gitEnv, TRIPHAMMER_CONFIG: configFile, STATUS_RESTART: `echo restarted >> '${restarts}'`,
+  // XDG_STATE_HOME keeps the shared directory, and the stop file update-checkout may create, inside the test's root.
+  const env = {...gitEnv, TRIPHAMMER_CONFIG: configFile, XDG_STATE_HOME: join(root, 'state'), STATUS_RESTART: `echo restarted >> '${restarts}'`,
     DEMO_GALLERY_RESTART: `echo restarted >> '${galleryRestarts}'`};
   return {
     root, checkout, env, configFile, publish,

@@ -598,8 +598,18 @@ that is another repository:
   `systemctl --user restart triphammer-status.service`.
 - When the fast-forward changed `bin/demo-gallery` or `bin/config.sh`, it runs
   `systemctl --user try-restart 'demo-gallery@*.service'`, which restarts every running gallery and starts none.
-- A failure (a fetch that cannot reach GitHub, a failed restart) is logged and the tick carries on; a failed restart
-  does not stop the other one.
+- After a fast-forward, before any restart, it checks that every tracked file holds what the new commit holds. It
+  reads the commit into a fresh index of its own and runs `git status --porcelain` against it, so git compares each
+  file's content rather than trusting the stat data the checkout's index recorded. That catches a file written after the
+  checkout and a planted loose object, whose id names the commit's blob but which holds other content. An untracked
+  file counts too. When anything differs, or the check itself fails, it creates the shared `stop` file (Several
+  projects), logs the checkout and each path that differs, restarts nothing and exits 3; the tick ends there, updates
+  no other checkout and does not re-execute the runner, and every project's runner and merge queue stay paused. The
+  owner then inspects the checkout (`git status`, `git diff`, `git fsck --full`, which reports a planted object as a
+  hash-path mismatch), removes the bad objects or reclones, checks that `git status --porcelain` is empty, and removes the
+  `stop` file.
+- Any other failure (a fetch that cannot reach GitHub, a failed restart) is logged and the tick carries on; a failed
+  restart does not stop the other one.
 - `ticket-runner --plan` never updates the checkout.
 
 Bash reads a script while it runs it, so a pull that rewrites `ticket-runner` must not change the run in progress. The
