@@ -283,7 +283,11 @@ and only these paths writable:
 - what Claude Code writes in the home directory: `~/.claude` (or `$CLAUDE_CONFIG_DIR`) and `~/.local/state/claude`, but
   not the parts that would change later sessions, `settings*.json`, `CLAUDE.md`, `agents`, `commands`, `skills`,
   `hooks` and `plugins` (apart from `plugins/data`, where plugin hooks keep their data), which stay read-only;
-- the caches commands fill: `~/.cache`, `~/.npm` and `~/.nuget`;
+- the caches commands fill: `~/.cache`, `~/.npm`, `~/.nuget` and NuGet's `~/.local/share/NuGet` (or
+  `$XDG_DATA_HOME/NuGet`), where `dotnet restore` keeps its HTTP, v3 and plugins caches, and `$NUGET_PACKAGES`,
+  `$NUGET_HTTP_CACHE_PATH` and `$NUGET_PLUGINS_CACHE_PATH` when they are set; `session-sandbox` creates each of these
+  NuGet directories when it is missing. NuGet's user configs in `~/.nuget`, `NuGet/NuGet.Config` and `config`, stay
+  read-only, as they can point later restores at other package sources;
 - the plugin hooks' own files: `text-lint.py`'s humanizer records and `agent-guard.py`'s `guard-overrides.log`;
 - what the upkeep audits write through `local-audit --model codex` (and `security-review --full-area`, which runs
   it): `~/.local/state/local-audit`, where it counts Codex runs, but not its `codex-settings`, which stays read-only;
@@ -304,8 +308,8 @@ while the runner still sees the session's and its brake stops them. The network 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
 covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
-the machine; a protected `~/.claude`, `~/.codex` or `local-audit` part that does not exist when the session starts,
-or is a symlink, such as a `~/.codex/AGENTS.md` the machine does not have; and what a writable path above lets a later
+the machine; a protected `~/.claude`, `~/.codex`, `local-audit` or NuGet part that does not exist when the session
+starts, or is a symlink, such as a `~/.codex/AGENTS.md` or `~/.nuget/NuGet/NuGet.Config` the machine does not have; and what a writable path above lets a later
 session read, such as a cache or Codex's databases.
 
 Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without

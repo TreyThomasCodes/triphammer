@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {git, gitEnv, here} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
@@ -12,9 +12,9 @@ const skip = userns ? false : 'bwrap is missing or cannot create a user namespac
 // A rig outside /tmp, which the limit leaves writable: in the repository, which this test may write in a session too.
 // It holds a bare origin, a main checkout cloned from it with a worktree `.worktrees/issue-1` on ticket/1, a separate
 // Triphammer checkout holding this branch's session-sandbox, and a home directory with a Claude Code directory whose
-// settings.json and skills are there, a Codex directory with its config.toml and rules, and local-audit's
-// codex-settings. `inside` runs a shell command under the limit in the worktree, as the runner
-// does, and returns its exit status and output.
+// settings.json and skills are there, a Codex directory with its config.toml and rules, local-audit's
+// codex-settings, and NuGet's NuGet.Config. `inside` runs a shell command under the limit in the worktree, as the
+// runner does, with `env` added to its environment, and returns its exit status and output.
 function sandboxRig(t) {
   const root = mkdtempSync(join(here, '..', '.session-sandbox-test-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
@@ -41,10 +41,13 @@ function sandboxRig(t) {
   writeFileSync(join(home, '.codex/config.toml'), '');
   mkdirSync(join(home, '.local/state/local-audit'), {recursive: true});
   writeFileSync(join(home, '.local/state/local-audit/codex-settings'), 'weekly_cap=1\n');
-  const {TMPDIR, XDG_STATE_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, ...env} = gitEnv;
-  const inside = command => {
+  mkdirSync(join(home, '.nuget/NuGet'), {recursive: true});
+  writeFileSync(join(home, '.nuget/NuGet/NuGet.Config'), '<configuration />\n');
+  const {TMPDIR, XDG_STATE_HOME, XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
+    NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, ...env} = gitEnv;
+  const inside = (command, extra = {}) => {
     const result = spawnSync(join(triphammer, 'bin/session-sandbox'), [worktree, 'sh', '-c', command],
-      {cwd: worktree, env: {...env, HOME: home}, encoding: 'utf8'});
+      {cwd: worktree, env: {...env, HOME: home, ...extra}, encoding: 'utf8'});
     return {status: result.status, output: result.stdout + result.stderr};
   };
   return {root, main, triphammer, home, worktree, inside};
@@ -64,6 +67,7 @@ test('under the limit, the main checkout, Triphammer\'s checkout and the home di
     "Codex's config.toml": join(r.home, '.codex/config.toml'),
     "a file in Codex's rules": join(r.home, '.codex/rules/planted.rules'),
     "local-audit's codex-settings": join(r.home, '.local/state/local-audit/codex-settings'),
+    "NuGet's NuGet.Config": join(r.home, '.nuget/NuGet/NuGet.Config'),
   };
   for (const [what, path] of Object.entries(targets)) {
     const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
@@ -93,8 +97,11 @@ echo override >> '${r.home}/.local/state/triphammer/guard-overrides.log'
 echo 1 > '${r.home}/.local/state/local-audit/codex-runs.new'
 mv '${r.home}/.local/state/local-audit/codex-runs.new' '${r.home}/.local/state/local-audit/codex-runs'
 echo state > '${r.home}/.codex/state_5.sqlite'
-mkdir -p '${r.home}/.codex/sessions' && echo session > '${r.home}/.codex/sessions/s.jsonl'`);
+mkdir -p '${r.home}/.codex/sessions' && echo session > '${r.home}/.codex/sessions/s.jsonl'
+mkdir -p '${r.home}/.nuget/packages/p' && echo package > '${r.home}/.nuget/packages/p/p.nupkg'
+mkdir -p '${r.home}/.local/share/NuGet/http-cache' && echo index > '${r.home}/.local/share/NuGet/http-cache/vuln_index.dat-new'`);
   assert.equal(status, 0, output);
+  assert.equal(readFileSync(join(r.home, '.local/share/NuGet/http-cache/vuln_index.dat-new'), 'utf8'), 'index\n');
   assert.equal(git(r.worktree, 'log', '-1', '--format=%s'), 'work');
   assert.equal(git(r.main, 'rev-parse', 'ticket/1'), git(r.worktree, 'rev-parse', 'HEAD'), "the commit is in the main checkout's .git");
   assert.equal(readFileSync(join(scratch, 'file'), 'utf8'), 'tmp\n');
@@ -103,6 +110,25 @@ mkdir -p '${r.home}/.codex/sessions' && echo session > '${r.home}/.codex/session
   assert.equal(readFileSync(join(r.home, '.local/state/local-audit/codex-runs'), 'utf8'), '1\n');
   assert.equal(readFileSync(join(r.home, '.codex/state_5.sqlite'), 'utf8'), 'state\n');
   assert.equal(readFileSync(join(r.home, '.codex/sessions/s.jsonl'), 'utf8'), 'session\n');
+});
+
+test('under the limit, the NuGet caches that XDG_DATA_HOME and the NUGET_* variables name are created and writable', {skip}, t => {
+  const r = sandboxRig(t);
+  const paths = {
+    XDG_DATA_HOME: join(r.root, 'data'),
+    NUGET_PACKAGES: join(r.root, 'nuget/packages'),
+    NUGET_HTTP_CACHE_PATH: join(r.root, 'nuget/http-cache'),
+    NUGET_PLUGINS_CACHE_PATH: join(r.root, 'nuget/plugins-cache'),
+  };
+  const files = [join(paths.XDG_DATA_HOME, 'NuGet/v3-cache'), paths.NUGET_PACKAGES, paths.NUGET_HTTP_CACHE_PATH,
+    paths.NUGET_PLUGINS_CACHE_PATH].map(dir => join(dir, 'file'));
+  const {status, output} = r.inside(files.map(file => `mkdir -p '${dirname(file)}' && echo nuget > '${file}'`).join('\n'),
+    paths);
+  assert.equal(status, 0, output);
+  for (const file of files) assert.equal(readFileSync(file, 'utf8'), 'nuget\n', file);
+  const {status: elsewhere, output: why} = r.inside(`echo planted > '${join(r.root, 'nuget/outside')}'`, paths);
+  assert.notEqual(elsewhere, 0, 'the directory around the NuGet caches was written');
+  assert.match(why, /Read-only file system/);
 });
 
 test('a Codex directory without a config.toml gets an empty one, read-only under the limit', {skip}, t => {
