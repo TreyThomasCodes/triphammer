@@ -7,14 +7,14 @@ import {tmpdir} from 'node:os';
 import {join, relative} from 'node:path';
 import {
   guard, python, inTriphammerSession, run, decide, repo, pyEdit, machineHome, configuredSetup, validConf,
-  assertNotLifted,
+  assertNoOverrideHint, assertNotLifted,
 } from './agent-guard-fixture.mjs';
 
 function assertPersistenceDenied(reason, command) {
   assert.ok(reason, `expected a deny: ${command}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /the owner does that/);
-  assert.doesNotMatch(reason, /# guard-override/);
+  assertNoOverrideHint(reason, command);
 }
 
 // README install text whose heredoc ends at an EOF line inside it, so bash runs the rest, apostrophe and all.
@@ -151,7 +151,7 @@ function assertUnreadableDenied(reason, command) {
   assert.ok(reason, `expected a deny: ${command}`);
   assert.match(reason, /persistence rule/);
   assert.match(reason, /cannot read/);
-  assert.doesNotMatch(reason, /# guard-override/);
+  assertNoOverrideHint(reason, command);
 }
 
 for (const command of [

@@ -242,7 +242,6 @@ import sys
 import time
 
 OVERRIDE = re.compile(r"#\s*guard-override:[ \t]*(\S[^\n]*)")
-OVERRIDE_HINT = "rerun it with `# guard-override: <reason>` appended"
 # The one rule the override lifts; decide() returns its refusal only when no other rule refuses the command.
 SHELL_EDIT_RULE = "agent-guard shell-edit rule"
 OVERRIDE_LOG = "guard-overrides.log"
@@ -2562,7 +2561,8 @@ def decide(cmd, cwd):
     if files:
         return (f"{SHELL_EDIT_RULE}: this command rewrites git-tracked {listed(files, 5, ', ')} through the "
                 f"shell. Make the change with Edit (or Write for a new or wholly replaced file), so the language "
-                f"server's diagnostics arrive after it. If the shell really is the right tool, {OVERRIDE_HINT}.")
+                f"server's diagnostics arrive after it. If the shell really is the right tool, rerun it with "
+                f"`# guard-override: <reason>` appended.")
     return None
 
 
