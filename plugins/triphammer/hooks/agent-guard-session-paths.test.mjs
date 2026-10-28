@@ -6,13 +6,13 @@ import {existsSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync} fro
 import {join} from 'node:path';
 import {
   guard, python, inTriphammerSession, run, decide, fileInputs, decideFile, repo, fileTools, triphammerSession,
-  assertOutsideDenied, assertRuleDenied, outsidePlaces, shellWriters,
+  assertOutsideDenied, assertRuleDenied, assertNoOverrideHint, assertNotLifted, outsidePlaces, shellWriters,
 } from './agent-guard-fixture.mjs';
 
 // A command whose brace expansions alone take the hook far past its 10-second timeout without a deadline.
 const slowCommand = `touch ${'src/{1..4999} '.repeat(80)}`;
 
-test('in a Triphammer session a command the hook cannot finish judging in time is refused, naming the override', t => {
+test('in a Triphammer session a command the hook cannot finish judging in time is refused, even with the override', t => {
   const s = triphammerSession(t);
   if (!s) return;
   const env = {...s.env, TRIPHAMMER_GUARD_PARSE_SECONDS: '0.3'};
@@ -21,8 +21,9 @@ test('in a Triphammer session a command the hook cannot finish judging in time i
   assert.ok(Date.now() - started < 3000, 'the hook stops at its deadline');
   assert.ok(reason, 'expected a deny');
   assert.match(reason, /ran out of time \(0\.3 seconds\)/);
-  assert.match(reason, /# guard-override: <reason>/);
-  assert.equal(decide(`${slowCommand} # guard-override: the owner asked for it`, s.worktree, {env}), null);
+  assertNoOverrideHint(reason);
+  assertRuleDenied(decide(`${slowCommand} # guard-override: the owner asked for it`, s.worktree, {env}),
+    'worktree-only', 'out of time with the override token');
   assert.equal(decide('touch src/{a,b}', s.worktree, {env: {...s.env, TRIPHAMMER_GUARD_PARSE_SECONDS: 'x'}}), null,
     'a malformed value keeps the default deadline');
 });
@@ -65,7 +66,9 @@ test('in a Triphammer session the hook refuses at its deadline even on a slow pa
   assert.ok(Date.now() - started < 3000, 'the hook stops at its deadline');
   assert.ok(reason, 'expected a deny');
   assert.match(reason, /ran out of time \(0\.3 seconds\)/);
-  assert.match(reason, /# guard-override: <reason>/);
+  assertNoOverrideHint(reason);
+  assertRuleDenied(decide(`sed -i s/X/Z/ ${join(dir, 'src/x.cs')} # guard-override: x`, dir, {env}), 'worktree-only',
+    'a shell edit the hook runs out of time on, with the override token');
 });
 
 // Writes whose target the hook cannot work out before the command runs, each aimed at ~/.bashrc when it runs.
@@ -77,7 +80,7 @@ const unresolvedWrites = s => ['d=~; echo x >> $d/.bashrc', 'echo x >> $(echo ~)
   'cd ~ && pushd /tmp && popd && echo x >> .bashrc', 'dd if=src/x.cs of=$f', 'f=~/.bashrc; sed -i s/a/b/ $f',
   'cd && echo x >> .bashrc', 'cd - && echo x >> .bashrc'];
 
-test('in a Triphammer session a write target the hook cannot work out is refused, naming the override', t => {
+test('in a Triphammer session a write target the hook cannot work out is refused, not naming the override', t => {
   const s = triphammerSession(t);
   if (!s) return;
   for (const command of unresolvedWrites(s)) {
@@ -258,14 +261,22 @@ test('in a Triphammer session a cd behind a wrapper or script runner leaves the 
   }
 });
 
-test('every triphammer-session refusal is allowed with the override token appended', t => {
+test('the override token lifts no triphammer-session rule', t => {
   const s = triphammerSession(t);
   if (!s) return;
-  for (const command of ['echo x > ~/.bashrc', 'git config core.hooksPath /x', 'crontab -e',
-    'd=~; echo x >> $d/.bashrc', `ln ${join(s.home, '.bashrc')} src/rc`, 'git config interactive.diffFilter x']) {
-    assert.ok(decide(command, s.worktree, {env: s.env}), command);
-    assert.equal(decide(`${command}  # guard-override: the owner asked for it`, s.worktree, {env: s.env}), null);
+  for (const [command, rule] of [['echo x > ~/.bashrc', 'worktree-only'], ['d=~; echo x >> $d/.bashrc', 'worktree-only'],
+    [`ln ${join(s.home, '.bashrc')} src/rc`, 'worktree-only'], ['git config core.hooksPath /x', 'git-command'],
+    ['git config interactive.diffFilter x', 'git-command'], ['git -c core.pager=x log', 'git-command'],
+    ['git remote add up https://example.invalid/x', 'git-command'], ['crontab -e', 'scheduler'],
+    ['echo x | at now', 'scheduler'], ['systemd-run --user x', 'scheduler']]) {
+    assertRuleDenied(decide(command, s.worktree, {env: s.env}), rule, command);
+    assertNotLifted(command, rule, s.worktree, {env: s.env});
   }
+  const linked = join(s.worktree, 'src', 'linked.cs');
+  writeFileSync(join(s.elsewhere, 'target'), 'x\n');
+  linkSync(join(s.elsewhere, 'target'), linked);
+  assertNotLifted(`echo x >> ${linked}`, 'worktree-only', s.worktree, {env: s.env});
+  assert.match(decide(`echo x >> ${linked}`, s.worktree, {env: s.env}), /more than one hard link/);
 });
 
 test('outside a Triphammer session the same writes, git settings and schedules keep today\'s rules', t => {
