@@ -294,6 +294,14 @@ test('a run on a cleanup issue files none of its session\'s proposals and logs w
   assert.match(r.log(), /ticket #7: run 1 ended without progress \(exit 0\)/);
 });
 
+test('a run on an issue labelled Cleanup, in another case, files none of its session\'s proposals', t => {
+  const r = ticketSetup(t, [issue(7, {labels: ['Cleanup']})]);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n`);
+  r.tick();
+  assert.deepEqual(r.creates(), []);
+  assert.match(r.log(), /ticket #7: issue #7 is labelled cleanup; filing none of the session's 1 proposals/);
+});
+
 test('a repair of a pull request that closes a cleanup issue files none of its session\'s proposals', t => {
   const r = repairSetup(t);
   r.gh.json('issues.json', [issue(30, {labels: ['cleanup']})]);
@@ -1419,8 +1427,8 @@ const issueView = number => `issue view ${number} -R ${repo} --json labels,state
 // The issue events API (who added a label) and the GraphQL query for the issue's last ClosedEvent (what closed it), in
 // the shapes GitHub returns; the App acts as example-agents[bot].
 const eventsCall = number => `api repos/${repo}/issues/${number}/events`;
-const labelledBy = login => [{event: 'labeled', label: {name: 'agent-working'}, actor: {login: 'example-agents[bot]', type: 'Bot'}},
-  {event: 'labeled', label: {name: 'needs-owner'}, actor: {login, type: login.endsWith('[bot]') ? 'Bot' : 'User'}}];
+const labelledBy = (login, name = 'needs-owner') => [{event: 'labeled', label: {name: 'agent-working'}, actor: {login: 'example-agents[bot]', type: 'Bot'}},
+  {event: 'labeled', label: {name}, actor: {login, type: login.endsWith('[bot]') ? 'Bot' : 'User'}}];
 const closerCall = number => `api graphql -F number=${number} -f owner=Example-Owner -f name=example-project -f query=`;
 const closedBy = closer => ({data: {repository: {issue: {timelineItems: {nodes: closer === undefined ? [] : [{closer}]}}}}});
 
@@ -1472,6 +1480,38 @@ test("each of the owner's brakes ends a ticket session in progress, uncounted, a
     assert.ok(took < 20000, `${reason}: the run ended in ${took} ms, not after the session's 30 s`);
     assertBrakeEnded(r, reason);
   }
+});
+
+test("the owner's Hold and Needs-Owner, in another case, end a ticket session in progress", t => {
+  for (const [file, labels, reason] of [['brake-hold.json', ['Hold'], 'issue #7 is labelled hold'],
+    ['brake-needs-owner.json', ['Needs-Owner'], 'issue #7 is labelled needs-owner']]) {
+    const r = ticketSetup(t);
+    r.gh.json(file, issue(7, {labels: ['agent-working', ...labels]}));
+    r.gh.json('by-owner.json', labelledBy('Example-Owner', 'Needs-Owner'));
+    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file}, [eventsCall(7)]: {file: 'by-owner.json'}})});
+    assertBrakeEnded(r, reason);
+  }
+});
+
+test('Hold, in another case, on the pull request a repair works on ends the repair session in progress', t => {
+  const r = repairSetup(t);
+  r.gh.json('brake-pr.json', {labels: [{name: 'Hold'}]});
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  assertBrakeEnded(r, 'pull request #40 is labelled hold', {kind: 'repair', number: 40, labelled: 'pr edit 40'});
+});
+
+test('a session that labels its own issue Needs-Owner, in another case, ends as a run that progressed', t => {
+  const r = ticketSetup(t, [issue(7)]);
+  r.gh.json('self-needs-owner.json', issue(7, {labels: ['agent-working', 'Needs-Owner']}));
+  r.gh.json('by-app.json', labelledBy('example-agents[bot]', 'Needs-Owner'));
+  const routes = {[issueView(7)]: {file: 'self-needs-owner.json'}, [eventsCall(7)]: {file: 'by-app.json'},
+    [`issue view 7 -R ${repo} --json state,labels`]: {file: 'self-needs-owner.json'}};
+  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});
+  const log = r.log();
+  assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'who added Needs-Owner was looked up');
+  assert.doesNotMatch(log, /owner's brake|could not look up/);
+  assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'Needs-Owner is progress');
 });
 
 test('hold on the pull request a repair works on ends the repair session in progress', t => {

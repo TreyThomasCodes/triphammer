@@ -39,7 +39,7 @@ def pr_info(number):
     info = json.loads(raw)
     return {
         "title": info["title"], "url": info["url"], "state": info["state"], "merged_at": info["mergedAt"],
-        "needs_owner": any(label["name"] == "needs-owner" for label in info["labels"]),
+        "needs_owner": any(label["name"].lower() == "needs-owner" for label in info["labels"]),
     }
 
 

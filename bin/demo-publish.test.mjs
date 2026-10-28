@@ -11,9 +11,11 @@ const url = 'http://demos.example.invalid:8888/';
 // This branch's demo-publish (or the copy `script`) run with `args`, against a fake `gh` in `root` that knows PR #999,
 // and a Triphammer config (root/triphammer.conf, written unless it exists) naming acme/widgets with the demo module on, its
 // gallery in `root/data/demos` and served at `url`, with `env` over it.
-function runIn(root, args, env = {}, script = join(here, 'demo-publish')) {
+// `labels` are the names the pull request carries.
+function runIn(root, args, env = {}, script = join(here, 'demo-publish'), labels = []) {
   const gh = fakeGh(join(root, 'gh'), {
-    'pr view 999': {stdout: JSON.stringify({title: 'Demo', url: 'https://example.invalid/999', state: 'OPEN', labels: [], mergedAt: null})},
+    'pr view 999': {stdout: JSON.stringify({title: 'Demo', url: 'https://example.invalid/999', state: 'OPEN',
+      labels: labels.map(name => ({name})), mergedAt: null})},
   });
   const config = join(root, 'triphammer.conf');
   if (!existsSync(config)) {
@@ -76,6 +78,19 @@ function demoPublishWith(t, args) {
   const result = runIn(root, args(name => join(root, name)));
   return {...result, published: existsSync(join(root, 'data', 'demos', 'pr-999'))};
 }
+
+test('a pull request labelled needs-owner in any case is shown as waiting on the owner', t => {
+  for (const [labels, waiting] of [[[], false], [['needs-owner'], true], [['Needs-Owner'], true]]) {
+    const root = mkdtempSync(join(tmpdir(), 'demo-publish-'));
+    t.after(() => rmSync(root, {recursive: true, force: true}));
+    mkdirSync(join(root, 'one'));
+    writeFileSync(join(root, 'one', 'shot.png'), 'png bytes');
+    const r = runIn(root, ['999', '--summary', 'Shows the demo', join(root, 'one')], {}, undefined, labels);
+    assert.equal(r.status, 0, r.stderr);
+    const meta = JSON.parse(readFileSync(join(root, 'data', 'demos', 'pr-999', 'meta.json'), 'utf8'));
+    assert.equal(meta.needs_owner, waiting, JSON.stringify(labels));
+  }
+});
 
 test('a real screenshot in the folder is published', t => {
   const r = demoPublish(t, {'shot.png': 'png bytes'});

@@ -198,6 +198,15 @@ test('a pull request labelled hold is neither merged nor updated', t => {
   assert.match(r.log(), /o\/a#2: labelled hold; not merging or updating it/);
 });
 
+test('a pull request labelled Hold, in another case, is neither merged nor updated', t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [pr(1, 'CLEAN', ['Hold']), pr(2, 'BEHIND', ['HOLD']), pr(3, 'CLEAN')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#3 ${pr(3).headRefOid}`]);
+  assert.match(r.log(), /o\/a#1: labelled hold; not merging or updating it/);
+  assert.match(r.log(), /o\/a#2: labelled hold; not merging or updating it/);
+});
+
 test('while ticket-runner holds its lock with no current file, branches are not updated but clean pull requests still merge', async t => {
   const {r} = await busySetup(t);
   r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'BEHIND')]);

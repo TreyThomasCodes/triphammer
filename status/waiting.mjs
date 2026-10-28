@@ -57,6 +57,12 @@ function time(value) {
 export const labelNames = item => (Array.isArray(item?.labels) ? item.labels.map((/** @type {any} */ label) => String(label?.name ?? '')) : []);
 
 /**
+ * The item's label names in lower case, for comparing: GitHub matches label names in any case, and so does the runner.
+ * @param {any} item
+ */
+const lowerLabelNames = item => labelNames(item).map(name => name.toLowerCase());
+
+/**
  * When the item got the label, from the label events; when they are unknown, when the item was created.
  * @param {any} item
  * @param {string} label
@@ -117,7 +123,7 @@ const earliest = times => {
  */
 function prRow(pr, labelTimes, ownerApprovals, defaultBranch) {
   const number = Number(pr.number);
-  const labels = labelNames(pr);
+  const labels = lowerLabelNames(pr);
   const notes = [];
   /** @type {(number | null)[]} */
   const since = [];
@@ -187,7 +193,7 @@ export function waitingRows(input) {
   /** @type {WaitingRow[]} */
   const rows = [];
   for (const issue of input.issues) {
-    const labels = labelNames(issue);
+    const labels = lowerLabelNames(issue);
     const number = Number(issue.number);
     const title = issue.title == null ? null : String(issue.title);
     if (labels.includes('stop-agents')) {
@@ -226,8 +232,8 @@ export function parseLabelEvents(result) {
     const times = new Map();
     for (const event of node?.timelineItems?.nodes ?? []) {
       const at = time(event?.createdAt);
-      const name = event?.label?.name;
-      if (at !== null && typeof name === 'string' && at > (times.get(name) ?? 0)) times.set(name, at);
+      const name = typeof event?.label?.name === 'string' ? event.label.name.toLowerCase() : null;
+      if (at !== null && name !== null && at > (times.get(name) ?? 0)) times.set(name, at);
     }
     labelTimes.set(Number(node?.number), times);
   }
