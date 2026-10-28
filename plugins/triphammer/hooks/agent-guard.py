@@ -22,7 +22,7 @@
 #               any repository, so this rule needs no git and no project file. eval's arguments are judged as the
 #               command they make (a cd in them moves the rest of the command); an eval whose text is computed when
 #               it runs (a variable, a command substitution), a source or . of a file the same command writes, a
-#               bash, sh, zsh or dash given such a file as its script (`bash s.sh`, not -c text or -s), and a source
+#               bash, sh, zsh, dash or ash given such a file as its script (`bash s.sh`, not -c text or -s), and a source
 #               or . of a process substitution are refused, since the hook cannot read what they run; the write and
 #               the run match when they name the same path, spelled with ~, $HOME, ${HOME} or relative to the
 #               directory. Reads (cat, ls, readlink, systemctl --user status, show, list-timers, is-enabled) stay
@@ -53,7 +53,9 @@
 #               repository whose project file is missing or unreadable, leaves the field out, or gives anything but
 #               a list of relative paths inside the repository gets no shell-edit rule.
 #   self-kill   pkill -f or pgrep -f with a pattern not written in '[p]attern' form, which also matches the command
-#               line of the shell running it; kill of $$, $PPID or the PID of the session or one of its parents.
+#               line of the shell running it; kill of $$, $PPID or the PID of the session or one of its parents. In
+#               a Triphammer session, xargs running kill, pkill, pgrep or killall, whose targets its input gives.
+#               killall written out, and kill by a PID read at run time other than $$ and $PPID, are not covered.
 #
 # A session Triphammer started is one whose environment holds $TRIPHAMMER_SESSION, the path of the run's worktree
 # (bin/ticket-runner sets it for ticket and repair runs, local-audit for the Qwen audit; subagents inherit it).
@@ -111,9 +113,11 @@
 #               process stops whatever else is still running a second later.
 #   git-command  every git config write, whatever the key and scope (a set, --add, --replace-all, --unset,
 #               --unset-all, --rename-section, --remove-section, --edit, a --file, and the set, unset, rename-section,
-#               remove-section and edit subcommands), since a worktree's configuration is its repository's (or
-#               ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename, remove, rm, set-head,
-#               set-branches and set-url; git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
+#               remove-section and edit subcommands, and xargs running git config or -I's string as git's
+#               subcommand, a git -c value or an assignment before git), since a worktree's configuration
+#               is its repository's (or ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename,
+#               remove, rm, set-head, set-branches and set-url (and xargs running git remote, or git with no
+#               subcommand); git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
 #               setting, for one command, a key whose value git runs as a command or reads as more settings:
 #               core.hooksPath, core.fsmonitor, core.sshCommand, core.editor, core.pager, core.askpass, core.gitProxy,
 #               core.alternateRefsCommand, sequence.editor, pager.*, credential.helper and credential.*.helper,
@@ -138,15 +142,46 @@
 #   scheduler   crontab other than -l, at, batch and systemd-run.
 #
 # These rules judge only the paths and keys a command names: the caches dotnet, npm or npx playwright write, git's
-# own writes for a commit, a fetch or a worktree, and every other write a program the session runs makes are not
-# covered, nor are writes by interpreters (python -c, node -e) beyond the script writes above, nor symlinks that a
+# own writes for a commit, a fetch, a worktree or an init (git -C ~ init), and every other write a program the
+# session runs makes are not covered, nor are writes by interpreters (python -c, node -e, perl -e, ruby -e) beyond
+# the script writes above, nor symlinks that a
 # program other than ln and cp makes (tar -x, unzip, git checkout of a tracked symlink, an interpreter) and the
 # same command then writes through, nor a cd made by an alias or function the session's shell already defines (its
 # profile snapshot), nor a directory change by any wrapper other than those above, nor git settings that reach the
 # repository some other way (a .gitmodules URL that git submodule sync copies). Outside a Triphammer session
 # a path computed at run time ($VAR/x) counts only by the directory its literal part ends in; in one the
-# worktree-only rule refuses it, as above. Every round of review has found another shell feature this parser misses;
-# those go to an OS-level limit on what a Triphammer session may write (#732), with this hook as a second line.
+# worktree-only rule refuses it, as above.
+#
+# Every rule judges a command behind the wrappers sudo, env, command, builtin, nohup, exec, time, nice, stdbuf,
+# timeout, setsid, flock, ionice, taskset, chrt and busybox (whose applet is the command), past their options and
+# the operand timeout, flock, taskset and chrt take before it. flock FILE -c LINE, script -c LINE and su or runuser
+# -c LINE (or --command, and su's --session-command) have LINE judged as a sh -c script, and runuser -u USER the
+# command after it. Without a LINE (or runuser -u's command) each runs a shell that reads its script from stdin,
+# which script passes through, so it is judged as sh is: its piped or here-string input as its script. flock's lock
+# file counts as a file it creates, and script's typescript (its operand, else ./typescript) and its -I, -O, -B and
+# -T log files, and GNU time's -o or --output file (also abbreviated, --out), as files they write; su's login shell (su -, -l) starts in another directory, so the worktree-only
+# rule loses track of the directory for its LINE. xargs's command is judged as
+# written, and in a Triphammer session xargs running one of the worktree-only rule's writers (tee, cp, rm, touch and
+# the rest), sed or perl with or without -i (GNU sed and perl read an -i the input adds after the script), a shell (also through script, su, runuser or flock -c), eval, source, python or
+# node with an inline script, git config, git remote or git with no subcommand written (which the input can make a
+# write), git with -I's string in a word up to and including its subcommand (the subcommand, a git -c value, an
+# environment assignment such as GIT_CONFIG_PARAMETERS or a wrapper's word before git), a wrapper whose own file operand (flock's lock file, script's typescript, time's -o file) the input can give, xargs
+# itself (GNU xargs gives its command /dev/null as stdin, so an inner xargs runs the outer one's words as its command),
+# kill, pkill, pgrep or killall (see the self-kill rule), or a command
+# the input gives (xargs sudo, xargs timeout 5, xargs -I{} {}: the written words end before the command), appended
+# or in place of -I's string, is refused, since the hook cannot read the operands xargs adds from its input, nor
+# what -I's string becomes inside a script. So is xargs with a long option not named in full (--max-a, --delim),
+# which may take the next word and move the command. Not
+# covered: any other wrapper (doas, chroot, unshare, nsenter, watch, parallel, find -exec and the like), wrapper
+# options the hook does not list (an abbreviated long option other than xargs's and time's), the timing file script
+# writes (-tFILE or --timing=FILE; the hook reads the rest of -t's group as that file, as script does),
+# busybox --install,
+# a LINE run by a shell that reads it differently from sh (su -s), the units xargs adds to a systemctl --user verb
+# from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
+# push, fetch, pull, checkout or switch from its input (xargs git branch with -u or --set-upstream-to in the input,
+# which keeps git branch --merged | xargs git branch -d allowed), and outside a Triphammer session the operands
+# xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
+# and every round of review has found another shell feature this parser misses: this hook is the only line.
 #
 # `# guard-override: <reason>` anywhere in the command lets that one Bash command through. A file tool has no command
 # text to carry it, so its refusals have no override: the owner makes that change. Heredoc bodies, here-strings
@@ -234,11 +269,11 @@ OPENERS = {"(", "$(", "<("}
 PIPES = {"|", "|&"}
 WRITE_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
 OTHER_REDIRECTS = {"<", "<<<", "<&"}
-WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "exec", "time", "nice", "stdbuf", "timeout"}
+WRAPPERS = {"sudo", "env", "command", "builtin", "nohup", "exec", "time", "nice", "stdbuf", "timeout", "setsid",
+            "flock", "ionice", "taskset", "chrt", "busybox"}
 # Wrapper options that take a value: short letters (value attached, `-n10`, or the next word) and long names (value
-# after `=`, `--user=someone`, or the next word). timeout also takes its duration as the first operand.
+# after `=`, `--user=someone`, or the next word).
 WRAPPER_VALUE_OPTIONS = {
-    # sudo's -h is help, or a host only when attached (`-hhost`), so it never takes the next word.
     "sudo": ("aCcDgpRrTtUu", {"--auth-type", "--login-class", "--close-from", "--chdir", "--group", "--host",
                                "--prompt", "--chroot", "--role", "--type", "--command-timeout", "--other-user",
                                "--user"}),
@@ -249,7 +284,43 @@ WRAPPER_VALUE_OPTIONS = {
     "nice": ("n", {"--adjustment"}),
     "stdbuf": ("eio", {"--error", "--input", "--output"}),
     "timeout": ("ks", {"--kill-after", "--signal"}),
+    "flock": ("Ew", {"--conflict-exit-code", "--timeout", "--wait"}),
+    "ionice": ("cnpPu", {"--class", "--classdata", "--pid", "--pgid", "--uid"}),
+    "chrt": ("TPD", {"--sched-runtime", "--sched-period", "--sched-deadline"}),
 }
+# Every long option of the wrappers whose abbreviations the hook resolves, as getopt does an unambiguous prefix:
+# GNU time's, since its --output names a file it writes.
+WRAPPER_LONG_OPTIONS = {"time": {"--append", "--format", "--output", "--portability", "--quiet", "--verbose",
+                                 "--help", "--version"}}
+# Wrappers that take an operand before the command, matching the pattern: timeout's duration, flock's lock file,
+# taskset's mask or CPU list and chrt's priority (a number, so a chrt that leaves it out still has its command read).
+ANY_OPERAND = re.compile(r".*", re.DOTALL)
+WRAPPER_OPERANDS = {"timeout": ANY_OPERAND, "flock": ANY_OPERAND, "taskset": ANY_OPERAND, "chrt": re.compile(r"\d+")}
+# Commands that run a shell command line given by an option, as `sh -c` does, and their options that take a value:
+# script (-c or --command; its log files and typescript operand are writes) and su and runuser (-c, --command or
+# --session-command; their remaining operands after the user go to the shell).
+SCRIPT_RUNNERS = {
+    "script": ("cEIOBTmo", {"--command", "--echo", "--log-in", "--log-out", "--log-io", "--log-timing",
+                           "--logging-format", "--output-limit"}),
+    "su": ("cgGsw", {"--command", "--session-command", "--group", "--supp-group", "--shell",
+                     "--whitelist-environment"}),
+}
+# runuser -u USER runs its operands as the command itself, without a shell.
+SCRIPT_RUNNERS["runuser"] = ("cgGswu", SCRIPT_RUNNERS["su"][1] | {"--user"})
+# The wrappers' and script runners' short letters whose optional value can only be attached: like a letter that takes
+# a value, each ends its group, the rest of the word being its value, but never takes the next word. sudo's -h is
+# help, or a host when attached (`-hhost`); script's -t is its timing file (`-tc` writes timing to ./c).
+OPTIONAL_VALUE_LETTERS = {"sudo": "h", "script": "t"}
+# xargs's short options that take the rest of their group or else the next word as their value, its short options
+# whose optional value can only be the rest of their group, and its long options that take the next word. GNU xargs
+# also takes any unambiguous prefix of a long option, so in a session one not named in full is refused.
+# The text of a word standing for one xargs appends from its input; no command line holds a NUL.
+XARGS_INPUT = "\0xargs-input\0"
+XARGS_VALUE_OPTIONS = ("adEILnPs", "eil", {"--arg-file", "--delimiter", "--max-args", "--max-procs", "--max-chars",
+                                           "--process-slot-var"})
+XARGS_LONG_OPTIONS = XARGS_VALUE_OPTIONS[2] | {"--null", "--eof", "--replace", "--max-lines", "--interactive",
+                                               "--no-run-if-empty", "--open-tty", "--show-limits", "--exit",
+                                               "--verbose", "--help", "--version"}
 # python's short options without a value, which can stand before c in one group (`-Ic`); c's script is the rest of
 # the group or the next word.
 PYTHON_SCRIPT_FLAG = re.compile(r"-[bBdEhiIOPqRsSuvVx]*c(.*)", re.DOTALL)
@@ -261,7 +332,7 @@ SHELL_OPTION_GROUP = re.compile(r"[-+][a-zA-Z]+")
 ENV_SPLIT_FLAG = re.compile(r"-[iv0]*S(.*)|--split-string(?:=(.*))?", re.DOTALL)
 # Reserved words that can stand before a command name: `if true; then sed -i ...; fi` runs sed.
 RESERVED = {"if", "then", "else", "elif", "do", "while", "until", "{", "!", "coproc"}
-SHELLS = {"bash", "sh", "zsh", "dash"}
+SHELLS = {"bash", "sh", "zsh", "dash", "ash"}
 PYTHON = re.compile(r"python(?:3(?:\.\d+)?)?$")
 # Script writes the hook recognises, each with the written path as a string literal or a plain variable. A path
 # the script builds any other way is not followed, so the script is allowed.
@@ -280,6 +351,10 @@ SCRIPT_WRITES = [
 # `name = 'path'`, `name = Path('path')`, `const name = "path"`: a plain variable bound to a path literal.
 SCRIPT_BINDING = re.compile(rf"(?:\b(?:const|let|var)\s+)?\b([A-Za-z_]\w*)\s*=(?!=)\s*{_PATH}\s*\)?\s*(?:[;\n#]|$)",
                             re.MULTILINE)
+# The commands xargs may not run in a Triphammer session, since the self-kill rule judges them by the operands its input
+# gives (killall, which the rule does not judge, names its targets the same way).
+XARGS_SIGNALLERS = {"kill", "pkill", "pgrep", "killall"}
+
 # pgrep/pkill options that take a value as the next word.
 KILL_VALUE_OPTIONS = {"-d", "-g", "-G", "-P", "-s", "-t", "-u", "-U", "-F", "-r", "--delimiter", "--pgroup",
                       "--group", "--parent", "--session", "--terminal", "--euid", "--uid", "--pidfile", "--runstates",
@@ -588,14 +663,20 @@ def pipelines(tokens):
     yield pipeline, None
 
 
-def strip_prefix(words, chdirs=None):
+def strip_prefix(words, chdirs=None, writes=None):
     """Drops variable assignments and wrappers such as sudo or env before the command name. With chdirs, appends to
     it each directory a wrapper option changes to (env -C or --chdir, sudo -D or --chdir), as a word, or None for one
-    whose value is missing."""
-    i, wrapper, duration = 0, None, False
+    whose value is missing or that the hook does not follow (su's login). With writes, appends to it each file a
+    wrapper creates or writes itself (flock's lock file, script's typescript and logs, time's -o file). A wrapper that runs a shell
+    command line (flock FILE -c, script -c, su -c) gives the words `sh -c <line>` in its place."""
+    i, wrapper, operand, locked = 0, None, None, False
     while i < len(words):
         value = words[i].value
         name = os.path.basename(value)
+        if locked and value in ("-c", "--command"):
+            # `flock FILE -c LINE`: flock runs the line with $SHELL -c.
+            return shell_words(words[i + 1:i + 2])
+        locked = False
         if wrapper == "env" and ENV_SPLIT_FLAG.fullmatch(value):
             words, i = split_string(words, i), 0  # env keeps reading options from the split words
         elif wrapper is not None and value == "--":
@@ -605,20 +686,75 @@ def strip_prefix(words, chdirs=None):
             i += 1  # env reads a bare - as -i, even after --; no command is named -
         elif wrapper is not None and value.startswith("-"):
             taken = takes_value(wrapper, value)
+            following = words[i + 1] if taken and i + 1 < len(words) else None
             if chdirs is not None and chdir_option(wrapper, value):
-                chdirs.append(chdir_value(wrapper, words[i], words[i + 1] if taken and i + 1 < len(words) else None))
+                chdirs.append(chdir_value(wrapper, words[i], following))
+            output = time_output(words[i], following) if wrapper == "time" and writes is not None else None
+            if output is not None:
+                writes.append((output, True))  # GNU time writes its report to -o's file
             i += 1 + taken
-        elif duration:
-            duration = False
+        elif operand is not None and operand[1].fullmatch(value):
+            if operand[0] == "flock":
+                locked = True
+                if writes is not None and i + 1 < len(words):
+                    # flock creates its lock file (a lone number with no command after it is a descriptor), and
+                    # leaves its content alone.
+                    writes.append((words[i], False))
+            operand = None
             i += 1
         elif re.match(r"[A-Za-z_]\w*=", value) or value in RESERVED:
             i += 1
+        elif name in SCRIPT_RUNNERS:
+            return script_runner_words(name, words[i + 1:], chdirs, writes)
         elif name in WRAPPERS:
-            wrapper, duration = name, name == "timeout"
+            wrapper = name
+            operand = (name, WRAPPER_OPERANDS[name]) if name in WRAPPER_OPERANDS else None
             i += 1
         else:
             break
     return words[i:]
+
+
+def literal_word(text):
+    word = Word()
+    word.value = text
+    return word
+
+
+def shell_words(line):
+    """`sh -c` and the command line in the list line (none when it is missing), standing for a wrapper that runs the
+    line with a shell."""
+    return [literal_word("sh"), literal_word("-c")] + list(line)
+
+
+def script_runner_words(name, args, chdirs, writes):
+    """The words a script, su or runuser with the arguments args stands for: `sh -c <line>` and, for su, the operands
+    after the user, which go to the shell; just `sh` and those operands when no line is given, since that shell reads
+    its script from stdin (script passes its own stdin through), which a pipeline or here-string can supply. Appends
+    script's typescript and log files to writes, as (word, True) pairs, and a None to chdirs for su's login shell,
+    which starts in the user's home directory."""
+    files, options = split_options(args, *SCRIPT_RUNNERS[name], OPTIONAL_VALUE_LETTERS.get(name, ""))
+    given = {option for option, _ in options}
+    line = [value for option, value in options
+            if option in ("-c", "--command", "--session-command") and value is not None][-1:]
+    shell = shell_words(line) if line else [literal_word("sh")]
+    if name == "script":
+        if writes is not None:
+            logs = [value for option, value in options if option in ("-I", "-O", "-B", "-T", "--log-in",
+                                                                      "--log-out", "--log-io", "--log-timing")]
+            if not files and not given & {"-I", "-O", "-B", "--log-in", "--log-out", "--log-io"}:
+                files = [literal_word("typescript")]  # script's default log, in the current directory
+            writes += [(value, True) for value in logs + files[:1] if value is not None]
+        return shell
+    login = bool(files) and files[0].value == "-"
+    if login or given & {"-l", "--login"}:
+        if chdirs is not None:
+            chdirs.append(None)
+        files = files[1:] if login else files
+    if given & {"-u", "--user"}:
+        # runuser -u USER COMMAND runs it directly, and without one a shell
+        return shell + files if line else files or shell
+    return shell + files[1:]  # the operands after the user go to the shell
 
 
 def split_string(words, i):
@@ -646,8 +782,8 @@ def chdir_option(wrapper, option):
     if option.startswith("--"):
         name = option.partition("=")[0]
         return len(name) > 2 and long.startswith(name)
-    short = WRAPPER_VALUE_OPTIONS[wrapper][0]
-    return next((c for c in option[1:] if c in short), None) == letter
+    end = value_letter(option, WRAPPER_VALUE_OPTIONS[wrapper][0], OPTIONAL_VALUE_LETTERS.get(wrapper, ""))
+    return end is not None and option[end] == letter
 
 
 def chdir_value(wrapper, word, following):
@@ -661,16 +797,36 @@ def chdir_value(wrapper, word, following):
     return derived(word, rest) if rest else following
 
 
+def long_name(wrapper, option):
+    """The long option an option word names, without its `=value`: the one it abbreviates when the wrapper's long
+    options are known (WRAPPER_LONG_OPTIONS) and it is a prefix of exactly one, else as written."""
+    name = option.partition("=")[0]
+    matches = [full for full in WRAPPER_LONG_OPTIONS.get(wrapper, ()) if full.startswith(name)]
+    return matches[0] if len(matches) == 1 and len(name) > 2 else name
+
+
+def time_output(word, following):
+    """The file GNU time's option word writes its report to (-o or --output, abbreviated or not): attached, or the
+    following word; None for any other option."""
+    option = word.value
+    if option.startswith("--"):
+        if long_name("time", option) != "--output":
+            return None
+        _, eq, attached = option.partition("=")
+        return derived(word, attached) if eq else following
+    end = value_letter(option, WRAPPER_VALUE_OPTIONS["time"][0])
+    if end is None or option[end] == "f":
+        return None
+    return derived(word, option[end + 1:]) if option[end + 1:] else following
+
+
 def takes_value(wrapper, option):
     """Whether the wrapper's option word leaves its value to the next word."""
     short, long = WRAPPER_VALUE_OPTIONS.get(wrapper, ("", set()))
     if option.startswith("--"):
-        return option in long or "=" not in option and chdir_option(wrapper, option)
-    letters = option[1:]
-    for j, letter in enumerate(letters):
-        if letter in short:
-            return j == len(letters) - 1
-    return False
+        return "=" not in option and (long_name(wrapper, option) in long or chdir_option(wrapper, option))
+    end = value_letter(option, short, OPTIONAL_VALUE_LETTERS.get(wrapper, ""))
+    return end == len(option) - 1 and option[end] in short
 
 
 def absolute(text, cwd):
@@ -693,6 +849,7 @@ class Findings:
         self.edits = []  # (absolute path, cwd whose repository it is checked against, whether every file under it)
         self.kills = []  # (command name, pattern)
         self.signals = []  # (kill operand, the process it names)
+        self.xargs_signals = []  # kill, pkill, pgrep or killall run by xargs in a Triphammer session
         self.persistence_paths = []  # (absolute path written, linked or removed, whether every file under it)
         self.units = []  # systemctl --user invocations that change Triphammer's units, as their text
         self.written = set()  # every path written, linked or removed, as its spellings (see spellings)
@@ -1006,8 +1163,15 @@ def session_cd(words, arg, cwd, findings):
     return logical if real is not None and physical(logical) == real and "P" not in options else None
 
 
-# Wrappers that run a command in another process, where a cd does not move the shell.
-FOREIGN_WRAPPERS = WRAPPERS - {"command", "builtin", "time"} | {"coproc"}
+# Wrappers and script runners that run a command in another process, where a cd does not move the shell: every
+# one strip_prefix drops but the three that run it in this shell.
+FOREIGN_WRAPPERS = (WRAPPERS | set(SCRIPT_RUNNERS)) - {"command", "builtin", "time"} | {"coproc"}
+
+
+def runs_elsewhere(whole, words):
+    """Whether the words strip_prefix dropped from whole before words name a wrapper or script runner that runs the
+    command in another process (`env cd`, `runuser -u USER cd`, `nohup eval 'cd x'`)."""
+    return bool({os.path.basename(w.value) for w in prefix_of(whole, words)} & FOREIGN_WRAPPERS)
 
 
 # What analyze returns for a command that leaves the shell's directory as it was.
@@ -1029,8 +1193,8 @@ def prefix_of(whole, words):
 
 def analyze(command, cwd, findings, depth):
     """Judges one command; returns the directory it leaves the shell in (an eval that runs cd), else SAME_CWD."""
-    chdirs = []
-    words = strip_prefix(command.words, chdirs)
+    chdirs, wrapper_writes = [], []
+    words = strip_prefix(command.words, chdirs, wrapper_writes)
     for target in command.write_targets:
         findings.edit(target, cwd)  # the shell opens a redirection before a wrapper changes the directory
     if triphammer_sessions():
@@ -1040,6 +1204,11 @@ def analyze(command, cwd, findings, depth):
             # `env -C $(...) touch x`: the words after the substitution read as another command, which the
             # directory moves too, so the hook loses track of the directory from here on.
             findings.cwd_lost = True
+    for target, content in wrapper_writes:
+        if content:
+            findings.edit(target, cwd)
+        else:
+            findings.change(target, cwd, content=False)
     assignments = prefix_of(command.words, words)
     if words and os.path.basename(words[0].value) in EXPORTERS:
         assignments = assignments + words[1:]
@@ -1079,8 +1248,7 @@ def analyze(command, cwd, findings, depth):
                 return v
         return None
 
-    in_place = (name in ("sed", "gsed") and any(re.match(r"-[nErsuz]*i|--in-place", v) for v in values)
-                or name == "perl" and any(re.match(r"-(?![MmIeEx])\w*i", v) for v in values))
+    in_place = in_place_edit(name, values)
     if command.substituted and (in_place or name in SUBSTITUTION_WRITERS):
         findings.unresolved.append(f"the operands of `{name}` beside a command substitution")
     if triphammer_sessions() and (in_place or name in SUBSTITUTION_WRITERS):
@@ -1128,6 +1296,8 @@ def analyze(command, cwd, findings, depth):
         if len(args) == 2:
             findings.hard_link(args[0], cwd)
             findings.hard_link(args[1], cwd, source=False)
+    elif name == "xargs":
+        analyze_xargs(command, args, cwd, findings, depth)
     elif name == "systemctl":
         analyze_systemctl(args, findings)
     elif name == "git":
@@ -1154,12 +1324,136 @@ def analyze(command, cwd, findings, depth):
         if script is None or depth >= MAX_DEPTH:
             findings.unreadable.append(f"`eval {' '.join(values)}`, whose text is computed when it runs")
         elif script:
-            return walk(script, cwd, findings, depth + 1)  # eval runs in this shell, so its cd counts
+            after = walk(script, cwd, findings, depth + 1)
+            if not (triphammer_sessions() and runs_elsewhere(command.words, words)):
+                return after  # eval runs in this shell, so its cd counts
+            if after != cwd:
+                return None  # `nohup eval 'cd x'`: another process, so where the shell is is not known
     elif name in ("source", "."):
         files = [w for w in args if w.value != "--"]
         if files:
             findings.runs(name, files[0], cwd)
     return SAME_CWD
+
+
+def in_place_edit(name, values):
+    """Whether sed or perl with the argument values edits its files in place."""
+    return (name in ("sed", "gsed") and any(re.match(r"-[nErsuz]*i|--in-place", v) for v in values)
+            or name == "perl" and any(re.match(r"-(?![MmIeEx])\w*i", v) for v in values))
+
+
+def analyze_xargs(command, args, cwd, findings, depth):
+    """xargs runs the command after its options (echo when none) with words read from its input appended, or put in
+    place of -I's string: the command is judged as written, and in a Triphammer session a writer the worktree-only
+    rule reads, sed or perl (whose -i the input can add), a shell, eval, source or an interpreter's inline script, git
+    config or git remote (or git with no subcommand, or -I's string up to its subcommand), a wrapper whose file operand (flock's lock file, script's typescript, time's -o file) the input can give, xargs
+    itself, kill, pkill, pgrep or killall, or a command the input gives after the written wrappers, is refused, since the hook cannot read the operands xargs
+    gives it."""
+    i, replace, unknown = 0, None, []
+    short, optional, long = XARGS_VALUE_OPTIONS
+    while i < len(args):
+        v = args[i].value
+        if v == "--":
+            i += 1
+            break
+        if not v.startswith("-") or v == "-":
+            break
+        if v.startswith("--"):
+            name, eq, attached = v.partition("=")
+            if name == "--replace":
+                replace = attached if eq else "{}"
+            elif name not in XARGS_LONG_OPTIONS:
+                unknown.append(name)
+            i += 1 + (v in long)
+        else:
+            # The first letter that takes a value ends the group: the rest of the word is its value, and only a letter
+            # in short that ends the word takes the next word instead.
+            letter = value_letter(v, short, optional)
+            taken = letter == len(v) - 1 and v[letter] in short
+            if letter is not None and v[letter] == "I":
+                replace = args[i + 1].value if taken and i + 1 < len(args) else v[letter + 1:] or None
+            elif letter is not None and v[letter] == "i":
+                replace = v[letter + 1:] or "{}"
+            i += 1 + taken
+    inner = Command()
+    inner.words, inner.pipeline_input, inner.substituted = args[i:], command.pipeline_input, command.substituted
+    analyze(inner, cwd, findings, depth)
+    if not triphammer_sessions():
+        return
+    if unknown:
+        # An abbreviation (--max-a, --delim) may take the next word as its value, so the command may start later.
+        findings.unresolved.append(f"the command xargs runs after `{unknown[0]}`, which may abbreviate an option "
+                                   f"that takes the next word")
+        return
+    if not inner.words:
+        return  # xargs runs echo
+    # A word standing for the first one xargs appends from its input. When the wrappers take it (as an option's value
+    # or their operand) or it is the command, the input gives the command after them, and with it any further wrapper,
+    # option or file, however many words that takes: refused, as a command -I's string stands for is.
+    writes = []
+    words = strip_prefix(inner.words + [literal_word(XARGS_INPUT)], writes=writes)
+    for target, _ in writes:
+        if XARGS_INPUT in target.value or replace and replace in target.value:
+            findings.unresolved.append("the file a wrapper writes, which the input of xargs can give")
+    if not words or words[0].value == XARGS_INPUT or replace and replace in words[0].value:
+        findings.unresolved.append("the command xargs runs, which its input can give")
+        return
+    words = [w for w in words if w.value != XARGS_INPUT]
+    name = os.path.basename(words[0].value)
+    if name == "xargs":
+        # GNU xargs gives its command /dev/null as stdin, so an inner xargs with no written command runs the words the
+        # outer one appends as its command.
+        findings.unresolved.append("the command a nested xargs runs, which the input of the outer one can give")
+    elif name in XARGS_SIGNALLERS:
+        # The self-kill rule judges these by their operands, which the input gives.
+        findings.xargs_signals.append(name)
+    elif name in ("sed", "gsed", "perl") or name in SUBSTITUTION_WRITERS:
+        # GNU sed and perl read -i after the script too, and the input can give it (or -I's string stand for it).
+        findings.unresolved.append(f"the operands `{name}` gets from the input of xargs")
+    elif name in SHELLS or name in ("eval", "source", ".") or inline_script(name, [w.value for w in words[1:]]):
+        # xargs also puts its input in place of -I's string inside the script, which the hook read as written.
+        findings.unresolved.append(f"the script `{name}` runs with words from the input of xargs")
+    elif name == "git" and (git_subcommand(words[1:]) in (None, "config", "remote") or replace and any(
+            replace in w.value for w in git_prefix(inner.words, words))):
+        # The input's words turn a read (git config KEY, git remote) into a write, or name the subcommand itself; -I's
+        # string can also stand for the subcommand, a -c value or an environment assignment before git.
+        findings.git_settings.append(f"`{' '.join(w.value for w in words)}` with words from the input of xargs, "
+                                     f"which can write git configuration")
+
+
+def git_subcommand(args):
+    """The subcommand after git's own options, or None when there is none."""
+    i = git_subcommand_index(args)
+    return None if i is None else args[i].value
+
+
+def git_subcommand_index(args):
+    """The index of the subcommand after git's own options, or None when there is none."""
+    i = 0
+    while i < len(args):
+        v = args[i].value
+        if v in GIT_VALUE_OPTIONS:
+            i += 2
+        elif v.startswith("-"):
+            i += 1
+        else:
+            return i
+    return None
+
+
+def git_prefix(written, words):
+    """The words of a command xargs runs up to and including git's subcommand: the written words strip_prefix dropped
+    (wrappers, their options and variable assignments), then git and its own options. words is what strip_prefix left,
+    starting with git."""
+    sub = git_subcommand_index(words[1:])
+    kept = {id(w) for w in words}
+    return [w for w in written if id(w) not in kept] + words[:len(words) if sub is None else sub + 2]
+
+
+def inline_script(name, values):
+    """Whether python or node with the argument values runs a script given on its command line."""
+    return (PYTHON.match(name) is not None and any(PYTHON_SCRIPT_FLAG.fullmatch(v) for v in values)
+            or name in ("node", "nodejs") and any(v in ("-e", "--eval", "-p", "--print") for v in values))
 
 
 def path_changer_files(name, args):
@@ -1181,10 +1475,17 @@ def derived(word, text):
     return part
 
 
-def split_options(args, short_values, long_values):
+def value_letter(group, short_values, optional_values=""):
+    """The index in a short-option group word (`-qtc`) of its first letter that takes a value, which ends the group:
+    one in short_values (the rest of the group, or else the next word) or in optional_values (only the rest of the
+    group, possibly empty). None when no letter does."""
+    return next((j for j, c in enumerate(group[1:], 1) if c in short_values or c in optional_values), None)
+
+
+def split_options(args, short_values, long_values, optional_values=""):
     """The operand words and the (option, value word or None) pairs of a GNU-style argument list. A short letter in
-    short_values takes the rest of its group or the next word; a long name in long_values takes the next word unless
-    its value is attached with `=`."""
+    short_values takes the rest of its group or the next word, one in optional_values only the rest of its group; a
+    long name in long_values takes the next word unless its value is attached with `=`."""
     files, options, i, ended = [], [], 0, False
     while i < len(args):
         w, i = args[i], i + 1
@@ -1203,16 +1504,15 @@ def split_options(args, short_values, long_values):
             else:
                 options.append((name, None))
         else:
-            for j, letter in enumerate(v[1:]):
-                if letter in short_values:
-                    rest, value = v[j + 2:], None
-                    if rest:
-                        value = derived(w, rest)
-                    elif i < len(args):
-                        value, i = args[i], i + 1
-                    options.append(("-" + letter, value))
-                    break
-                options.append(("-" + letter, None))
+            end = value_letter(v, short_values, optional_values)
+            options += [("-" + letter, None) for letter in v[1:end]]
+            if end is not None:
+                rest, value = v[end + 1:], None
+                if rest:
+                    value = derived(w, rest)
+                elif v[end] in short_values and i < len(args):
+                    value, i = args[i], i + 1
+                options.append(("-" + v[end], value))
     return files, options
 
 
@@ -1733,8 +2033,8 @@ def walk(cmd, cwd, findings, depth=0):
         words = strip_prefix(pipeline[0].words) if len(pipeline) == 1 else []
         last = strip_prefix(pipeline[-1].words)
         if words and words[0].value in ("cd", "pushd"):
-            if in_session and {os.path.basename(w.value) for w in prefix_of(pipeline[0].words, words)} & FOREIGN_WRAPPERS:
-                cwd = None  # `env cd`, `coproc cd`: another process, so where the shell is is not known
+            if in_session and runs_elsewhere(pipeline[0].words, words):
+                cwd = None  # `env cd`, `runuser -u USER cd`: another process, so where the shell is is not known
             else:
                 cwd = resolve_cd(words, cwd, findings)
         elif words and words[0].value == "popd" and in_session:
@@ -2236,6 +2536,13 @@ def decide(cmd, cwd):
         return (f"agent-guard self-kill rule: `kill {target}` signals {process}, so it ends the command or the "
                 f"session itself. Kill the PID you saved when you started the process (`kill \"$pid\"`), or use "
                 f"`kill %1` for a job this shell started. If the target really is right, {OVERRIDE_HINT}.")
+    if findings.xargs_signals:
+        name = findings.xargs_signals[0]
+        return (f"agent-guard self-kill rule: `xargs {name}` takes what it signals or lists from its input, which the "
+                f"hook cannot read, so it may end the command or the session itself. Write the target out: kill the "
+                f"PID you saved when you started the process (`kill \"$pid\"`), use `kill %1` for a job this shell "
+                f"started, or give pkill -f or pgrep -f a pattern in bracket form (`'[p]attern'`). If it really is "
+                f"safe, {OVERRIDE_HINT}.")
     files = tracked_edits(findings.edits)
     if files:
         return (f"agent-guard shell-edit rule: this command rewrites git-tracked {listed(files, 5, ', ')} through the "

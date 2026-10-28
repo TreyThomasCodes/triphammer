@@ -47,6 +47,20 @@ const persistenceRefused = [
   'cd ~/.local/bin && unlink merge-when-ready',
   'cd "$HOME/.config/systemd/user" && rm ticket-runner.timer',
   `bash -c 'rm ~/.local/bin/ticket-runner'`,
+  'setsid rm ~/.local/bin/ticket-runner',
+  'flock /tmp/l rm ~/.local/bin/ticket-runner',
+  `flock /tmp/l -c 'rm ~/.local/bin/ticket-runner'`,
+  'flock ~/.local/state/ticket-runner/stop true',
+  'ionice -c3 rm ~/.local/bin/ticket-runner',
+  'taskset -c 0-3 rm ~/.local/bin/ticket-runner',
+  'chrt -o 0 rm ~/.local/bin/ticket-runner',
+  'busybox rm ~/.local/bin/ticket-runner',
+  `script -qc 'rm ~/.local/bin/ticket-runner' /dev/null`,
+  'script -q -c true ~/.local/state/ticket-runner/stop',
+  'script -q -m advanced -c true ~/.local/state/ticket-runner/stop',
+  `su -c 'rm ~/.local/bin/ticket-runner'`,
+  `sudo su - someone --command='rm ~/.local/bin/ticket-runner'`,
+  'echo x | xargs rm ~/.local/bin/ticket-runner',
 ];
 
 for (const command of persistenceRefused) {

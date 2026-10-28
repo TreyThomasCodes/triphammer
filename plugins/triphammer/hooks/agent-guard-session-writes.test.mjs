@@ -81,3 +81,208 @@ test('in a Triphammer session a shell write inside its worktree, $TMPDIR, /tmp, 
     assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
   }
 });
+
+test('in a Triphammer session a write behind setsid, flock, ionice, taskset, chrt, stdbuf, busybox, script -c, su -c or xargs is refused',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['setsid touch ~/.bashrc', 'setsid -f -w touch ~/.bashrc', 'flock /tmp/l touch ~/.bashrc',
+      'flock -w 5 -E 3 /tmp/l touch ~/.bashrc', `flock /tmp/l -c 'touch ~/.bashrc'`,
+      `flock -n /tmp/l --command 'touch ~/.bashrc'`, 'flock ~/.bashrc true', 'ionice -c3 touch ~/.bashrc',
+      'ionice -c 2 -n 7 -t touch ~/.bashrc', 'taskset 1 touch ~/.bashrc', 'taskset -c 0-3 touch ~/.bashrc',
+      'chrt -o 0 touch ~/.bashrc', 'chrt --sched-runtime 5 -d 0 touch ~/.bashrc', 'stdbuf -oL touch ~/.bashrc',
+      'busybox touch ~/.bashrc', 'nice -n 5 setsid busybox rm ~/.profile', `script -qc "touch ~/.bashrc" /dev/null`,
+      `script --command='touch ~/.bashrc' -q /dev/null`, 'script -qc true ~/.bashrc', 'script -q -O ~/.bashrc -c true',
+      'script -q -m advanced -c true ~/.bashrc',
+      `su -c "touch ~/.bashrc"`, `su - someone -c 'touch ~/.bashrc'`, `sudo runuser -u someone -- rm ~/.x`,
+      `runuser someone --command='rm ~/.x'`, `su -l -c 'touch .bashrc'`, 'echo ~/.bashrc | xargs rm', 'xargs touch <<< ~/.bashrc',
+      'echo x | xargs -I{} touch {}', 'echo x | xargs -n 1 -P 2 sed -i s/a/b/', 'echo x | xargs sudo tee',
+      'echo x | xargs -- xargs cp src/x.cs', 'echo x | busybox xargs rm', 'echo x | xargs touch ~/.bashrc',
+      'nohup touch ~/.bashrc', 'time -p touch ~/.bashrc']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+  });
+
+test('in a Triphammer session script, su or runuser without -c have the shell script on their stdin read, as sh does',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of [`echo 'touch ~/.bashrc' | script -q /dev/null`, `script -q /dev/null <<< 'touch ~/.bashrc'`,
+      `echo 'touch ~/.bashrc' | su someone`, `echo 'touch ~/.bashrc' | su - someone`,
+      `echo 'touch ~/.bashrc' | sudo su`, `echo 'touch ~/.bashrc' | runuser someone`,
+      `printf 'touch ~/.bashrc' | script`]) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['sh', 'script -q /dev/null', 'su someone', 'sudo su',
+      `echo 'touch build/x' | script -q /dev/null`, `echo 'touch build/x' | su someone`]) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session xargs running a shell, eval, source or an inline script is refused, since -I puts its input in the script',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of [`echo ~/.bashrc | xargs -I{} sh -c 'echo x > {}'`,
+      `echo ~/.bashrc | xargs -I{} sh -c 'touch {}'`, `echo ~/.bashrc | xargs -I{} bash -c 'touch {}'`,
+      `echo ~/.bashrc | xargs -i sh -c 'echo x > {}'`, `echo ~/.bashrc | xargs -I{} sudo sh -c 'echo > {}'`,
+      `echo ~/.bashrc | xargs --replace sh -c 'touch {}'`, `echo ~/.bashrc | xargs -I{} ash -c 'touch {}'`,
+      `echo x | xargs -I{} flock /tmp/l -c 'touch {}'`, `echo x | xargs -I{} script -qc 'touch {}' /dev/null`,
+      `echo x | xargs -I{} su someone -c 'touch {}'`, `echo x | xargs -I{} runuser someone -c 'touch {}'`,
+      `echo x | xargs eval`, `echo x | xargs source`, `echo ~/.bashrc | xargs -I{} python3 -c "open('{}', 'w')"`,
+      `echo ~/.bashrc | xargs -I{} node -e "require('fs').writeFileSync('{}', '')"`]) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of [`echo x | xargs python3 tools/check.py`, `echo x | xargs node tools/check.mjs`]) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session xargs running a wrapper whose file operand its input can give is refused', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of ['echo ~/.newfile | xargs -I{} flock -n {} true', 'echo ~/.newfile true | xargs flock',
+    'echo ~/.newfile true | xargs flock -n', 'echo "5 ~/.newfile true" | xargs flock -w',
+    'echo ~/.newfile | xargs -I X flock X true', 'echo ~/.newfile | xargs -IX flock X true',
+    'echo ~/.newfile | xargs -i flock {} true', 'echo ~/.newfile | xargs --replace=@ flock @.lock true',
+    'echo ~/.newfile | xargs nice flock']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['echo a | xargs flock build/lock echo', 'echo a | xargs -I{} flock build/lock echo {}']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
+test('in a Triphammer session xargs running wrappers whose command its input gives is refused, however long the input',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo "flock ~/.newfile true" | xargs sudo', 'echo "flock ~/.newfile true" | xargs env',
+      'echo "1 flock -w 5 ~/.newfile true" | xargs timeout', 'echo "KILL 1 flock ~/.newfile true" | xargs timeout -s',
+      'echo "-n 1 -w 5 -E 3 flock -w 5 -E 3 -n ~/.newfile true" | xargs sudo nice', 'echo "rm ~/.bashrc" | xargs nohup',
+      'echo "~/.newfile true" | xargs taskset -c', 'echo flock | xargs -I{} {} ~/.newfile true',
+      'echo flock | xargs -I{} sudo {} ~/.newfile true', 'echo x | xargs env -S']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['echo a b | xargs', 'echo a | xargs sudo echo', 'echo 5 | xargs timeout 1 sleep',
+      'echo a | xargs -I{} sudo echo {}']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session the letters of an attached xargs option value are not read as options', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  // -e, -i and -l take an optional value only attached, so the rest of their group is it and the next word is the
+  // command; the other value options take the rest of their group, or the next word when nothing follows.
+  for (const command of ['echo ~/.bashrc | xargs -iP touch P', 'echo ~/.bashrc | xargs -ia touch a',
+    'echo ~/.bashrc | xargs -iX touch X', 'echo ~/.bashrc | xargs -en touch', 'echo ~/.bashrc | xargs -r -ea rm',
+    'echo ~/.bashrc | xargs -ld touch', 'echo ~/.bashrc | xargs -rn1 touch', 'echo ~/.bashrc | xargs -rn 1 touch',
+    'echo ~/.bashrc | xargs -0P2 rm', 'echo ~/.bashrc | xargs -rd, rm', 'echo ~/.bashrc | xargs -rd , rm',
+    'echo ~/.bashrc | xargs -rEeof rm', 'echo ~/.bashrc | xargs -rs 99 rm', 'echo ~/.bashrc | xargs -rIP touch P',
+    'echo ~/.bashrc | xargs -rL 1 rm', 'xargs -a list rm', 'xargs -ralist rm']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+});
+
+test('in a Triphammer session xargs with a long option not named in full is refused, since it may take the next word',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    // GNU xargs reads --max-a as --max-args and --delim as --delimiter, each taking the next word, so the command is
+    // touch or rm with the input's words, not the word after the option.
+    for (const command of ['echo ~/.bashrc | xargs --max-a 1 touch', 'echo ~/.bashrc | xargs --delim , touch',
+      'echo ~/.bashrc | xargs --max-p 2 rm', 'echo ~/.bashrc | xargs --process-slot 2 rm',
+      'echo ~/.bashrc | xargs --max-a=1 touch']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['echo src/x.cs | xargs --max-args 1 wc -l', 'echo src/x.cs | xargs --max-args=1 wc -l',
+      'echo src/x.cs | xargs --delimiter , --no-run-if-empty wc -l']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session xargs running sed or perl is refused, since its input can add -i after the script',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo "-i ~/.bashrc" | xargs sed s/a/b/', 'echo "-i ~/.bashrc" | xargs perl -pe s/a/b/',
+      'echo -i | xargs -I{} sed {} s/a/b/ ~/.bashrc', 'echo "-i ~/.bashrc" | xargs gsed s/a/b/']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session xargs running xargs is refused, since the outer input gives the inner command', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  // GNU xargs gives its command /dev/null as stdin, so the inner xargs runs the words the outer one appends.
+  for (const command of ['echo touch ~/.bashrc | xargs xargs', 'echo rm ~/.bashrc | xargs xargs',
+    'echo touch ~/.bashrc | xargs -r xargs -r', 'xargs xargs <<< "touch ~/.bashrc"',
+    'echo touch ~/.bashrc | xargs sudo xargs', 'echo touch ~/.bashrc | xargs xargs -n 2']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs -r wc -l']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
+test('in a Triphammer session ash -c and busybox ash -c have their script read', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of [`ash -c 'touch ~/.bashrc'`, `busybox ash -c 'touch ~/.bashrc'`]) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  assert.equal(decide(`ash -c 'touch build/x'`, s.worktree, {env: s.env}), null);
+});
+
+test('in a Triphammer session those wrappers writing inside its worktree, and xargs running a command that writes nothing, are allowed',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['setsid touch build/x', 'flock /tmp/l touch build/x', `flock /tmp/l -c 'touch build/x'`,
+      'flock build/lock true', 'ionice -c3 touch build/x', 'taskset 1 touch build/x', 'taskset -c 0-3 touch build/x',
+      'chrt -o 0 touch build/x', 'stdbuf -oL touch build/x', 'busybox touch build/x',
+      `script -qc "touch build/x" /dev/null`, 'script -q -c true build/typescript', `su -c 'touch build/x'`,
+      'xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l', 'git ls-files | xargs -0 -n 1 grep -l foo',
+      'echo x | xargs', 'echo x | xargs echo']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
+
+test('in a Triphammer session GNU time writing its -o or --output file outside the worktree is refused', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  for (const command of ['nice time -o ~/.bashrc true', 'command time -o ~/.bashrc true',
+    'env time --output=$HOME/.bashrc true', '/usr/bin/time -o ~/.bashrc true',
+    '/usr/bin/time --output=$HOME/.bashrc true', 'nice time --output ~/.bashrc true', 'nice time -ao ~/.bashrc true',
+    'nice time -a -o ~/.bashrc true', 'nice time -o~/.bashrc true', 'nice time --append --output ~/.bashrc true',
+    'nice time --out ~/.bashrc true', 'nice time --outp=$HOME/.bashrc true', 'nice time -f %e -o ~/.bashrc true',
+    'nice time --form %e -o ~/.bashrc true', 'nice time -p -v -q -o ~/.bashrc true',
+    'nice time -o /tmp/t --fo %e touch ~/.bashrc', 'echo ~/.bashrc | xargs time -o',
+    'echo ~/.bashrc | xargs -I{} nice time -o {} true']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+  }
+  for (const command of ['nice time -o build/time.txt true', '/usr/bin/time --output=/tmp/time.txt true',
+    'nice time -ao /tmp/time.txt true', 'nice time -f -o true', 'nice time -fo true',
+    'nice time --format -o true', 'nice time --form=-o true']) {
+    assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+  }
+});
+
+test('in a Triphammer session an option whose optional value can only be attached ends its group, as getopt reads it',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    // script's -t[FILE] and sudo's -h[HOST] take the rest of their group as their value, never the next word: in
+    // `script -tc FILE` the timing file is c and FILE is the typescript.
+    for (const command of ['script -tc ~/.bashrc', 'script -q -tc ~/.bashrc < /dev/null', 'script -qtc ~/.bashrc',
+      'script -tc -q ~/.bashrc', 'sudo -hhost touch ~/.bashrc', 'sudo -hDx touch ~/.bashrc']) {
+      assertOutsideDenied(decide(command, s.worktree, {env: s.env}), command);
+    }
+    for (const command of ['script -q -tc true build/ts', 'script -qt -c true build/ts', 'sudo -hhost touch build/x']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });

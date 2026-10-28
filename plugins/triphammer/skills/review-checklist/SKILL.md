@@ -68,3 +68,21 @@ A health check, brake or gate vouches for code that runs later. It must read the
 Reproduce by making the two sources differ: run the check without the run's environment, spell the login in another case, or change the file the service loads and not the one the check reads. If the check's answer does not change, it reads the wrong source.
 
 Found in: tools found on the caller's PATH, a credential helper set up after the clone, a unit read from the project's checkout, a variable the App token cannot read, a login and a repository name compared case-sensitively, a doctor checking the App token for a different account than the runner uses.
+
+## 11. Option tables that miss a value-taking option
+
+A parser that skips a command's options before judging its operands needs the list of options that take a value. An option missing from that list makes the parser read its value as the first operand, so the real operand (a file the command writes, a program it runs) is never judged.
+
+- For each table of value-taking options (short letters and long names), compare it with the installed tool's `--help` or man page. Is every option that takes a value there, in both spellings?
+- Is there a test that puts a value-taking option before the operand, and does the command still get checked?
+
+Found in: a guard hook's `script` entry, which lacked `-m` (`--logging-format`), so `script -q -m advanced -c true ~/.bashrc` read `advanced` as the file and let the write through.
+
+## 12. Commands that xargs extends
+
+A rule that judges the command after `xargs` as written misses the operands xargs appends from its input or puts in place of `-I`'s string. Those operands can turn a read into a write (`git config KEY` becomes a set) or supply a wrapper's own file operand (`flock`'s lock file), which the rule then never judges.
+
+- For each command or wrapper a rule judges by its operands, are `echo PATH | xargs COMMAND` and `xargs -I{} COMMAND {}` still checked, or refused when the hook cannot tell?
+- Does a command that only reads with the operands written become a write once more operands follow?
+
+Found in: a guard hook's xargs handling, which allowed `echo /tmp/h | xargs git config core.hooksPath` and `echo ~/.newfile true | xargs flock`.

@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {run, decide} from './agent-guard-fixture.mjs';
+import {run, decide, triphammerSession} from './agent-guard-fixture.mjs';
 
 // The self-kill rule.
 
@@ -80,6 +80,23 @@ for (const [command, process_] of selfKills) {
     assert.match(reason, /# guard-override: <reason>/);
   });
 }
+
+test('in a Triphammer session xargs running kill, pkill, pgrep or killall is refused, since its input gives the target',
+  t => {
+    const s = triphammerSession(t);
+    if (!s) return;
+    for (const command of ['echo $PPID | xargs kill', 'echo $$ | xargs kill -9', 'echo $PPID | xargs -I{} kill {}',
+      'echo ticket-runner | xargs pkill -f', 'echo ticket-runner | xargs pgrep -f', 'echo bash | xargs killall',
+      'echo $PPID | xargs sudo kill', 'echo $PPID | xargs /bin/kill', 'echo $PPID | xargs busybox kill']) {
+      const reason = decide(command, s.worktree, {env: s.env});
+      assert.match(reason ?? '', /self-kill rule/, command);
+      assert.match(reason, /kill "\$pid"/, command);
+      assert.match(reason, /# guard-override: <reason>/, command);
+    }
+    for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l']) {
+      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
+    }
+  });
 
 test('kill of a PID outside the session, a job or a saved PID is allowed', () => {
   const other = spawnSync('true').pid;  // exited, and never a parent of the hook
