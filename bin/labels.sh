@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # The labels Triphammer reads and sets in a project's repository: the owner's brakes and priority, which the owner
-# applies, and the runner's `agent-working`. `ticket-runner --labels` (which `triphammer add` runs as the service
+# applies, the runner's `agent-working`, and `cleanup`, which the runner puts on the issues it files from a session's
+# proposals. `ticket-runner --labels` (which `triphammer add` runs as the service
 # user) creates the ones the repository lacks with create_labels, and the doctor reports them with missing_labels, so
 # both read this one list. bin/README.md ("Labels") lists what each does. `upkeep` is not here: ticket-runner makes
 # sure it exists when it opens an upkeep issue.
@@ -13,6 +14,7 @@ triphammer_labels=(
   "next|0E8A16|Triphammer takes this ready issue before the other ready issues"
   "agent-working|FBCA04|Triphammer is working on this; don't update or push to it"
   "light|C2E0C6|Triphammer's first run on this issue uses the Sonnet builder; later runs use Opus"
+  "cleanup|BFD4F2|A cleanup a session proposed; Triphammer takes it after the other ready issues"
 )
 
 # missing_labels <owner/repo>: prints the name of each label of triphammer_labels the repository lacks, one per line,

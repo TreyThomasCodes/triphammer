@@ -167,8 +167,9 @@ for pr in sorted(prs, key=lambda pr: pr["number"]):
 
 in_flight = {n for pr in prs for n in closing(pr, repo)}
 cite = lambda numbers: ", ".join(f"#{d}" for d in numbers)
-# Ready issues labelled `next` first, then the rest, each lowest number first; `next` never makes an issue ready.
-for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), n)):
+# Ready issues labelled `next` first, then the rest but those labelled `cleanup` (the proposals sessions leave, which
+# ticket-runner files), then those, each lowest number first; `next` never makes an issue ready.
+for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), "cleanup" in labels(issues[n]), n)):
     if not is_open(n) or labels(issues[n]) & BRAKES:
         continue
     if not is_trusted(issues[n]):

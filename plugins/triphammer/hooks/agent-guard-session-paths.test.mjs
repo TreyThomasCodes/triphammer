@@ -98,6 +98,23 @@ test('in a Triphammer session a target under $HOME, $TMPDIR or $PWD the command 
   assertOutsideDenied(decide('echo x >> "$HOME/.bashrc"', s.worktree, {env: s.env}), '$HOME is outside');
 });
 
+test('in a Triphammer session an append to $TRIPHAMMER_PROPOSALS is worked out, and allowed only in a temporary directory', t => {
+  const s = triphammerSession(t);
+  if (!s) return;
+  const appends = ['echo \'{"title": "x"}\' >> "$TRIPHAMMER_PROPOSALS"', 'printf "%s\\n" x >> ${TRIPHAMMER_PROPOSALS}',
+    'echo x | tee -a "$TRIPHAMMER_PROPOSALS"'];
+  const inTemp = {...s.env, TRIPHAMMER_PROPOSALS: join(s.temp, 'run/proposals.jsonl')};
+  mkdirSync(join(s.temp, 'run'));
+  for (const command of appends) assert.equal(decide(command, s.worktree, {env: inTemp}), null, command);
+  const elsewhere = {...s.env, TRIPHAMMER_PROPOSALS: join(s.home, '.bashrc')};
+  for (const command of appends) assertOutsideDenied(decide(command, s.worktree, {env: elsewhere}), command);
+  for (const command of ['TRIPHAMMER_PROPOSALS=~/.bashrc; echo x >> "$TRIPHAMMER_PROPOSALS"',
+    'export TRIPHAMMER_PROPOSALS=~/.bashrc; echo x >> $TRIPHAMMER_PROPOSALS']) {
+    assertOutsideDenied(decide(command, s.worktree, {env: inTemp}), command);
+  }
+  assertOutsideDenied(decide(appends[0], s.worktree, {env: s.env}), 'without the variable');
+});
+
 test('in a Triphammer session a hard link to a file outside its worktree and temporary directories is refused', t => {
   const s = triphammerSession(t);
   if (!s) return;

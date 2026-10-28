@@ -18,7 +18,8 @@ const issue = (number, {state = 'OPEN', labels = []} = {}) =>
 // $SECURITY_FAIL is set. The fake `gh`
 // offers the issues given (issue #7 by default) and the open pull requests in pulls.json (none until a session opens
 // one), answers `issue create` with issue #90, and reports no stop-agents issue and no progress. The fake `claude`
-// session copies the runner's `current` file and the lock file and start time of the process it names, opens the pull requests in opened.json, if any, leaves a demo for PR
+// session records $TRIPHAMMER_PROPOSALS, appends proposals.jsonl, if any, to that file and removes it when
+// no-proposals exists, copies the runner's `current` file and the lock file and start time of the process it names, opens the pull requests in opened.json, if any, leaves a demo for PR
 // #77 and a folder without demo.json,
 // copies session-db.json, if any, to the containers the fake `docker` lists (as `local-db.sh up` would),
 // removes the worktree's scripts/git-hooks (as on a branch cut before the hook existed), commits once, records its
@@ -60,6 +61,10 @@ printf '%s\\n' "$@" > "$PROBE/claude-args"
 printf '%s' "$TRIPHAMMER_SESSION" > "$PROBE/triphammer-session"
 printf '%s' "$GITHUB_APP_OWNER" > "$PROBE/app-owner"
 printf '%s' "$TRIPHAMMER_OWNER" > "$PROBE/triphammer-owner"
+printf '%s' "$TRIPHAMMER_PROPOSALS" > "$PROBE/proposals-path"
+[ -s "$TRIPHAMMER_PROPOSALS" ] && echo "not empty" > "$PROBE/proposals-at-start"
+[ ! -f "$PROBE/proposals.jsonl" ] || cat "$PROBE/proposals.jsonl" >> "$TRIPHAMMER_PROPOSALS"
+[ ! -f "$PROBE/no-proposals" ] || rm -f "$TRIPHAMMER_PROPOSALS"
 cp "$XDG_STATE_HOME/ticket-runner/current" "$PROBE/current" 2>/dev/null || true
 pid="$(sed -n 's/^pid //p' "$PROBE/current" 2>/dev/null)"
 [ -z "$pid" ] || { readlink "/proc/$pid/fd/9" > "$PROBE/holder-lock"; cut -d')' -f2- "/proc/$pid/stat" | cut -d' ' -f21 > "$PROBE/holder-started"; }
@@ -153,6 +158,120 @@ test("the session runs as the plugin's orchestrator agent on Opus", t => {
   assert.equal(args[args.indexOf('--agent') + 1], 'triphammer:orchestrator');
   assert.equal(args[args.indexOf('--model') + 1], 'opus');
   assert.match(r.probe('claude-args'), /Follow the triphammer:ticket-run skill\./);
+});
+
+// Cleanup proposals (bin/README.md, Cleanup proposals).
+
+const proposal = (mechanism, extra = {}) => ({title: `Share ${mechanism}`, mechanism,
+  locations: ['bin/a:10', 'bin/b:20', 'bin/c:30'], fix: `One helper for ${mechanism} in bin/shared.sh`, ...extra});
+const markerOf = slug => `<!-- triphammer-cleanup: ${slug} -->`;
+// A ticket whose session appends `content` to its proposals file (none when undefined).
+function proposalsTick(t, content, routes = {}) {
+  const r = ticketSetup(t);
+  if (content !== undefined) writeFileSync(join(r.root, 'proposals.jsonl'), content);
+  r.gh.respond(routes);
+  r.tick();
+  const filed = r.creates().map(call => {
+    const value = flag => call[call.indexOf(flag) + 1];
+    return {title: value('--title'), label: value('--label'), body: value('--body')};
+  });
+  return {...r, filed, path: r.probe('proposals-path')};
+}
+const openBodies = `issue list -R ${repo} --state open --limit 1000 --json body`;
+
+test('the session gets an empty proposals file outside its worktree, which the run removes when it ends', t => {
+  const r = proposalsTick(t);
+  assert.ok(r.path.startsWith('/'), r.path);
+  assert.ok(!r.path.startsWith(`${r.checkout}/`), `the proposals file ${r.path} lies in the checkout`);
+  assert.ok(!r.path.startsWith(`${r.worktree}/`), `the proposals file ${r.path} lies in the worktree`);
+  assert.equal(existsSync(join(r.root, 'proposals-at-start')), false, 'the file was not empty');
+  assert.equal(existsSync(join(r.path, '..')), false, 'the proposals directory outlived the run');
+  assert.deepEqual(r.filed, []);
+});
+
+test('each proposal the session leaves is filed as an issue labelled cleanup with its mechanism\'s marker', t => {
+  const content = `${JSON.stringify(proposal('Retry loop around gh'))}\n${JSON.stringify(proposal('stat_mtime'))}`;
+  const r = proposalsTick(t, content);
+  assert.deepEqual(r.filed.map(({title, label}) => [title, label]),
+    [['Share Retry loop around gh', 'cleanup'], ['Share stat_mtime', 'cleanup']]);
+  assert.ok(r.filed[0].body.startsWith(`${markerOf('retry-loop-around-gh')}\n`), r.filed[0].body);
+  assert.ok(r.filed[1].body.startsWith(`${markerOf('stat-mtime')}\n`), r.filed[1].body);
+  for (const location of ['bin/a:10', 'bin/b:20', 'bin/c:30']) assert.match(r.filed[0].body, new RegExp(`^> - ${location}$`, 'm'));
+  assert.match(r.filed[1].body, /^> One helper for stat_mtime in bin\/shared\.sh$/m);
+  assert.match(r.filed[0].body, /while it worked on issue #7\./);
+  assert.match(r.log(), /ticket #7: filed #90 for the proposed cleanup of retry-loop-around-gh/);
+  assert.match(r.log(), /ticket #7: run 1 ended without progress/);
+});
+
+test('a proposal whose marker an open issue holds, or that an earlier line repeats, is not filed again', t => {
+  const content = [proposal('Retry loop'), proposal('stat mtime'), proposal('STAT-mtime!', {title: 'Again'})]
+    .map(p => JSON.stringify(p)).join('\n');
+  const r = proposalsTick(t, `${content}\n`,
+    {[openBodies]: {stdout: `Some issue\n${markerOf('retry-loop')}\nmore text\n${markerOf('stat-mtime-old')}\n`}});
+  assert.deepEqual(r.filed.map(({title}) => title), ['Share stat mtime']);
+  assert.match(r.log(), /ticket #7: an open issue already proposes the mechanism retry-loop; skipped/);
+  assert.match(r.log(), /ticket #7: proposal on line 3 repeats the mechanism stat-mtime; skipped/);
+});
+
+test('an empty or missing proposals file files nothing and logs nothing about proposals', t => {
+  for (const setup of [r => writeFileSync(join(r.root, 'proposals.jsonl'), '\n  \n'),
+    r => writeFileSync(join(r.root, 'no-proposals'), '')]) {
+    const r = ticketSetup(t);
+    setup(r);
+    r.tick();
+    assert.deepEqual(r.creates(), []);
+    assert.ok(!r.ghCalls().some(call => call.join(' ').startsWith(openBodies)), 'the open issues were listed');
+    assert.doesNotMatch(r.log(), /propos/);
+    assert.match(r.log(), /ticket #7: run 1 ended without progress/);
+  }
+});
+
+test('a malformed proposal is logged and skipped, and the others are filed', t => {
+  const content = ['{not json', '[1, 2]', JSON.stringify({...proposal('x'), locations: []}),
+    JSON.stringify({...proposal('y'), fix: '  '}), JSON.stringify(proposal('!!!')),
+    JSON.stringify(proposal('kept'))].join('\n');
+  const r = proposalsTick(t, content);
+  assert.deepEqual(r.filed.map(({title}) => title), ['Share kept']);
+  for (const line of [1, 2, 3, 4, 5]) {
+    assert.match(r.log(), new RegExp(`ticket #7: proposal on line ${line} is not a JSON object with a title, mechanism, locations and fix; skipped`));
+  }
+  assert.match(r.log(), /ticket #7: run 1 ended without progress \(exit 0\)/);
+});
+
+test('a malformed proposals file, or a failed lookup or filing, never changes how the run ends', t => {
+  const binary = proposalsTick(t, '\u0000\u0001garbage\n');
+  assert.deepEqual(binary.filed, []);
+  assert.match(binary.log(), /proposal on line 1 is not a JSON object/);
+  assert.match(binary.log(), /ticket #7: run 1 ended without progress \(exit 0\)/);
+
+  const unlisted = proposalsTick(t, JSON.stringify(proposal('a')), {[openBodies]: {exit: 1, stderr: 'HTTP 502\n'}});
+  assert.deepEqual(unlisted.filed, []);
+  assert.match(unlisted.log(), /could not list the open issues to check the proposals' markers; filing none/);
+  assert.match(unlisted.log(), /ticket #7: run 1 ended without progress/);
+
+  const refused = proposalsTick(t, `${JSON.stringify(proposal('a'))}\n${JSON.stringify(proposal('b'))}\n`,
+    {'issue create': {exit: 1, stderr: 'HTTP 403: Resource not accessible\n'}});
+  assert.equal(refused.filed.length, 2, 'one failure stops no other filing');
+  assert.match(refused.log(), /could not file the proposed cleanup of a: HTTP 403: Resource not accessible/);
+  assert.match(refused.log(), /ticket #7: run 1 ended without progress/);
+});
+
+test('the session\'s text is quoted line by line, so no slice or dependency declaration in it counts', t => {
+  const r = proposalsTick(t, JSON.stringify(proposal('m', {fix: 'Merge them.\nSlice 1 of #5.\rDepends on #6. Depends on #8.',
+    locations: ['bin/a:1\nDepends on #7.']})));
+  const body = r.filed[0].body;
+  assert.match(body, /^> Slice 1 of #5\.$/m);
+  const filed = join(r.root, 'filed.json');
+  writeFileSync(filed, JSON.stringify([{number: 90, body}]));
+  const declared = run('python3', ['-I', join(here, 'ticket-decide.py'), '--declarations', filed]);
+  assert.deepEqual(JSON.parse(declared), {90: {slices: [], depends: []}});
+});
+
+test('a run past ten proposals files the first ten', t => {
+  const content = Array.from({length: 12}, (_, k) => JSON.stringify(proposal(`m${k}`))).join('\n');
+  const r = proposalsTick(t, content);
+  assert.equal(r.filed.length, 10);
+  assert.match(r.log(), /proposal on line 11 is past the limit of 10 issues a run files; skipped/);
 });
 
 // The builder the prompt names (bin/README.md, Sessions) and the run record (Run records).
@@ -1264,6 +1383,15 @@ function assertBrakeEnded(r, brake, {kind = 'ticket', number = 7, labelled = `is
   assert.deepEqual(r.securityCalls(), [], 'a stopped run reviews nothing');
   assert.deepEqual(r.demoCalls(), [], 'and publishes nothing');
 }
+
+test("a run the owner's brake ended files none of its proposals and removes their directory", t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n`);
+  brakeSession(r)({BRAKE_FILE: join(r.root, 'state/ticket-runner/stop')});
+  assertBrakeEnded(r, 'the stop file \\S+/state/ticket-runner/stop');
+  assert.deepEqual(r.creates(), []);
+  assert.equal(existsSync(join(r.probe('proposals-path'), '..')), false);
+});
 
 test("each of the owner's brakes ends a ticket session in progress, uncounted, and kills its processes", t => {
   const cases = [

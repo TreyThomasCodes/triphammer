@@ -14,6 +14,7 @@ const labels = {
   'next': ['0E8A16', 'Triphammer takes this ready issue before the other ready issues'],
   'agent-working': ['FBCA04', 'Triphammer is working on this; don\'t update or push to it'],
   'light': ['C2E0C6', 'Triphammer\'s first run on this issue uses the Sonnet builder; later runs use Opus'],
+  'cleanup': ['BFD4F2', 'A cleanup a session proposed; Triphammer takes it after the other ready issues'],
 };
 const create = name => ['label', 'create', name, '-R', repo, '--color', labels[name][0], '--description', labels[name][1]];
 const list = ['label', 'list', '-R', repo, '--limit', '1000', '--json', 'name', '--jq', '.[].name'];
@@ -29,7 +30,7 @@ test('--labels creates each label Triphammer uses that the repository lacks, wit
   const {r, result, labelCalls} = labelsRun(t, 'bug\nNEXT\nhold\n');
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(labelCalls, [list, create('needs-owner'), create('stop-agents'), create('agent-working'),
-    create('light')]);
+    create('light'), create('cleanup')]);
   assert.match(result.stdout, /^created the label needs-owner in Example-Owner\/example-project$/m);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner')), false, '--labels started a tick');
   for (const [, description] of Object.values(labels)) assert.ok(description.length <= 100, description);

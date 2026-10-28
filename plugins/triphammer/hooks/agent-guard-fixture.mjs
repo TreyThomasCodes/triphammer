@@ -96,7 +96,7 @@ export function machineHome(t, vars = {}) {
   const home = mkdtempSync(join(tmpdir(), 'agent-guard-home-'));
   t.after(() => rmSync(home, {recursive: true, force: true}));
   const env = {...process.env, HOME: home};
-  for (const name of ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR']) delete env[name];
+  for (const name of ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR', 'TRIPHAMMER_PROPOSALS']) delete env[name];
   Object.assign(env, vars);
   return {home, env, cwd: home};
 }
@@ -149,7 +149,7 @@ export function triphammerSession(t, marker) {
   writeFileSync(join(worktree, 'src/x.cs'), 'class X {}\n');
   writeFileSync(join(home, '.bashrc'), '# bashrc\n');
   const env = {...process.env, HOME: home, TMPDIR: temp, TRIPHAMMER_SESSION: marker ?? worktree};
-  for (const name of ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR']) delete env[name];
+  for (const name of ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR', 'TRIPHAMMER_PROPOSALS']) delete env[name];
   return {base, checkout, worktree, home, temp, elsewhere, env};
 }
 

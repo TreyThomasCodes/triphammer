@@ -57,7 +57,7 @@ An issue labelled `upkeep` follows the `triphammer:upkeep` skill instead of buil
 
 ## Finish
 
-1. Follow `triphammer:review-loop` to the end, through `triphammer:merge-policy`. The pull request description ends with `Closes #N`.
+1. Follow `triphammer:review-loop` to the end, through `triphammer:merge-policy`. The pull request description ends with `Closes #N`. The pull request comment lists each cleanup proposal of the session (the simplifier's, and any harness gap): its title and whether it went to `$TRIPHAMMER_PROPOSALS`, which the runner files after the session, or, with the variable unset, only into the comment.
 2. When the change touches the web UI, the project declares `"demos": true` in `.triphammer/project.json`, and the prompt names the `demo` module as on, have a `demo` agent write its walkthrough, which the runner publishes once this session ends, so the owner can see the change without opening the code. Give it the pull request number, the issue and the journey the change touched. A visual problem it reports is a finding. A failed demo never blocks the pull request; mention it in the pull request comment instead.
 3. An escalate-tier pull request is labelled and armed, and then it is done. The owner approves it in their own time. The runner moves on to tickets that do not depend on it.
 4. Remove nothing outside your worktree. End with one line saying the pull request number and its tier, or why there is none (for a ticket stopped for the owner, what it needs and that it carries `needs-owner`; for a light run that handed over, that its branch is pushed and the issue comment says what is left; for an `upkeep` issue, the issues filed and that it is closed), followed by the run record line (Run record, below).
