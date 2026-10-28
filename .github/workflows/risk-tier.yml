@@ -43,7 +43,8 @@ permissions:
 jobs:
   risk-tier:
     name: risk-tier
-    # Label events matter only for hold; any other label leaves the tier unchanged.
+    # Label events matter only for hold, in any case (expression == ignores case); any other label leaves the tier
+    # unchanged.
     if: >-
       github.event_name == 'pull_request_review' ||
       (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
@@ -177,7 +178,7 @@ jobs:
           # The owner's brakes hold any tier: a hold label, or the owner's latest review requesting changes (until
           # the owner approves or dismisses it).
           labels="$(gh api --paginate "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels" --jq '.[].name')"
-          if grep -qx hold <<< "$labels"; then
+          if grep -qix hold <<< "$labels"; then
             status pending "Held: the pull request is labelled hold"
           fi
           reviews="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews")"
