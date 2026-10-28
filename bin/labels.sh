@@ -12,6 +12,7 @@ triphammer_labels=(
   "stop-agents|B60205|An open issue with this label pauses Triphammer in this repository"
   "next|0E8A16|Triphammer takes this ready issue before the other ready issues"
   "agent-working|FBCA04|Triphammer is working on this; don't update or push to it"
+  "light|C2E0C6|Triphammer's first run on this issue uses the Sonnet builder; later runs use Opus"
 )
 
 # missing_labels <owner/repo>: prints the name of each label of triphammer_labels the repository lacks, one per line,

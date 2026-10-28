@@ -173,7 +173,7 @@ which reads `checks`, `reviewChecklist` and `reviewSkills` from the commit it au
 It is also the project contract of the Triphammer plugin's skills, agents and hooks (`plugins/triphammer`: the skills
 `triphammer:ticket-run`, `triphammer:review-loop`, `triphammer:merge-policy`, `triphammer:plan-work`,
 `triphammer:upkeep` and `triphammer:review-checklist`, the agents `triphammer:orchestrator`, `triphammer:builder`,
-`triphammer:reviewer`, `triphammer:searcher` and `triphammer:simplifier`, and the `agent-guard.py` hook): they name no
+`triphammer:builder-light`, `triphammer:reviewer`, `triphammer:searcher` and `triphammer:simplifier`, and the `agent-guard.py` hook): they name no
 project, and read its check commands, checklist, skills and shell-edit roots here. Only `name` is required; a
 project that leaves out a field gets none of its step, and the runner logs nothing about it.
 
@@ -250,9 +250,37 @@ the plugin's `agent-guard.py` that Triphammer started it: such a session writes 
 and the temporary directories, writes no git configuration (`git config` and `git remote` only read, and an upstream is
 set only for its own branch in its worktree), sets no one-command `git -c` key that makes git run a command or changes
 what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`; the hook's header lists what it checks and what it
-does not cover. The prompt names the `triphammer:ticket-run` skill and ends by naming the modules that are on. A tick
-whose Triphammer `origin/main` has no
+does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
+that are on. A tick whose Triphammer `origin/main` has no
 `plugins/triphammer/skills/ticket-run/SKILL.md` starts no session.
+
+The builder is `triphammer:builder` (`agents/builder.md`, Opus) for every run but one: run 1 of a ticket whose issue is
+labelled `light` (in the issue list the tick read) is a light run, and its prompt names `triphammer:builder-light`
+(`agents/builder-light.md`, the same agent on Sonnet). The orchestrator, reviewer and simplifier stay on Opus. A light
+run whose review loop still has blocking findings after three rounds pushes its branch, comments on the issue and ends
+without a pull request or `needs-owner` (`triphammer:ticket-run`, Light runs), so the run counts as one without progress
+and the next run takes the ticket with `triphammer:builder`; the prompt of every later run of a `light` issue points at
+that comment and `origin/ticket/<N>`. When the owner removes `needs-owner` and the counter starts over, the runner
+writes `attempts/ticket-N.reset`, and run 1 of a restarted counter uses `triphammer:builder`, since the light run already
+failed on the issue; the file goes with the counter when a run makes progress. A run a brake or a usage limit stops
+does not count, so the next run is the same run again with the same builder. Repairs always use `triphammer:builder`.
+
+### Run records
+
+Beside each transcript `runs/<UTC stamp>-<kind>-<N>.jsonl`, `ticket-runner` writes the run's record,
+`runs/<UTC stamp>-<kind>-<N>.json`, once the session ends, on every path but the runner itself being stopped. It is
+one JSON object:
+
+| Field | Value |
+| --- | --- |
+| `kind`, `number`, `run` | `ticket` or `repair`, the issue or pull request number, and which of the three runs it was |
+| `builder`, `builderModel` | the builder the prompt named and its model: `triphammer:builder-light` and `sonnet`, or `triphammer:builder` and `opus` |
+| `exit` | the session's exit status (124 for the 6-hour timeout) |
+| `pullRequestOpened` | whether `gh pr list --state all --head <branch>` lists a pull request created since the run started (always `false` for a repair, whose pull request is older); null when the lookup fails |
+| `reviewRounds` | the independent reviews the session started, from the `Run record: review-rounds=<n> handoff=<yes\|no>` line of its last message (`triphammer:ticket-run`, Run record); null without that line |
+| `handoff` | whether a light run handed the ticket over (`handoff=yes` on the same line); null without it |
+
+The status page does not read the records yet.
 
 With the `demo` module on, when a session ends, on every path but a brake (below), before the worktree can be removed,
 `ticket-runner` runs `publish-demos` on it.
@@ -352,6 +380,7 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `stop-agents` | An open issue that carries it pauses the project and stops a run in progress. |
 | `next` | Ready issues that carry it are taken first (What a tick decides). |
 | `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
+| `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
 
 `ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
 are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine
@@ -608,7 +637,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Tools | `git`, `jq`, `python3` (Python 3), `gh`, `claude`, and `codex` with the `codex` module on, each run `--version`. Without `jq` the .NET SDK, Node `engines.node`, Claude Code login and plugin checks are skipped, and only `jq` is reported. |
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
 | The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). It runs with `GITHUB_APP_OWNER` set to the owner part of `REPO`, as `ticket-runner` sets it, so the token is for the App's installation on the account that owns `REPO`, not the `owner` file's. |
-| Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next` and `agent-working` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
+| Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next`, `agent-working` and `light` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | Plugins | `claude plugin list --json` lists at user scope the Triphammer plugin (named by `.claude-plugin/marketplace.json` in Triphammer's checkout) and `humanizer@humanizer`, as `provision` checks them. Each missing one is a problem whose fix is running the installer again; a list that fails is a problem of its own, never a pass. Skipped without `jq`. |
 | bwrap | With the `codex` module on, `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: Codex's sandbox needs unprivileged user namespaces, which Ubuntu restricts with AppArmor. |

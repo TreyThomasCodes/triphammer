@@ -54,6 +54,9 @@
 #   - an open issue labelled `stop-agents`, or the file `stop` in the state directory, pauses this project; the file
 #     `stop` in the shared directory pauses every project;
 #   - `systemctl --user stop ticket-runner.service` (or ticket-runner@<project>.service) ends the current session.
+# The prompt names the builder the session briefs: triphammer:builder-light (Sonnet) for run 1 of an issue labelled
+# `light`, unless the owner restarted its counter, and triphammer:builder (Opus) for every other run. Each run that ends
+# leaves a record beside its transcript (write_record).
 # The brakes also stop a run in progress: at least once a minute while a session runs, the runner checks the stop
 # files, a stop-agents issue, `hold` on the run's issue, `needs-owner` on it that anyone but the App added (a session
 # adds it itself when it stops for the owner), the issue being closed (a ticket that is not upkeep, whose session closes
@@ -399,10 +402,26 @@ session follows the \`triphammer:upkeep\` skill: it reports on this issue and cl
 fi
 
 attempts_file="$state/attempts/$kind-$number"
+# <attempts_file>.reset marks a counter the owner restarted; it goes when the counter does (a run that progressed).
+reset_file="$attempts_file.reset"
 attempts="$(cat "$attempts_file" 2>/dev/null || echo 0)"
-[ "$attempts" -lt 3 ] || attempts=0  # the owner removed the give-up label, so start over
+if [ "$attempts" -ge 3 ]; then  # the owner removed the give-up label, so start over
+  attempts=0
+  : > "$reset_file"
+fi
 attempts=$((attempts + 1))
 echo "$attempts" > "$attempts_file"
+
+# The builder the session briefs: a ticket whose issue is labelled `light` builds run 1 of a fresh counter with
+# triphammer:builder-light (Sonnet); every other run, a restarted counter's and every repair's, with triphammer:builder
+# (Opus). Only the builder changes; the orchestrator, reviewer and simplifier stay on Opus.
+light=""
+builder=triphammer:builder builder_model=opus
+if [ "$kind" = ticket ] && jq -e --argjson n "$number" \
+    'any(.[] | select(.number == $n) | .labels[]?; .name == "light")' "$state/issues.json" >/dev/null 2>&1; then
+  light=1
+  [ "$attempts" -gt 1 ] || [ -e "$reset_file" ] || builder=triphammer:builder-light builder_model=sonnet
+fi
 
 # A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
 # tracks origin/main: the Co-Authored-By trailer), so a branch cut before a hook existed, or a project without hooks of
@@ -415,7 +434,15 @@ add_worktree() {
   git -C "$worktree" config --worktree core.hooksPath "$triphammer/scripts/git-hooks"
 }
 
-run="$state/runs/$(date -u +%Y%m%dT%H%M%SZ)-$kind-$number.jsonl"
+run_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+run="$state/runs/$(date -u -d "$run_started" +%Y%m%dT%H%M%SZ)-$kind-$number.jsonl"
+if [ "$builder_model" = sonnet ]; then
+  builders=" This is a light run: brief triphammer:builder-light for every builder, never triphammer:builder (the 'Light runs' section of the triphammer:ticket-run skill)."
+elif [ -n "$light" ]; then
+  builders=" Brief triphammer:builder for every builder. This issue is labelled light, so an earlier run may have built it with triphammer:builder-light and handed it over: its comment on the issue says what it tried and the findings it could not resolve, and its work is on origin/ticket/$number."
+else
+  builders=" Brief triphammer:builder for every builder."
+fi
 # The skills skip the steps of a module that is off (the plugin's ticket-run and upkeep skills).
 if [ -n "$cfg_modules" ]; then
   modules=" Modules on: ${cfg_modules// /, }."
@@ -426,13 +453,13 @@ if [ "$kind" = ticket ]; then
   worktree="$checkout/.worktrees/issue-$number"
   branch="ticket/$number"
   add_worktree "$branch" origin/main
-  prompt="Run issue #$number of $repo unattended. You are in a fresh worktree on branch $branch from origin/main (an earlier run may have left origin/$branch without a pull request; build on it or replace it). This is run $attempts of 3.$modules Follow the triphammer:ticket-run skill."
+  prompt="Run issue #$number of $repo unattended. You are in a fresh worktree on branch $branch from origin/main (an earlier run may have left origin/$branch without a pull request; build on it or replace it). This is run $attempts of 3.$builders$modules Follow the triphammer:ticket-run skill."
   before=""
 else
   branch="$(gh pr view "$number" -R "$repo" --json headRefName --jq .headRefName)"
   worktree="$checkout/.worktrees/pr-$number"
   add_worktree "$branch" "origin/$branch"
-  prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a worktree on its branch $branch. This is run $attempts of 3.$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
+  prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a worktree on its branch $branch. This is run $attempts of 3.$builders$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
   before="$(git -C "$worktree" rev-parse HEAD)"
 fi
 # A security-findings repair follows up the head ticket-decide.py found pending in the security-findings record, the
@@ -635,6 +662,30 @@ watcher=$!
 wait "$session" || status=$?
 session=""
 end_session
+
+# The run's record, runs/<stamp>-<kind>-<number>.json beside its transcript: the run, the builder the prompt named and
+# its model, the session's exit status, whether a pull request on the run's branch was opened since the run started
+# (gh's createdAt), and the review rounds and handoff the session reported on the `Run record:` line of its last message
+# (the triphammer:ticket-run skill, Run record). What cannot be read is null: a failed pull request lookup, or a session
+# that wrote no such line.
+write_record() {
+  local opened report rounds=null handoff=null
+  opened="$(gh pr list -R "$repo" --state all --head "$branch" --limit 100 --json createdAt \
+    --jq "any(.[]; .createdAt >= \"$run_started\")" 2>/dev/null)" || opened=""
+  [[ "$opened" =~ ^(true|false)$ ]] || opened=null
+  report="$(jq -Rr 'fromjson? | select(type == "object" and .type == "result") | .result // empty | strings' "$run" \
+    2>/dev/null | grep -oE 'Run record: review-rounds=[0-9]{1,4} handoff=(yes|no)' | tail -n 1)" || report=""
+  if [[ "$report" =~ review-rounds=([0-9]+)\ handoff=(yes|no) ]]; then
+    rounds="$((10#${BASH_REMATCH[1]}))" handoff=false
+    [ "${BASH_REMATCH[2]}" = no ] || handoff=true
+  fi
+  replace_file "${run%.jsonl}.json" "$(jq -cn --arg kind "$kind" --argjson number "$number" --argjson run "$attempts" \
+    --arg builder "$builder" --arg model "$builder_model" --argjson exit "$status" --argjson opened "$opened" \
+    --argjson rounds "$rounds" --argjson handoff "$handoff" \
+    '{kind: $kind, number: $number, run: $run, builder: $builder, builderModel: $model, exit: $exit,
+      pullRequestOpened: $opened, reviewRounds: $rounds, handoff: $handoff}')"
+}
+write_record || log "$kind #$number: could not write the run record"
 if [ -f "$brake_file" ]; then
   echo $((attempts - 1)) > "$attempts_file"
   log "$kind #$number: ended by the owner's brake: $(cat "$brake_file"); not counted (exit $status)"
@@ -708,7 +759,7 @@ else
 fi
 
 if [ -n "$progressed" ]; then
-  rm -f "$attempts_file"
+  rm -f "$attempts_file" "$reset_file"
   remove_worktree "$worktree" 2>/dev/null || true
   log "$kind #$number: run $attempts finished (exit $status)"
   exit 0

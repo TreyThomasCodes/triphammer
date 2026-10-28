@@ -155,6 +155,127 @@ test("the session runs as the plugin's orchestrator agent on Opus", t => {
   assert.match(r.probe('claude-args'), /Follow the triphammer:ticket-run skill\./);
 });
 
+// The builder the prompt names (bin/README.md, Sessions) and the run record (Run records).
+
+// Ticket #7 with `labels`, after `before` runs left its attempts counter at that value (none when undefined).
+function ticketAfter(t, labels, before) {
+  const r = ticketSetup(t, [issue(7, {labels})]);
+  const attempts = join(r.root, 'state/ticket-runner/attempts');
+  if (before !== undefined) {
+    mkdirSync(attempts, {recursive: true});
+    writeFileSync(join(attempts, 'ticket-7'), `${before}\n`);
+  }
+  return {...r, attempts};
+}
+// A tick of that ticket.
+function builderTick(t, labels, before) {
+  const r = ticketAfter(t, labels, before);
+  r.tick();
+  return {...r, prompt: r.probe('claude-args'), resetFile: join(r.attempts, 'ticket-7.reset')};
+}
+const lightBrief = /This is run 1 of 3\. This is a light run: brief triphammer:builder-light for every builder, never triphammer:builder/;
+const opusBrief = /This is run \d of 3\. Brief triphammer:builder for every builder\./;
+const handedOver = /an earlier run may have built it with triphammer:builder-light and handed it over: its comment on the issue says what it tried and the findings it could not resolve, and its work is on origin\/ticket\/7\./;
+// The stream-JSON result line a session ends its transcript with, for $CLAUDE_SAYS; the fake's `echo` (dash's) would
+// turn JSON's `\n` into a line break, so a newline in the result is escaped as `\u000a`.
+const resultLine = result => JSON.stringify({type: 'result', result}).replaceAll('\\n', '\\u000a');
+const record = r => {
+  const runs = join(r.root, 'state/ticket-runner/runs');
+  const files = readdirSync(runs).filter(file => file.endsWith('.json'));
+  assert.equal(files.length, 1, files.join(' '));
+  assert.ok(existsSync(join(runs, files[0].replace(/\.json$/, '.jsonl'))), 'the record sits beside its transcript');
+  return JSON.parse(readFileSync(join(runs, files[0]), 'utf8'));
+};
+
+test('run 1 of a ticket whose issue is labelled light briefs the Sonnet builder; the session itself stays on Opus', t => {
+  const r = builderTick(t, ['light']);
+  assert.match(r.prompt, lightBrief);
+  const args = r.prompt.split('\n');
+  assert.equal(args[args.indexOf('--model') + 1], 'opus');
+  assert.equal(args[args.indexOf('--agent') + 1], 'triphammer:orchestrator');
+  assert.deepEqual([record(r).builder, record(r).builderModel], ['triphammer:builder-light', 'sonnet']);
+});
+
+test('runs 2 and 3 of a light ticket brief the Opus builder and point at the light run\'s comment and branch', t => {
+  for (const before of [1, 2]) {
+    const r = builderTick(t, ['light'], before);
+    assert.match(r.prompt, opusBrief, `after ${before}`);
+    assert.match(r.prompt, handedOver);
+    assert.doesNotMatch(r.prompt, /This is a light run/);
+    assert.deepEqual([record(r).run, record(r).builderModel], [before + 1, 'opus']);
+  }
+});
+
+test('after the owner removes needs-owner, run 1 of the restarted counter of a light ticket briefs the Opus builder', t => {
+  const r = builderTick(t, ['light'], 3);
+  assert.match(r.prompt, /This is run 1 of 3\. Brief triphammer:builder for every builder\./);
+  assert.match(r.prompt, handedOver);
+  assert.equal(existsSync(r.resetFile), true, 'the restart is recorded');
+  assert.equal(record(r).builderModel, 'opus');
+
+  // The restart outlives a run the brake stops, which is not counted, and goes with the counter once a run progresses.
+  const braked = ticketAfter(t, ['light'], 3);
+  const stop = join(braked.root, 'state/ticket-runner/stop');
+  brakeSession(braked)({BRAKE_FILE: stop});
+  assert.match(braked.log(), /ended by the owner's brake/);
+  rmSync(stop);
+  braked.tick();
+  assert.match(braked.probe('claude-args'), /This is run 1 of 3\. Brief triphammer:builder for every builder\./);
+
+  const progressed = ticketAfter(t, ['light'], 3);
+  progressed.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  progressed.tick();
+  assert.equal(existsSync(join(progressed.attempts, 'ticket-7')), false);
+  assert.equal(existsSync(join(progressed.attempts, 'ticket-7.reset')), false);
+});
+
+test('an unlabelled ticket briefs the Opus builder on every run, restarted or not, with no word of a light run', t => {
+  for (const before of [undefined, 1, 3]) {
+    const r = builderTick(t, ['next'], before);
+    assert.match(r.prompt, opusBrief, `after ${before}`);
+    assert.doesNotMatch(r.prompt, /light/);
+    assert.equal(record(r).builder, 'triphammer:builder');
+  }
+});
+
+test('the run record holds the pull request opened on the branch since the start and the rounds and handoff the session reported', t => {
+  const says = resultLine('No pull request: handed over to the next run.\nRun record: review-rounds=3 handoff=yes');
+  const r = ticketSetup(t, [issue(7, {labels: ['light']})]);
+  r.gh.respond({[`pr list -R ${repo} --state all --head ticket/7`]: {file: 'branch-prs.json'}});
+  r.gh.json('branch-prs.json', [{number: 60, createdAt: '2001-01-01T00:00:00Z'}, {number: 70, createdAt: '2999-01-01T00:00:00Z'}]);
+  r.tick({CLAUDE_SAYS: says});
+  assert.deepEqual(record(r), {kind: 'ticket', number: 7, run: 1, builder: 'triphammer:builder-light', builderModel: 'sonnet',
+    exit: 0, pullRequestOpened: true, reviewRounds: 3, handoff: true});
+
+  const older = ticketSetup(t);
+  older.gh.respond({[`pr list -R ${repo} --state all --head ticket/7`]: {file: 'branch-prs.json'}});
+  older.gh.json('branch-prs.json', [{number: 60, createdAt: '2001-01-01T00:00:00Z'}]);
+  older.tick({CLAUDE_SAYS: resultLine('PR #70, auto.\nRun record: review-rounds=1 handoff=no')});
+  assert.deepEqual([record(older).pullRequestOpened, record(older).reviewRounds, record(older).handoff], [false, 1, false]);
+});
+
+test('what the run record cannot read is null: a failed pull request lookup, a session without the line, a line not in its result', t => {
+  for (const says of [undefined, 'Run record: review-rounds=2 handoff=no',
+    resultLine('Run record: review-rounds=two handoff=no')]) {
+    const r = ticketSetup(t);
+    r.gh.respond({[`pr list -R ${repo} --state all --head ticket/7`]: {exit: 1, stderr: 'HTTP 502\n'}});
+    r.tick(says === undefined ? {CLAUDE_EXIT: '1'} : {CLAUDE_SAYS: says});
+    const {pullRequestOpened, reviewRounds, handoff, exit} = record(r);
+    assert.deepEqual({pullRequestOpened, reviewRounds, handoff}, {pullRequestOpened: null, reviewRounds: null, handoff: null}, says);
+    assert.equal(exit, says === undefined ? 1 : 0);
+  }
+});
+
+test('a repair briefs the Opus builder, and its record says it opened no pull request', t => {
+  const r = repairSetup(t, {files: {}});
+  r.gh.respond({[`pr list -R ${repo} --state all --head ticket/30`]: {file: 'branch-prs.json'}});
+  r.gh.json('branch-prs.json', [{number: 40, createdAt: '2001-01-01T00:00:00Z'}]);
+  r.tick();
+  assert.match(r.probe('claude-args'), /This is run 1 of 3\. Brief triphammer:builder for every builder\./);
+  const {kind, number, builderModel, pullRequestOpened} = record(r);
+  assert.deepEqual({kind, number, builderModel, pullRequestOpened}, {kind: 'repair', number: 40, builderModel: 'opus', pullRequestOpened: false});
+});
+
 test("the session gets the token of the App's installation on the served repository's account", t => {
   const r = ticketSetup(t);
   r.tick({GITHUB_APP_OWNER: 'someone-else'});
@@ -341,7 +462,7 @@ test('with every module off a ticket run publishes no demo, reviews nothing, and
     const log = r.log();
     assert.match(log, /ticket #7: run 1 finished/, 'the pull request still counts as progress');
     assert.doesNotMatch(log, /demo|gallery|publish|security|review/i);
-    assert.match(r.probe('claude-args'), /This is run 1 of 3\. No module is on\. Follow/);
+    assert.match(r.probe('claude-args'), /This is run 1 of 3\. Brief triphammer:builder for every builder\. No module is on\. Follow/);
   }
 });
 
@@ -374,7 +495,7 @@ test('with one module on, only its steps run, and the session prompt names it', 
 test('a repair prompt names the modules too', t => {
   const r = repairSetup(t);
   r.tick();
-  assert.match(r.probe('claude-args'), /This is run 1 of 3\. Modules on: demo, codex\. Follow the 'Repair a pull request' section/);
+  assert.match(r.probe('claude-args'), /This is run 1 of 3\. Brief triphammer:builder for every builder\. Modules on: demo, codex\. Follow the 'Repair a pull request' section/);
 });
 
 test('a repair prompt names the owner, the owner part of REPO by default and OWNER when the config sets it', t => {
@@ -773,7 +894,7 @@ test('--prune-dry-run prints what the sweep would remove, changes nothing and ru
 
 const mode = path => statSync(path).mode & 0o777;
 
-test('the state directory, its runs and the transcripts are private to the service user, even when they existed as 755', t => {
+test('the state directory, its runs, the transcripts and the run records are private to the service user, even when they existed as 755', t => {
   withUmask(t, 0o022);  // as a shell outside systemd would start the script
   const r = ticketSetup(t);
   const state = join(r.root, 'state/ticket-runner');
@@ -782,9 +903,9 @@ test('the state directory, its runs and the transcripts are private to the servi
   chmodSync(join(state, 'runs'), 0o755);
   r.tick();
   for (const dir of [state, join(state, 'runs'), join(state, 'attempts')]) assert.equal(mode(dir), 0o700, dir);
-  const transcripts = readdirSync(join(state, 'runs'));
-  assert.equal(transcripts.length, 1);
-  for (const file of [join(state, 'log'), join(state, 'runs', transcripts[0])]) assert.equal(mode(file) & 0o077, 0, file);
+  const runs = readdirSync(join(state, 'runs')).sort();
+  assert.deepEqual(runs.map(file => file.slice(file.indexOf('.'))), ['.json', '.jsonl'], 'a record and a transcript');
+  for (const file of [join(state, 'log'), ...runs.map(name => join(state, 'runs', name))]) assert.equal(mode(file) & 0o077, 0, file);
 });
 
 // The Triphammer config and the project file (bin/README.md, "Configuration").
