@@ -248,12 +248,10 @@ for repository in $repositories; do
   while read -r number head state hold branch; do
     [ -n "$number" ] || continue
     branch_of[$number]="$branch"
-    if [ "$hold" = hold ]; then
-      case "$state" in CLEAN|BEHIND) skips+="$repository#$number: labelled hold; not merging or updating it"$'\n' ;; esac
-      continue
-    fi
-    if [ "$hold" = unread ]; then
-      case "$state" in CLEAN|BEHIND) skips+="$repository#$number: more labels than merge-when-ready reads, so it may be labelled hold; not merging or updating it"$'\n' ;; esac
+    if [ "$hold" != - ]; then
+      why="labelled hold"
+      [ "$hold" = hold ] || why="more labels than merge-when-ready reads, so it may be labelled hold"
+      case "$state" in CLEAN|BEHIND) skips+="$repository#$number: $why; not merging or updating it"$'\n' ;; esac
       continue
     fi
     if [ "$state" = CLEAN ] && pending_follow_up "$repository" "$number" "$head"; then
