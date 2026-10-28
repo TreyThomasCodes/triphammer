@@ -5,7 +5,7 @@ import {existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writ
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
-import {fakeGh, here, lines, toolingEnv, withUmask, writeConfig} from './fixture.mjs';
+import {fakeGh, here, lines, manyLabels, toolingEnv, withUmask, writeConfig} from './fixture.mjs';
 
 // The fake gh's routes: the installation's repositories (repos.json), each repository's pull requests
 // (graphql-<owner>_<name>-.json), one pull request's head and checks (graphql-<owner>_<name>-<number>.json) and
@@ -210,7 +210,7 @@ test('a pull request labelled Hold, in another case, is neither merged nor updat
 
 test('a pull request with more labels than one page, or with no page info, is neither merged nor updated', t => {
   const r = queueSetup(t);
-  const many = pr(1, 'CLEAN', Array.from({length: 100}, (_, i) => `label-${i}`));
+  const many = pr(1, 'CLEAN', manyLabels(100));
   many.labels.pageInfo.hasNextPage = true;
   const unread = pr(2, 'BEHIND');
   delete unread.labels.pageInfo;

@@ -10,8 +10,8 @@
 # repair (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
 # or an issue labelled `next`, waits, on why a parent whose slices are all closed stays open (a brake label), and on
-# each issue or pull request skipped for 100 labels or more, go to stderr. With --closed it prints, one per line, the issues of owner/repo that the pull requests close
-# (ticket-runner's worktree sweep). With --declarations it prints, as JSON, the slice and depends
+# each issue or pull request skipped for more labels than gh reads, go to stderr. With --closed it prints, one per
+# line, the issues of owner/repo that the pull requests close (ticket-runner's worktree sweep). With --declarations it prints, as JSON, the slice and depends
 # declarations it reads in each issue body. ticket-decide.test.mjs covers each decision.
 import json, re, sys
 from datetime import datetime, timedelta

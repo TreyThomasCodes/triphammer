@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {exampleProject, git, here, lines, projectJson, run, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
+import {exampleProject, git, here, lines, manyLabels, projectJson, run, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The issues' author, in the shape `gh issue list --json author` returns for the App.
@@ -1501,18 +1501,16 @@ test('Hold, in another case, on the pull request a repair works on ends the repa
 });
 
 // gh's --json labels reads only the first 100 labels, so one hundred labels may hide hold or needs-owner.
-const manyLabels = Array.from({length: 100}, (_, i) => `label-${i}`);
-
 test('a ticket whose issue has 100 labels or more, which may hide a brake, ends the session in progress', t => {
   const r = ticketSetup(t);
-  r.gh.json('brake-unread.json', issue(7, {labels: manyLabels}));
+  r.gh.json('brake-unread.json', issue(7, {labels: manyLabels(100)}));
   brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
   assertBrakeEnded(r, 'issue #7 is labelled more than the runner reads, so it may be labelled hold or needs-owner');
 });
 
 test('a repair whose pull request has 100 labels or more, which may hide hold, ends the session in progress', t => {
   const r = repairSetup(t);
-  r.gh.json('brake-pr.json', {labels: manyLabels.map(name => ({name}))});
+  r.gh.json('brake-pr.json', {labels: manyLabels(100).map(name => ({name}))});
   brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
   assertBrakeEnded(r, 'pull request #40 is labelled more than the runner reads, so it may be labelled hold',
     {kind: 'repair', number: 40, labelled: 'pr edit 40'});
@@ -1521,8 +1519,8 @@ test('a repair whose pull request has 100 labels or more, which may hide hold, e
 // The runner adds agent-working before its first brake check, so an issue with 99 other labels would reach 100 there,
 // be braked uncounted and be picked again on every tick. It is not picked.
 test('an issue with 99 labels besides agent-working is not picked, so no session starts and is braked', t => {
-  const r = ticketSetup(t, [recentUpkeep, issue(7, {labels: manyLabels.slice(1)})]);
-  r.gh.json('brake-unread.json', issue(7, {labels: [...manyLabels.slice(1), 'agent-working']}));
+  const r = ticketSetup(t, [recentUpkeep, issue(7, {labels: manyLabels(99)})]);
+  r.gh.json('brake-unread.json', issue(7, {labels: [...manyLabels(99), 'agent-working']}));
   brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
   assert.equal(r.ran(), false);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'no run of #7 started');

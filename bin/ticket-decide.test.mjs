@@ -4,6 +4,7 @@ import {spawnSync} from 'node:child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {manyLabels} from './fixture.mjs';
 
 // Runs ticket-decide.py on made-up issues and pull requests in the shapes `gh issue list` / `gh pr list` return for the
 // fields ticket-runner requests, at the tick time `now`, and returns what it printed. Unless `upkeepDone` is false, the
@@ -290,7 +291,6 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
 
 // `gh --json labels` reads only the first 100 labels, so a brake may be past them (labels_unread in bin/labels.sh).
 // The runner adds agent-working before its first brake check, so 99 other labels already reach that limit there.
-const manyLabels = count => Array.from({length: count}, (_, i) => `label-${i}`);
 
 test('an issue with 99 labels or more besides agent-working is skipped, and the runner says why', t => {
   for (const labels of [manyLabels(99), manyLabels(101), [...manyLabels(99), 'Agent-Working']]) {

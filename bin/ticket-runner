@@ -629,8 +629,8 @@ issue_brake() {
 }
 
 # The brakes that end a session in progress: the project's (stop_file_brake, stop_agents_brake), the ticket's issue's
-# (issue_brake), and `hold` on the pull request a repair works on, or 100 labels or more on it (labels_unread). Prints the first that applies, or nothing; a failed
-# lookup is logged and is no brake.
+# (issue_brake), and `hold` on the pull request a repair works on, or 100 labels or more on it (labels_unread). Prints
+# the first that applies, or nothing; a failed lookup is logged and is no brake.
 run_brake() {
   local found
   found="$(stop_file_brake)"

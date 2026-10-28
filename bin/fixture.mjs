@@ -14,6 +14,8 @@ export const run = (file, args, options) => execFileSync(file, args, {stdio: ['i
 export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim();
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
+// `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.
+export const manyLabels = count => Array.from({length: count}, (_, i) => `label-${i}`);
 // Sends `signal` to a spawned script once its slow fake step has recorded `started` in `slowLog` (with `group`, to the
 // whole process group the script leads, as a terminal's Ctrl-C does), and returns how the script exited, how many
 // milliseconds after the signal, and what the step recorded by the time its child would have recorded `finished`.

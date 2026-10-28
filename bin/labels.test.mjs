@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {existsSync} from 'node:fs';
 import {join} from 'node:path';
-import {runnerSetup} from './fixture.mjs';
+import {manyLabels, runnerSetup} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The labels bin/labels.sh defines, with the color and description each is created with.
@@ -71,7 +71,7 @@ test('labelled_jq matches a label in any case, in both the gh --json and the Gra
 });
 
 test('labels_unread is true when gh returned 100 labels or more, as a brake may be past them', () => {
-  const labels = count => Array.from({length: count}, (_, i) => ({name: `label-${i}`}));
+  const labels = count => manyLabels(count).map(name => ({name}));
   for (const count of [0, 1, 99]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'false', `${count}`);
   for (const count of [100, 101]) assert.equal(labelled({labels: labels(count)}, 'labels_unread'), 'true', `${count}`);
 });
