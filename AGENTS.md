@@ -8,6 +8,8 @@ that hold the rest.
 
 - `README.md`: what Triphammer does, what a project provides, what the machine configures, the optional
   modules.
+- `CREDITS.md`: what Triphammer adapts from other projects, with their licenses. A skill or agent credits its sources
+  there, never in its own text.
 - `plugins/triphammer/`: the Claude Code plugin, the workflow skills, agents and guard hooks (`triphammer:<name>`).
   `.claude-plugin/marketplace.json` lists it.
 - `install.sh`: sets a machine up without a clone, through `bin/provision`.

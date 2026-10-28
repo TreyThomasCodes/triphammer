@@ -5,7 +5,7 @@ description: Use when the ticket runner starts you on an issue labelled `upkeep`
 
 # Upkeep
 
-Once a week the ticket runner opens an `Upkeep: week of <date>` issue labelled `upkeep` and starts you on it like any other ticket. You audit what merged, measure how well the pipeline caught defects, check that the agent setup and Triphammer's install still match `main`, and file what you find. You end by posting one report comment and closing the issue. Adapted from the `gardener` skill in https://github.com/rezk2ll/skills (MIT, `plugins/gardener`).
+Once a week the ticket runner opens an `Upkeep: week of <date>` issue labelled `upkeep` and starts you on it like any other ticket. You audit what merged, measure how well the pipeline caught defects, check that the agent setup and Triphammer's install still match `main`, and file what you find. You end by posting one report comment and closing the issue.
 
 ## What you never do
 

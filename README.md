@@ -293,4 +293,4 @@ credentials. [`AGENTS.md`](AGENTS.md) has the rules for changes, including the o
 
 ## License
 
-MIT. `agent-guard.py` and `text-lint.py` include code used under the MIT License, credited in their headers.
+MIT. [`CREDITS.md`](CREDITS.md) lists the code and ideas Triphammer adapts from other projects.
