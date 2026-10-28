@@ -7,7 +7,8 @@
 # `now` is the tick's time in UTC (2026-10-17T12:00:00Z), and `owner-login` the person the runner acts for (Triphammer
 # config's OWNER), by default the owner part of owner/repo, and `state-dir` the runner's state directory, whose
 # `security-findings` and `security-followed-up` records say which pull request heads wait for a security-findings
-# repair (none without it). Prints one action, "close <issue>",
+# repair (none without it), and whose `owner-brakes` record lists the issues the owner's needs-owner brakes with or
+# without the label (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
 # or an issue labelled `next`, waits, and on why a parent whose slices are all closed stays open (a brake label), go
 # to stderr. With --closed it prints, one per line, the issues of owner/repo that the pull requests close
@@ -107,6 +108,9 @@ def records(name):
 # lines match, so a record of an older head starts nothing.
 pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
+# The issues ticket-runner found braked by the owner's needs-owner, label or no label, or could not look up
+# (its owner_brake), one number per line; it never closes or starts them either.
+owner_brakes = records("owner-brakes")
 
 slices = {}  # parent -> {k: [issues claiming slice k]}; several issues may claim the same k
 for n, issue in sorted(issues.items()):
@@ -144,6 +148,9 @@ for parent in sorted(slices):
         if brakes := sorted(labels(issues[parent]) & BRAKES):
             print(f"skip close {parent}: labelled {', '.join(brakes)}", file=sys.stderr)
             continue
+        if str(parent) in owner_brakes:
+            print(f"skip close {parent}: the owner's needs-owner brakes it", file=sys.stderr)
+            continue
         print(f"close {parent}"); sys.exit()
 
 failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"}
@@ -173,7 +180,7 @@ cite = lambda numbers: ", ".join(f"#{d}" for d in numbers)
 # Ready issues labelled `next` first, then the rest but those labelled `cleanup` (the proposals sessions leave, which
 # ticket-runner files), then those, each lowest number first; `next` never makes an issue ready.
 for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), "cleanup" in labels(issues[n]), n)):
-    if not is_open(n) or labels(issues[n]) & BRAKES:
+    if not is_open(n) or labels(issues[n]) & BRAKES or str(n) in owner_brakes:
         continue
     if not is_trusted(issues[n]):
         who = author(issues[n]) or "nobody"

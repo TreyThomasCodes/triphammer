@@ -288,6 +288,16 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
   assert.equal(decide(t, issues, [pr(60, 53)]).action, 'ticket 54');
 });
 
+test("an issue the owner's needs-owner brakes after its label is gone (the owner-brakes record) is neither started nor closed", t => {
+  assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['51']}}).action, 'ticket 52');
+  assert.equal(decide(t, [issue(51, '', {labels: ['next']}), issue(52)], [],{state: {'owner-brakes': ['51']}}).action, 'ticket 52');
+  const parent = decide(t, [issue(10), closed(11, 'Slice 1 of #10.'), issue(20)], [], {state: {'owner-brakes': ['10']}});
+  assert.equal(parent.action, 'ticket 20');
+  assert.match(parent.log, /skip close 10: the owner's needs-owner brakes it/);
+  assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['5']}}).action, 'ticket 51',
+    'whole lines only');
+});
+
 test('an issue waits for an open dependency and the previous slice, and starts once they are closed', t => {
   assert.equal(decide(t, [issue(50), issue(51, 'Depends on #50.')]).action, 'ticket 50');
   assert.equal(decide(t, [issue(50, '', {labels: ['hold']}), issue(51, 'Depends on #50.')]).action, '');
