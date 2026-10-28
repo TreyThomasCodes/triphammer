@@ -282,6 +282,36 @@ one JSON object:
 
 The status page does not read the records yet.
 
+### Cleanup proposals
+
+A session does not open issues itself. Before it starts, `ticket-runner` creates a directory of the run's own with
+`mktemp -d` (under `$TMPDIR`, outside the worktree, so nothing commits it) and an empty `proposals.jsonl` in it, and
+gives the session its path as `TRIPHAMMER_PROPOSALS`. `agent-guard.py` works out a write target that starts with
+`$TRIPHAMMER_PROPOSALS` and lets a session append to it, since it lies in a temporary directory. The simplifier
+appends one proposal for a mechanism it finds a third copy of, and the review loop one for a harness gap; the
+orchestrator lists them in its pull request comment too. Each proposal is one line, a JSON object whose fields are
+all non-empty text:
+
+```json
+{"title": "Share the retry loop around gh", "mechanism": "retry loop around gh", "locations": ["bin/a:12", "bin/b:40", "bin/c:7"], "fix": "One retry_gh helper in bin/config.sh"}
+```
+
+`locations` lists each copy. When the session has ended with exit status 0 and no brake, the runner files each
+proposal as the App with `gh issue create --label cleanup` (creating the label when the repository lacks it). A session
+that failed or timed out files none, and the runner logs that it skipped them. So does a run whose issue is labelled
+`cleanup` (a ticket's own, or one a repaired pull request closes), or whose issue's labels it could not read, so a
+filed cleanup never files more. The title is filed as data: one line,
+with control characters, line separators and runs of white space each turned into one space, trimmed and cut to 120
+characters. The body starts with the hidden marker `<!-- triphammer-cleanup: <slug> -->`, the slug being the
+mechanism lowercased with each run of other characters than `a-z` and `0-9` turned into one `-`, and quotes the
+session's text line by line, so no `Slice k of #N.` or `Depends on #N.` in it counts. One `gh issue list --state open`
+call reads the open issues' bodies first: a proposal whose marker one of them holds is skipped, so two runs that find
+the same copies file one issue, and so is a proposal whose slug an earlier line of the file had. A run files at most 10
+issues. A missing file, or one holding only blank lines, files nothing. A file that is not a regular file or is over
+256 KiB, a line that is not such an object (or whose mechanism has no letter or digit, or whose title is empty once
+made one line), a failed listing (then nothing is filed) and a failed filing are logged and never change how the run
+ends. The EXIT trap removes the directory on every ending.
+
 With the `demo` module on, when a session ends, on every path but a brake (below), before the worktree can be removed,
 `ticket-runner` runs `publish-demos` on it.
 The `demo` agent leaves a `demo.json` in each demo folder under `artifacts/web-demo/results/` (ignored by git), in the
@@ -367,6 +397,9 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
   request, a typo, an issue past the list limit) keeps the issue waiting, and the reason is printed to standard error.
 - Ready issues labelled `next` are taken before other ready issues, lowest number first. The label never makes an issue
   ready or outranks a parent to close or a repair; when a `next` issue waits, the reason is printed to standard error.
+- Ready issues labelled `cleanup` (Cleanup proposals) are taken after the other ready issues, lowest number first, so
+  they fill ticks that would otherwise idle. The order is: `next` without `cleanup`, `next` with it, the rest without
+  it, the rest with it.
 
 ## Labels
 
@@ -381,6 +414,7 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `next` | Ready issues that carry it are taken first (What a tick decides). |
 | `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
 | `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
+| `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
 
 `ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
 are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine

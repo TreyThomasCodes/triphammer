@@ -24,7 +24,7 @@
 #      with exit 0);
 #   3. runs an open issue that the owner or the App opened, whose dependencies (`Depends on #N.`, and slice k-1 of
 #      the same parent) are closed, with no open pull request and no open slices: ready issues labelled `next` first,
-#      lowest number first, then the rest in number order;
+#      lowest number first, then the rest in number order, those labelled `cleanup` last;
 #   4. when no issue labelled `upkeep` (open or closed) was created in the last 7 days, opens one titled
 #      `Upkeep: week of <UTC date>` and runs it like a ready issue; the session follows the triphammer:upkeep skill
 #      and closes the issue.
@@ -33,8 +33,9 @@
 # a branch cannot change the skills, agents or hooks it runs under), in a worktree of the project's main checkout
 # branched from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
 # its prompt names Triphammer
-# config's modules that are on. When it ends, with the demo module on, the runner publishes the demos it left in that worktree
-# (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
+# config's modules that are on. When it ends, unless a brake ended it, it failed or its issue is labelled `cleanup`, the runner files the cleanups the session
+# proposed in its proposals file ($TRIPHAMMER_PROPOSALS, file_proposals) as issues labelled `cleanup`. With the demo
+# module on, the runner publishes the demos it left in that worktree (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
 # of the run (it comments only on escalated ones that touch Triphammer and records the heads whose review found
 # something, and its failures are logged and ignored). With the demo module on, each tick also refreshes the demo gallery (bin/demo-publish --reindex). A
 # module that is off gets none of its steps and no log line.
@@ -423,6 +424,23 @@ if [ "$kind" = ticket ] && jq -e --argjson n "$number" \
   [ "$attempts" -gt 1 ] || [ -e "$reset_file" ] || builder=triphammer:builder-light builder_model=sonnet
 fi
 
+# A run on a `cleanup` issue, a ticket's own or one a repaired pull request closes in this repository, files none of
+# its session's proposals (file_proposals), so a filed cleanup cannot file cleanups in turn. $no_proposals holds the
+# reason; a failed lookup files none either.
+# shellcheck disable=SC2016  # the jq variables are jq's
+no_proposals=""
+if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo "$repo" --slurpfile prs "$state/prs.json" '
+  (if $kind == "ticket" then [$n] else [$prs[0][] | select(.number == $n) | .closingIssuesReferences[]?
+     | select((.repository | not)
+         or ((.repository.owner.login // "") + "/" + (.repository.name // "") | ascii_downcase) == ($repo | ascii_downcase))
+     | .number] end) as $own
+  | [.[] | select((.number | IN($own[])) and any(.labels[]?; .name == "cleanup")) | "#\(.number)"]
+  | join(" ")' "$state/issues.json" 2>/dev/null)"; then
+  no_proposals="could not look up whether the run's issue is labelled cleanup"
+elif [ -n "$cleanup_issues" ]; then
+  no_proposals="issue $cleanup_issues is labelled cleanup"
+fi
+
 # A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
 # tracks origin/main: the Co-Authored-By trailer), so a branch cut before a hook existed, or a project without hooks of
 # its own, still gets it and a branch cannot change its own hook. core.hooksPath is set in that worktree's own config,
@@ -551,7 +569,9 @@ end_session() {
 labelled=issue
 [ "$kind" = ticket ] || labelled="pr"
 session="" watcher=""  # the session's pid and the brake watcher's, once they run
-trap '{ end_session || true; }; rm -f "$state/current" || true; working_label remove "$labelled" "$number"' EXIT
+proposals_dir=""  # the run's proposals directory (file_proposals), once it exists
+trap '{ end_session || true; }; rm -f "$state/current" || true; [ -z "$proposals_dir" ] || rm -rf "$proposals_dir" || true
+  working_label remove "$labelled" "$number"' EXIT
 trap 'exit 143' TERM INT HUP
 write_current() {
   replace_file "$state/current" "$(printf 'pid %s\nstarted %s\nkind %s\nnumber %s\nbranch %s\nprs %s' \
@@ -641,6 +661,89 @@ brake_watch() {
   done
 }
 
+# The session's cleanup proposals (bin/README.md, Cleanup proposals): an empty file in a temporary directory of the
+# run's own, outside the worktree so nothing commits it, which the session appends to through $TRIPHAMMER_PROPOSALS
+# and file_proposals reads when the session has ended. The EXIT trap removes the directory.
+proposals_dir="$(mktemp -d)"
+proposals="$proposals_dir/proposals.jsonl"
+: > "$proposals"
+# The most issues one run files; the proposals past it are logged and dropped, so a session that loops cannot flood
+# the repository.
+proposals_limit=10
+# file_proposals: files each proposal in $proposals as an issue labelled `cleanup`, as the App, with a hidden marker
+# built from its mechanism, skipping one whose marker an open issue's body holds already or an earlier line of the
+# file repeats. Each line is a JSON object with a title, a mechanism, a list of locations and a fix, all non-empty
+# text. The title is filed as data: one line, its control characters, line separators and runs of white space turned
+# into one space, trimmed, at most 120 characters; one that ends up empty is skipped as malformed. A missing or empty
+# file files nothing; a file that is not a regular file, is too large, or a line that is no such object is logged and
+# skipped; and a failed lookup or filing is logged. None of it changes how the run ends.
+# The session's text goes into the body quoted, line by line, so no `Slice k of #N.` or `Depends on #N.` in it counts
+# (ticket-decide.py ignores blockquotes).
+# shellcheck disable=SC2016  # the jq variables are jq's
+file_proposals() {
+  local open line at=0 filed=0 count entry slug title body marker url where=issue
+  local -A seen=()
+  [ "$kind" = ticket ] || where="pull request"
+  if [ -L "$proposals" ] || { [ -e "$proposals" ] && [ ! -f "$proposals" ]; }; then
+    log "$kind #$number: the proposals file is not a regular file; filing none"
+    return 0
+  fi
+  [ -e "$proposals" ] || return 0
+  if [ -n "$no_proposals" ]; then
+    # grep -c fails on a file with no non-blank line, which has no proposals to skip.
+    count="$(grep -c '[^[:space:]]' "$proposals")" && log "$kind #$number: $no_proposals; filing none of the session's $count proposals"
+    return 0
+  fi
+  if [ "$(stat -c %s "$proposals")" -gt 262144 ]; then
+    log "$kind #$number: the proposals file is larger than 256 KiB; filing none"
+    return 0
+  fi
+  grep -q '[^[:space:]]' "$proposals" || return 0
+  if ! open="$(gh issue list -R "$repo" --state open --limit 1000 --json body --jq '.[].body' 2>/dev/null)"; then
+    log "$kind #$number: could not list the open issues to check the proposals' markers; filing none"
+    return 0
+  fi
+  gh label create cleanup -R "$repo" --color BFD4F2 \
+    --description "A cleanup a session proposed; Triphammer takes it after the other ready issues" >/dev/null 2>&1 || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    at=$((at + 1))
+    [ -n "${line//[[:space:]]/}" ] || continue
+    # jq before 1.8 (Ubuntu 24.04 ships 1.7.1) rejects an object value with an operator outside parentheses.
+    if ! entry="$(jq -Rc --arg where "$where #$number" '
+        def text: type == "string" and (gsub("\\s"; "") | length > 0);
+        def oneline: gsub("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\s]+"; " ") | ltrimstr(" ") | rtrimstr(" ");
+        def quote: gsub("[\r\u000b\u000c\u001c-\u001e\u0085  ]"; "\n") | split("\n") | map("> " + .)
+          | join("\n");
+        fromjson
+        | select(type == "object" and (.title | text) and (.mechanism | text) and (.fix | text)
+            and (.locations | type == "array" and length > 0 and all(.[]; text)))
+        | {slug: (.mechanism | ascii_downcase | gsub("[^a-z0-9]+"; "-") | .[:100] | gsub("^-+|-+$"; "")),
+           title: (.title | oneline | .[:120] | oneline),
+           body: ("A ticket runner session proposed this cleanup while it worked on \($where). Its text is quoted.\n\n"
+             + "Mechanism:\n\n\(.mechanism | quote)\n\nCopies:\n\n\(.locations | map("- " + .) | join("\n") | quote)\n\n"
+             + "Suggested fix:\n\n\(.fix | quote)\n")}
+        | select(.slug != "" and .title != "")' <<< "$line" 2>/dev/null)" || [ -z "$entry" ]; then
+      log "$kind #$number: proposal on line $at is not a JSON object with a title, mechanism, locations and fix; skipped"
+      continue
+    fi
+    slug="$(jq -r .slug <<< "$entry")" title="$(jq -r .title <<< "$entry")" body="$(jq -r .body <<< "$entry")"
+    marker="<!-- triphammer-cleanup: $slug -->"
+    if [ -n "${seen[$slug]:-}" ]; then
+      log "$kind #$number: proposal on line $at repeats the mechanism $slug; skipped"
+    elif grep -qF -- "$marker" <<< "$open"; then
+      log "$kind #$number: an open issue already proposes the mechanism $slug; skipped"
+    elif [ "$filed" -ge "$proposals_limit" ]; then
+      log "$kind #$number: proposal on line $at is past the limit of $proposals_limit issues a run files; skipped"
+    elif url="$(gh issue create -R "$repo" --title "$title" --label cleanup --body "$marker"$'\n'"$body" 2>&1)"; then
+      filed=$((filed + 1))
+      log "$kind #$number: filed #${url##*/} for the proposed cleanup of $slug"
+    else
+      log "$kind #$number: could not file the proposed cleanup of $slug: $(tail -n 1 <<< "$url")"
+    fi
+    seen[$slug]=1
+  done < "$proposals"
+}
+
 log "$kind #$number${reason:+ ($reason)}: run $attempts of 3 starting; transcript $run"
 status=0
 brake_file="$state/brake"
@@ -651,8 +754,9 @@ rm -f "$brake_file"
 # TRIPHAMMER_SESSION tells the plugin's agent-guard hook that Triphammer started the session and names the only
 # directory, besides the temporary ones, it may write (plugins/triphammer/hooks/agent-guard.py, worktree-only).
 # TRIPHAMMER_OWNER is the owner checked above, the login scripts/land-pr.sh requests an escalation's review from; the
-# App's token cannot read repository variables, so the session gets it here.
-(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# App's token cannot read repository variables, so the session gets it here. TRIPHAMMER_PROPOSALS is the proposals
+# file, in a temporary directory, which the hook lets a session write.
+(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep
@@ -691,6 +795,13 @@ if [ -f "$brake_file" ]; then
   log "$kind #$number: ended by the owner's brake: $(cat "$brake_file"); not counted (exit $status)"
   rm -f "$brake_file"
   exit 0
+fi
+# A session that succeeded (exit 0) and was not braked files its proposals. A failed or timed-out session files none:
+# what it left is not taken as finished work, and the skip is logged.
+if [ "$status" -ne 0 ]; then
+  log "$kind #$number: the session failed (exit $status); filing none of its proposals"
+else
+  file_proposals || log "$kind #$number: filing the proposals failed"
 fi
 # A security-findings repair session that ended normally followed its head up: the security-followed-up record gets the
 # head's line, so neither ticket-decide.py nor merge-when-ready waits on it any more. Only the runner writes the record

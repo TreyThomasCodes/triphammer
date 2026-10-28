@@ -337,6 +337,22 @@ test('a repair and a parent to close come before an issue labelled next', t => {
   assert.equal(decide(t, [issue(10), closed(11, 'Slice 1 of #10.'), next(52)]).action, 'close 10');
 });
 
+// The `cleanup` label.
+
+const cleanup = (number, labels = []) => issue(number, '', {labels: ['cleanup', ...labels]});
+
+test('a ready issue labelled cleanup is taken after the other ready issues, and alone when it is the only one', t => {
+  assert.equal(decide(t, [cleanup(50), issue(52)]).action, 'ticket 52');
+  assert.equal(decide(t, [cleanup(51), cleanup(50), issue(52, 'Depends on #49.'), closed(49)]).action, 'ticket 52');
+  assert.equal(decide(t, [cleanup(51), cleanup(50)]).action, 'ticket 50');
+  assert.equal(decide(t, [cleanup(50), issue(52, '', {labels: ['hold']})]).action, 'ticket 50');
+});
+
+test('an issue labelled cleanup and next is taken before an ordinary ready issue, after one labelled next only', t => {
+  assert.equal(decide(t, [issue(50), cleanup(52, ['next'])]).action, 'ticket 52');
+  assert.equal(decide(t, [cleanup(50, ['next']), next(52)]).action, 'ticket 52');
+});
+
 // Superseded check runs.
 
 test('a check with a cancelled older run and a passing newer run is not repaired', t => {

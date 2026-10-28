@@ -88,7 +88,8 @@
 #               brace expansion as the words it makes, among the file operands of tee, truncate, rm, mkdir, touch,
 #               chmod and the like. A target the hook cannot work out before the command runs is refused too: a part
 #               computed at run time ($VAR/x, $(...), `...`, a command substitution among a writer's arguments)
-#               other than a leading $HOME, $TMPDIR, $PWD (the directory the command is in) or a variable the
+#               other than a leading $HOME, $TMPDIR, $TRIPHAMMER_PROPOSALS (whose file must still lie in those
+#               places), $PWD (the directory the command is in) or a variable the
 #               persistence rule expands, read from the hook's environment unless the command itself mentions it
 #               other than as $NAME or ${NAME} (TMPDIR=, export, read, ${TMPDIR:=x}); ~+ and ~-; a brace expansion
 #               anywhere else among a writer's words (cp {a,b}), or in a word with a quote or a $; an extglob
@@ -394,8 +395,9 @@ REMOVERS = {"rm", "rmdir", "unlink"}  # they remove one name of a file, and leav
 SUBSTITUTION_WRITERS = {"tee", "rsync", "dd", "truncate", "link", "cp", "mv", "ln", "install"} | set(PATH_CHANGERS)
 # Leading variables a path may start with, expanded from the hook's own environment, which the shell shares.
 PATH_VARIABLES = ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TRIPHAMMER_SHARED_DIR")
-# The leading variables the worktree-only rule expands: those, $TMPDIR, and $PWD as the directory the command is in.
-SESSION_VARIABLES = PATH_VARIABLES + ("TMPDIR", "PWD")
+# The leading variables the worktree-only rule expands: those, $TMPDIR, $TRIPHAMMER_PROPOSALS (the proposals file
+# bin/ticket-runner makes in a temporary directory), and $PWD as the directory the command is in.
+SESSION_VARIABLES = PATH_VARIABLES + ("TMPDIR", "TRIPHAMMER_PROPOSALS", "PWD")
 HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
 MARKER = re.compile(r"\x00(\d+)\x00$")
 
