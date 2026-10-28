@@ -288,6 +288,35 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
   assert.equal(decide(t, issues, [pr(60, 53)]).action, 'ticket 54');
 });
 
+// `gh --json labels` reads only the first 100 labels, so a brake may be past them (labels_unread in bin/labels.sh).
+const manyLabels = count => Array.from({length: count}, (_, i) => `label-${i}`);
+
+test('an issue with 100 labels or more is skipped, and the runner says why; 99 labels are read in full', t => {
+  for (const count of [100, 101]) {
+    const {action, log} = decide(t, [issue(50, '', {labels: manyLabels(count)}), issue(51)]);
+    assert.equal(action, 'ticket 51', String(count));
+    assert.match(log, /#50 waits: 100 labels or more/);
+  }
+  assert.equal(decide(t, [issue(50, '', {labels: manyLabels(99)}), issue(51)]).action, 'ticket 50');
+});
+
+test('a pull request with 100 labels or more is not repaired, and the runner says why; 99 labels are read in full', t => {
+  const dirty = {mergeStateStatus: 'DIRTY'};
+  const {action, log} = decide(t, [issue(30), issue(31)],
+    [pr(40, 30, {...dirty, labels: manyLabels(100)}), pr(41, 31, dirty)]);
+  assert.equal(action, 'repair 41 31 conflicts');
+  assert.match(log, /skip repair 40: 100 labels or more/);
+  assert.equal(decide(t, [issue(30)], [pr(40, 30, {...dirty, labels: manyLabels(99)})]).action,
+    'repair 40 30 conflicts');
+});
+
+test('a parent with 100 labels or more stays open when its last slice closes, and the runner says why', t => {
+  const {action, log} = decide(t, [issue(10, '', {labels: manyLabels(100)}), closed(11, 'Slice 1 of #10.'), issue(20)]);
+  assert.equal(action, 'ticket 20');
+  assert.match(log, /skip close 10: 100 labels or more/);
+  assert.equal(decide(t, [issue(10, '', {labels: manyLabels(99)}), closed(11, 'Slice 1 of #10.')]).action, 'close 10');
+});
+
 test('an issue waits for an open dependency and the previous slice, and starts once they are closed', t => {
   assert.equal(decide(t, [issue(50), issue(51, 'Depends on #50.')]).action, 'ticket 50');
   assert.equal(decide(t, [issue(50, '', {labels: ['hold']}), issue(51, 'Depends on #50.')]).action, '');

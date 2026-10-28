@@ -22,6 +22,7 @@ triphammer_labels=(
 # `.labels.nodes[].name` (GraphQL). ticket-runner and merge-when-ready prefix their label filters with it:
 # --jq "$labelled_jq"'labelled("hold")'. It also defines labels_unread, true when the input's `.labels` (the gh --json
 # shape) holds 100 labels or more: gh reads only the first 100 and says nothing of the rest, so a brake may be among them.
+# bin/ticket-decide.py's UNREAD holds the same threshold.
 # shellcheck disable=SC2034,SC2016  # read by the scripts that source this file; the $ is jq's
 labelled_jq='def labelled($name): any((.labels | if type == "object" then .nodes else . end)[]?; .name | ascii_downcase == $name);
   def labels_unread: (.labels | length) >= 100; '
