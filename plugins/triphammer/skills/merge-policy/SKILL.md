@@ -15,7 +15,7 @@ Land a pull request, from a checkout of its pushed branch, with `main`'s copy of
 land-pr <n>
 ```
 
-`land-pr` (`bin/land-pr`, on `PATH` on the agent machine) fetches `main` in Triphammer's checkout, the one it lives in, which may be a repository other than the project's, refuses to run unless it is itself byte for byte that `main`'s copy, and runs that `main`'s `scripts/land-pr.sh`, which also arms auto-merge, so there is no separate arming step. Where `land-pr` is not on `PATH`, in a repository that has the landing script itself, run `main`'s script directly:
+`land-pr` (`bin/land-pr`, on `PATH` on the agent machine) fetches `main` from the origin of Triphammer's checkout, the one it lives in, which may be a repository other than the project's, into a temporary repository it removes when it ends, refuses to run unless it is itself byte for byte that `main`'s copy, and runs that `main`'s `scripts/land-pr.sh`, which also arms auto-merge, so there is no separate arming step. Where `land-pr` is not on `PATH`, in a repository that has the landing script itself, run `main`'s script directly:
 
 ```sh
 git fetch origin main && git show refs/remotes/origin/main:scripts/land-pr.sh | bash -s -- <n>
