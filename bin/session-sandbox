@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Runs a command under the sessions' write limit: bubblewrap (bwrap) mounts the whole file system read-only and makes
+# writable only what a session needs, so neither the command nor anything it starts (Edit and Write, Bash, python and
+# node scripts, subagents, git hooks) can write anywhere else. ticket-runner starts every session through it.
+# See bin/README.md (The write limit).
+#
+#   session-sandbox <run directory> <command> [argument...]
+#
+# Writable inside, each only when it exists (the ones marked * are created first):
+#   - the run directory, the session's worktree;
+#   - the git common directory of the run directory (git rev-parse --git-common-dir): the main checkout's .git, where
+#     a worktree writes its commits, refs and worktrees/<name>. It stays writable only until each run gets a clone of
+#     its own (#93). Until then a session can write a config (core.fsmonitor, core.hooksPath) or a hook there that the
+#     next tick's git commands in the main checkout, outside the limit, run. Triphammer's checkout's .git, unless it
+#     is the main checkout's, stays read-only: land-pr fetches main into a temporary repository instead;
+#   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
+#   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude} and ~/.claude.json, its
+#     state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
+#     ${XDG_DATA_HOME:-~/.local/share}/NuGet* (http-cache, v3-cache, plugins-cache), and $NUGET_PACKAGES*,
+#     $NUGET_HTTP_CACHE_PATH* and $NUGET_PLUGINS_CACHE_PATH* when they are set;
+#   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
+#     ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer*) and agent-guard.py's guard-overrides.log* in the shared
+#     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone;
+#   - what the upkeep audits write through local-audit --model codex: its run count in
+#     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and ${CODEX_HOME:-~/.codex}, where Codex writes its databases,
+#     logs, sessions, caches and refreshed login in the directory itself;
+#   - when docker is installed or ${DOCKER_CONFIG:-~/.docker} exists, its buildx* directory, where docker build and
+#     docker compose build keep their builder state; the rest of the directory (config.json, cli-plugins, contexts)
+#     configures docker, which the runner also runs outside the limit, and stays read-only, created or not;
+#   - when dotnet is installed or ${DOTNET_CLI_HOME:-~}/.dotnet exists, that .dotnet* and .templateengine* beside it,
+#     each as a tmpfs that the session's writes go to and that is gone when it ends: the CLI writes its per-user state
+#     (first-use sentinels per SDK version, toolResolverCache, telemetry) into .dotnet, which also holds the SDK when
+#     it is installed there and is on PATH, and dotnet new its template cache into .templateengine. In .dotnet the
+#     entries that exist when the command starts stay there read-only (the dotnet host, sdk, shared, host, packs,
+#     templates, the global tools in tools, the sentinels), but for the CLI's state directories toolResolverCache,
+#     TelemetryStorageService and sdk-advertising, which start empty; .templateengine starts empty.
+# Inside these directories, the parts that would change later sessions stay read-only, the ones that exist when the
+# command starts: in Claude Code's, settings*.json, CLAUDE.md, agents, commands, skills, hooks and plugins; in Codex's,
+# *.toml (config.toml*, created empty when the directory exists, as Codex itself adds to it), .env, AGENTS*.md,
+# hooks.json, agents, rules, prompts, skills, plugins and themes; local-audit's codex-settings; and NuGet's user configs
+# in ~/.nuget, NuGet/NuGet.Config (in any case NuGet reads) and config, which can point later restores at other
+# package sources.
+#
+# The command also gets a /dev of its own, and a process namespace of its own with its /proc, so it cannot see or
+# signal the machine's other processes; the processes outside still see it, so ticket-runner's brake stops it. The
+# network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
+# when the command exits.
+#
+# Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
+# session may create or replace it), such as a ~/.codex/AGENTS.md or ~/.nuget/NuGet/NuGet.Config the machine does not
+# have; anything a writable path above lets a later session read (a cache, ~/.claude.json, Codex's databases,
+# local-audit's run count, or buildx's builder state, which picks the builder a later docker build uses); and the
+# Docker socket, or any other socket of a service outside, which the command can still reach: a container started
+# through Docker can write anywhere on the machine.
+#
+# Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout or bwrap fails.
+set -euo pipefail
+
+fail() { echo "session-sandbox: $1" >&2; exit "${2:-1}"; }
+[ $# -ge 2 ] || fail "usage: session-sandbox <run directory> <command> [argument...]" 2
+run_dir="$(readlink -f -- "$1")" && [ -d "$run_dir" ] || fail "$1 is not a directory" 2
+shift
+common="$(git -C "$run_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || fail "$run_dir is not in a git checkout"
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}"
+claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+humanizer="${TRIPHAMMER_HUMANIZER_STATE:-$state/triphammer/humanizer}"
+overrides="${TRIPHAMMER_SHARED_DIR:-$state/triphammer}/guard-overrides.log"
+codex="${CODEX_HOME:-$HOME/.codex}"
+nuget=("${XDG_DATA_HOME:-$HOME/.local/share}/NuGet" ${NUGET_PACKAGES:+"$NUGET_PACKAGES"}
+  ${NUGET_HTTP_CACHE_PATH:+"$NUGET_HTTP_CACHE_PATH"} ${NUGET_PLUGINS_CACHE_PATH:+"$NUGET_PLUGINS_CACHE_PATH"})
+mkdir -p -- "$HOME/.cache" "${nuget[@]}"
+[ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
+(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" && mkdir -p -- "$(dirname "$overrides")" && : >> "$overrides")
+# Codex adds a project's trust level to its config.toml itself, so a missing one would be created inside; an empty one
+# reads as none and is kept read-only below.
+[ ! -d "$codex" ] || (umask 077 && : >> "$codex/config.toml")
+
+args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc)
+# bind <option> <path...>: mounts each path that exists onto itself, symlinks resolved, after what came before, so a
+# later mount wins inside an earlier one.
+bind() {
+  local option="$1" path
+  shift
+  for path; do
+    [ -n "$path" ] && [ -e "$path" ] || continue
+    path="$(readlink -f -- "$path")"
+    args+=("$option" "$path" "$path")
+  done
+}
+bind --bind "$common" "$run_dir" /tmp "${TMPDIR:-}" \
+  "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "${nuget[@]}" "$humanizer" "$overrides" \
+  "$state/local-audit" "$codex"
+bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$claude/commands" "$claude/skills" \
+  "$claude/hooks" "$claude/plugins" "$state/local-audit/codex-settings" \
+  "$codex"/*.toml "$codex/.env" "$codex"/AGENTS*.md "$codex/hooks.json" "$codex/agents" "$codex/rules" \
+  "$codex/prompts" "$codex/skills" "$codex/plugins" "$codex/themes" \
+  "$HOME/.nuget/NuGet"/[Nn]u[Gg]et.[Cc]onfig "$HOME/.nuget/config"
+bind --bind "$claude/plugins/data"
+docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
+if [ -d "$docker_config" ] || command -v docker >/dev/null 2>&1; then
+  (umask 077 && mkdir -p -- "$docker_config/buildx")
+  bind --bind "$docker_config/buildx"
+fi
+# .dotnet and .templateengine as tmpfs, what .dotnet holds read-only on top of it but for the CLI's state directories.
+dotnet_home="${DOTNET_CLI_HOME:-$HOME}/.dotnet"
+if [ -d "$dotnet_home" ] || command -v dotnet >/dev/null 2>&1; then
+  templates="$(dirname "$dotnet_home")/.templateengine"
+  mkdir -p -- "$dotnet_home" "$templates"
+  dotnet_home="$(readlink -f -- "$dotnet_home")"
+  args+=(--tmpfs "$(readlink -f -- "$templates")" --tmpfs "$dotnet_home")
+  for path in "$dotnet_home"/* "$dotnet_home"/.[!.]* "$dotnet_home"/..?*; do
+    [ -e "$path" ] || continue
+    case "${path##*/}" in toolResolverCache | TelemetryStorageService | sdk-advertising) continue ;; esac
+    args+=(--ro-bind "$path" "$path")
+  done
+fi
+
+exec bwrap "${args[@]}" -- "$@"

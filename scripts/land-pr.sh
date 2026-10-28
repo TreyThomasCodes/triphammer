@@ -8,7 +8,8 @@
 #   blocked   refuse with the reasons and change nothing
 # Usage, from the pull request's branch, always with main's copy so a branch cannot change its own landing:
 #   git fetch origin main && git show refs/remotes/origin/main:scripts/land-pr.sh | bash -s -- <pr>
-# or, for a project that is another repository than Triphammer's checkout <dir> (bin/land-pr does this):
+# or, for a project that is another repository than Triphammer's, from a repository <dir> whose
+# refs/remotes/origin/main is Triphammer's main (bin/land-pr fetches one into a temporary repository):
 #   git -C <dir> show refs/remotes/origin/main:scripts/land-pr.sh | TRIPHAMMER_CHECKOUT=<dir> bash -s -- <pr>
 # Exit code: 0 landed (auto or escalate), 3 blocked, 1 anything else (a closed or merged PR, a classifier or gh error).
 set -euo pipefail
@@ -31,8 +32,9 @@ main() {
   fi
 
   # Main's wrapper and main's classifier, fully qualified so a tag named origin/main cannot stand in for it. Both come
-  # from Triphammer's checkout, $TRIPHAMMER_CHECKOUT (bin/land-pr sets it, and risk-tier-base.sh reads it too),
-  # or this repository when that is unset; the diff and the rules come from this repository's origin/main.
+  # from $TRIPHAMMER_CHECKOUT, a repository holding Triphammer's main (bin/land-pr sets it to the temporary one it
+  # fetched, and risk-tier-base.sh reads it too), or this repository when that is unset; the diff and the rules come
+  # from this repository's origin/main.
   from=(git)
   [ -z "${TRIPHAMMER_CHECKOUT:-}" ] || from=(git -C "$TRIPHAMMER_CHECKOUT")
   tier=0

@@ -47,6 +47,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
+| `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory, its git common directory, the temporary directories and what Claude Code writes in the home directory; `ticket-runner` starts every session through it. See Sessions, The write limit. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
 | `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. When the updated checkout's files differ from its commit, it creates the shared `stop` file and restarts nothing. `ticket-runner` calls it; see below. |
 | `demo-gallery` | The `demo` module's web server: serves `DEMO_GALLERY_DIR` read-only at `http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/` until stopped. GET and HEAD only (anything else gets 405); a directory serves its `index.html` and is never listed; a path that leaves the gallery, by `..` or by a symlink whose target lies outside it, and anything but a regular file get 404. With the module off, `DEMO_GALLERY_DIR` missing or the config malformed it exits 2 naming why. `DEMO_URL` is the address the owner publishes, which may be this server itself or a proxy in front of it. |
@@ -54,7 +55,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `publish-demos` | The `demo` module. Runs `demo-publish` for each demo a session left in its worktree; `ticket-runner` calls it when a session ends. See below. |
 | `local-audit` | The `qwen-audit` and `codex` modules. Audits one area with Triphammer's local Qwen model or with Codex, the second and third models of the weekly upkeep audit; see below. |
 | `security-review` | The `codex` module. Security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session, and a head whose review found something gets a repair session that follows the findings up. `--full-area` audits the whole area for the monthly upkeep run. See below. |
-| `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the worktree whose HEAD is its pushed head, fetches `main` in Triphammer's checkout (the one `land-pr` resolves to through its link) and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the checkout, so `land-pr.sh` runs Triphammer `main`'s classifier against the worktree's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
+| `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the worktree whose HEAD is its pushed head, fetches `main` from the origin of Triphammer's checkout (the one `land-pr` resolves to through its link) into a temporary bare repository under `$TMPDIR`, which it removes when it ends, never into the checkout itself, and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the temporary repository, so `land-pr.sh` runs Triphammer `main`'s classifier against the worktree's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
 | `merge-when-ready` | A serial merge queue per repository, as the GitHub App (the `triphammer:merge-policy` skill), that merges armed pull requests and brings them up to date one at a time, stops for the owner's brakes and keeps off the branches a `ticket-runner` run works on. With a project (`TRIPHAMMER_PROJECT`) it serves only that project's repository, reads that project's runner and starts it after a merge. Its header lists the rules. |
 | `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. Its header lists the rules. |
 | `gh` | Runs the first other `gh` on `PATH` with `GH_TOKEN` from the `github-app-token` beside it (symlinks resolved), for the account of its `-R`/`--repo` argument when it has one; when no token can be had it runs nothing and exits 1. |
@@ -64,9 +65,9 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `demo-gallery@.service` | Runs `demo-gallery` for the project named by the instance, with `TRIPHAMMER_PROJECT=<project>`, restarting it when it fails, except on exit 2 (a config to fix). Only for a project with the `demo` module on. |
 | `ticket-runner.service`, `ticket-runner.timer`, `merge-when-ready.service`, `merge-when-ready.timer` | The same for the one project of the checkout the scripts live in, without `TRIPHAMMER_PROJECT`, for a machine not yet cut over to the template units (see Install). |
 
-`ticket-runner` calls `ticket-decide.py`, `update-checkout`, `demo-publish`, `publish-demos` and `security-review`
-from the directory it really lives in (symlinks resolved), so it always uses the copies next to it; the last three only
-when their module is on (see Modules).
+`ticket-runner` calls `ticket-decide.py`, `update-checkout`, `session-sandbox`, `demo-publish`, `publish-demos` and
+`security-review` from the directory it really lives in (symlinks resolved), so it always uses the copies next to it;
+the last three only when their module is on (see Modules).
 
 ## Configuration
 
@@ -252,7 +253,8 @@ and the temporary directories, writes no git configuration (`git config` and `gi
 set only for its own branch in its worktree), sets no one-command `git -c` key that makes git run a command or changes
 what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`. A `# guard-override:`
 token lifts none of these, only the shell-edit rule, and the hook logs each override it honors to `guard-overrides.log`
-in the shared directory; the hook's header lists what it checks and what it does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
+in the shared directory; the hook's header lists what it checks and what it does not cover. Below the hook, the
+write limit (below) holds the session's writes at the OS level. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
 that are on. A tick whose Triphammer `origin/main` has no
 `plugins/triphammer/skills/ticket-run/SKILL.md` starts no session.
 
@@ -266,6 +268,71 @@ that comment and `origin/ticket/<N>`. When the owner removes `needs-owner` and t
 writes `attempts/ticket-N.reset`, and run 1 of a restarted counter uses `triphammer:builder`, since the light run already
 failed on the issue; the file goes with the counter when a run makes progress. A run a brake or a usage limit stops
 does not count, so the next run is the same run again with the same builder. Repairs always use `triphammer:builder`.
+
+### The write limit
+
+Every session runs under an OS-level write limit, below the guard hook: `ticket-runner` starts `claude -p` through
+`session-sandbox <worktree>`, which runs it under bubblewrap (`bwrap`) with the whole file system mounted read-only
+and only these paths writable:
+
+- the run's worktree;
+- the main checkout's `.git` (the worktree's git common directory), where a worktree writes its commits, refs and
+  `worktrees/<name>`. It stays writable until each run gets a clone of its own (#93), and until then a session can
+  still reach the next tick's git commands through it: a config there (`core.fsmonitor`, `core.hooksPath`) or a hook
+  runs when the runner, outside the limit, next runs git in the main checkout. Triphammer's checkout's `.git`, unless it
+  is the main checkout's, stays read-only: `land-pr` fetches `main` into a temporary repository instead;
+- `/tmp`, and `$TMPDIR` when it is set, where the proposals file lives;
+- what Claude Code writes in the home directory: `~/.claude` (or `$CLAUDE_CONFIG_DIR`) and `~/.local/state/claude`, but
+  not the parts that would change later sessions, `settings*.json`, `CLAUDE.md`, `agents`, `commands`, `skills`,
+  `hooks` and `plugins` (apart from `plugins/data`, where plugin hooks keep their data), which stay read-only;
+- the caches commands fill: `~/.cache`, `~/.npm`, `~/.nuget` and NuGet's `~/.local/share/NuGet` (or
+  `$XDG_DATA_HOME/NuGet`), where `dotnet restore` keeps its HTTP, v3 and plugins caches, and `$NUGET_PACKAGES`,
+  `$NUGET_HTTP_CACHE_PATH` and `$NUGET_PLUGINS_CACHE_PATH` when they are set; `session-sandbox` creates each of these
+  NuGet directories when it is missing. NuGet's user configs in `~/.nuget`, `NuGet/NuGet.Config` and `config`, stay
+  read-only, as they can point later restores at other package sources;
+- the plugin hooks' own files: `text-lint.py`'s humanizer records and `agent-guard.py`'s `guard-overrides.log`;
+- what the upkeep audits write through `local-audit --model codex` (and `security-review --full-area`, which runs
+  it): `~/.local/state/local-audit`, where it counts Codex runs, but not its `codex-settings`, which stays read-only;
+  and `~/.codex` (or `$CODEX_HOME`), where Codex keeps its SQLite databases and their journals, logs, sessions,
+  caches and refreshed login in the directory itself, but not the parts that change how later Codex runs work,
+  `*.toml`, `.env`, `AGENTS*.md`, `hooks.json`, `agents`, `rules`, `prompts`, `skills`, `plugins` and `themes`, which
+  stay read-only. Codex adds a project's trust level to `config.toml` itself, so `session-sandbox` first creates an
+  empty one when `~/.codex` has none. Under the limit Codex can neither save that trust level nor refresh its plugin
+  cache; it carries on without them;
+- when docker is installed, buildx's builder state in `~/.docker/buildx` (or `$DOCKER_CONFIG/buildx`), which
+  `docker build` and `docker compose build` write; `session-sandbox` creates it when it is missing. The rest of the
+  Docker config directory, `config.json`, `cli-plugins` and `contexts` among it, configures the `docker` the runner
+  also runs outside the limit, and stays read-only;
+- when dotnet is installed, the dotnet CLI's per-user state for the session alone: `~/.dotnet` (or
+  `$DOTNET_CLI_HOME/.dotnet`) and `~/.templateengine` beside it each become a tmpfs that is gone when the session
+  ends. The CLI writes its first-use sentinels per SDK version, `toolResolverCache` (for `dotnet tool restore`) and
+  telemetry into `~/.dotnet`, and `dotnet new` its template cache into `~/.templateengine`. `~/.dotnet` also holds the
+  SDK when it is installed there and is on `PATH`, so what it holds when the session starts stays there read-only
+  on top of the tmpfs: the `dotnet` host, `sdk`, `shared`, `host`, `packs`, `templates`, the global tools in `tools`
+  and the sentinels, but for the CLI's state directories `toolResolverCache`, `TelemetryStorageService` and
+  `sdk-advertising`, which start empty. Each session therefore restores its local tools' resolution from
+  `~/.nuget/packages` and, after an SDK update nothing outside has run, goes through the CLI's first use again.
+
+Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
+directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:
+the Edit and Write tools, Bash commands, python or node scripts the guard does not parse, git hooks and subagents, as
+they all run in its process tree. Claude Code cannot save `~/.claude.json` under the limit; it logs that and carries on.
+The session also gets a process namespace of its own, so it neither sees nor signals the machine's other processes,
+while the runner still sees the session's and its brake stops them. The network is shared.
+
+The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
+tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
+covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
+the machine; a protected `~/.claude`, `~/.codex`, `local-audit` or NuGet part that does not exist when the session
+starts, or is a symlink, such as a `~/.codex/AGENTS.md` or `~/.nuget/NuGet/NuGet.Config` the machine does not have; and what a writable path above lets a later
+session read, such as a cache, Codex's databases or buildx's builder state, which picks the builder a later `docker
+build` uses.
+
+Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without
+`bwrap` or where `bwrap` cannot create a user namespace, the runner logs why, starts no session and exits 1; `ticket-runner
+--doctor` names the fix. `provision` installs bubblewrap and the AppArmor profile `/etc/apparmor.d/bwrap` that lets it
+create user namespaces on Ubuntu. The upkeep session runs under the limit too, with its Codex audits; Codex's
+settings stay read-only because the security review after each session runs Codex outside the limit with them.
 
 ### Run records
 
@@ -705,7 +772,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next`, `agent-working` and `light` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | Plugins | `claude plugin list --json` lists at user scope the Triphammer plugin (named by `.claude-plugin/marketplace.json` in Triphammer's checkout) and `humanizer@humanizer`, as `provision` checks them. Each missing one is a problem whose fix is running the installer again; a list that fails is a problem of its own, never a pass. Skipped without `jq`. |
-| bwrap | With the `codex` module on, `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: Codex's sandbox needs unprivileged user namespaces, which Ubuntu restricts with AppArmor. |
+| bwrap | `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: the sessions' write limit (Sessions, The write limit), and Codex's sandbox, need unprivileged user namespaces, which Ubuntu restricts with AppArmor. Without them the runner starts no session. |
 | Qwen | `QWEN_BASE_URL` answers an HTTP request within 10 seconds, with the `qwen-audit` module on (any status counts; no key is sent). |
 | Units | `systemctl --user is-enabled` says `enabled` for `ticket-runner@<project>.timer` and `merge-when-ready@<project>.timer`, and for `demo-gallery@<project>.service` with the `demo` module on. Left out with `--before-start`. |
 | Checkout | `CHECKOUT` is on `main` with a clean tree, and after `git fetch origin` (the doctor's one change) its HEAD is `origin/main`, neither behind nor ahead. |
@@ -718,6 +785,9 @@ user it checks is the one running it, so run it as the service user.
 This is the setup on a shared machine, such as the owner's workstation, where Triphammer runs as the owner's own
 user and a session can reach whatever that user can: the owner's `~/.claude`, caches, Docker daemon and logins. It is
 the weaker setup; a machine of its own (below) holds nothing but Triphammer's credentials.
+
+The sessions' write limit needs `bwrap` (`apt-get install bubblewrap`) able to create user namespaces, which on Ubuntu
+takes the AppArmor profile `provision` writes (Sessions, The write limit); the doctor at the end checks it.
 
 The owner runs this once; agents cannot install persistence on the machine. Replace the placeholders with the project's
 repository, checkout, App and owner. Each project gets a config file named after it and its own
@@ -867,8 +937,10 @@ From a clone, `sudo bin/provision --triphammer <owner>/<repo> /srv/triphammer` d
 | `--no-owner-steps` | Leaves out the closing list of what is left for the owner. |
 | `--owner-steps` | Alone: prints only that list, for the user and home the machine file names, and changes nothing. |
 
-It installs what every project shares: git, `jq`, Python 3, curl, openssl and ShellCheck from Ubuntu's archive, Docker Engine
-with Compose v2, `gh`, the service user in the `docker` group with lingering on (so its user units run without a login),
+It installs what every project shares: git, `jq`, Python 3, curl, openssl, ShellCheck and bubblewrap from Ubuntu's
+archive, with the AppArmor profile `/etc/apparmor.d/bwrap` that lets `bwrap`, the sessions' write limit (Sessions, The
+write limit), create user namespaces (a profile there that it did not write is left alone), Docker Engine with
+Compose v2, `gh`, the service user in the `docker` group with lingering on (so its user units run without a login),
 Triphammer's checkout cloned as that user, Node at the version its `.node-version` pins (one Node for every project,
 into `/usr/local`) and Claude Code. It links the scripts, `triphammer-status` and the units as Install does, including
 `demo-gallery@.service` and `triphammer-status.service`, installs the Triphammer plugin at user scope from Triphammer's
@@ -924,8 +996,7 @@ checkout cloned as the service user, the .NET SDK its `global.json` pins (into `
 project's toolchain), and Playwright's Chromium at the version each `package.json` pins, with its system libraries from
 Playwright's `install-deps`, or from Ubuntu's archive when Playwright does not know the release; Chromium must then start
 headless. A project whose `.node-version` pins another Node than the machine's is refused. With the `codex` module it
-also installs Codex (into `~/.local`), bubblewrap and the AppArmor profile `/etc/apparmor.d/bwrap`, which lets `bwrap`
-create user namespaces (a profile there that it did not write is left alone), and with the `demo` module ffmpeg. It
+also installs Codex (into `~/.local`; its sandbox, `bwrap`, comes with `provision`), and with the `demo` module ffmpeg. It
 gives git a commit identity in the user's `~/.gitconfig` and writes the project's config; a config with other content is
 rewritten and the old one kept as `<name>.conf.old`. When the project has a config already (the one that names its
 repository), each setting in it, its checkout included, stays unless the run gives another or removes it with

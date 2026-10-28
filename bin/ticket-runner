@@ -397,6 +397,13 @@ if [ "$kind" = close ]; then
   exit 0
 fi
 
+# Every session runs under the write limit (bin/session-sandbox; bin/README.md, The write limit). A machine where it
+# does not work starts none: a dry run of it in the checkout must succeed first, before anything counts as a run.
+if ! why="$("$bin/session-sandbox" "$checkout" true 2>&1)"; then
+  log "$kind${number:+ #$number}: the sessions' write limit does not work here, so no session starts: $(tail -n 1 <<< "${why:-no reason printed}") (ticket-runner --doctor names the fix)"
+  exit 1
+fi
+
 # This project has a run to start: it waits for its turn until it starts one. It takes the first free of the shared
 # slots after this project's own lock (fd 9), waiting for neither, and holds it on fd 8 until the run ends, so at most
 # max_sessions projects run sessions at once; the kernel frees the slot once the run's processes end, however they
@@ -806,8 +813,9 @@ rm -f "$brake_file"
 # directory, besides the temporary ones, it may write (plugins/triphammer/hooks/agent-guard.py, worktree-only).
 # TRIPHAMMER_OWNER is the owner checked above, the login scripts/land-pr.sh requests an escalation's review from; the
 # App's token cannot read repository variables, so the session gets it here. TRIPHAMMER_PROPOSALS is the proposals
-# file, in a temporary directory, which the hook lets a session write.
-(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# file, in a temporary directory, which the hook lets a session write. The session and everything it starts run under
+# the write limit, bin/session-sandbox, which lets them write the worktree, the temporary directories and little else.
+(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$worktree" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep

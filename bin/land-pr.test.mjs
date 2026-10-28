@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {mkdirSync, readFileSync, symlinkSync, writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {fakeGh, git, here, lines, checkoutSetup} from './fixture.mjs';
 
@@ -119,8 +120,40 @@ test("in a project that is another repository it checks itself against, and runs
   writeFileSync(r.wrapper, wrapper.replace('set -euo pipefail', 'set -euo pipefail\n# branch edit'), {mode: 0o755});
   const refused = r.landPr(r.wrapper, ['42'], {}, project.checkout);
   assert.equal(refused.status, 1);
-  assert.ok(refused.stderr.includes(`run main's script directly: git -C ${r.checkout} fetch origin main && git -C ${r.checkout} show refs/remotes/origin/main:scripts/land-pr.sh | TRIPHAMMER_CHECKOUT=${r.checkout} bash -s -- 42`), refused.stderr);
+  const direct = refused.stderr.split("run main's script directly: ")[1]?.trim();
+  assert.ok(direct?.includes(`fetch -q ${join(r.root, 'origin.git')} +refs/heads/main:refs/remotes/origin/main`), refused.stderr);
   assert.deepEqual(r.landed(), ['main 42']);
+  // The direct command it prints runs main's land-pr.sh from the project's worktree and leaves no temporary repository.
+  const tmp = join(r.root, 'tmp');
+  mkdirSync(tmp);
+  const ran = spawnSync('bash', ['-c', direct], {cwd: project.checkout,
+    env: {...r.env, LAND_LOG: join(r.root, 'landed'), TMPDIR: tmp}, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8'});
+  assert.equal(ran.status, 0, ran.stderr);
+  assert.deepEqual(r.landed(), ['main 42', 'main 42']);
+  assert.deepEqual(readdirSync(tmp), []);
+});
+
+// Every path under a .git directory with its content, so a test sees any ref, object, FETCH_HEAD or config written.
+function gitDirState(dir) {
+  return Object.fromEntries(readdirSync(dir, {recursive: true}).sort()
+    .map(path => [path, statSync(join(dir, path)).isFile()
+      ? createHash('sha256').update(readFileSync(join(dir, path))).digest('hex') : 'dir']));
+}
+
+test("runs the land-pr.sh of origin's current main and leaves Triphammer's checkout's .git as it was", t => {
+  const r = landSetup(t);
+  r.publish('scripts/land-pr.sh', stub('newer-main'));
+  const project = projectOnBranch(r);
+  const tmp = join(r.root, 'tmp');
+  mkdirSync(tmp);
+  const before = gitDirState(join(r.checkout, '.git'));
+  for (const cwd of [r.checkout, project.checkout]) {
+    const result = r.landPr(r.wrapper, ['42'], {TMPDIR: tmp}, cwd);
+    assert.equal(result.status, 0, result.stderr);
+  }
+  assert.deepEqual(r.landed(), ['newer-main 42', 'newer-main 42']);
+  assert.deepEqual(gitDirState(join(r.checkout, '.git')), before);
+  assert.deepEqual(readdirSync(tmp), [], 'the temporary repository is removed');
 });
 
 // Triphammer's origin/main with this branch's land-pr, land-pr.sh and classifier, and rules that escalate everything;

@@ -289,12 +289,14 @@ export function checkoutSetup(t, files = {}, config = {}) {
   };
 }
 
-// A machine whose checkout holds this branch's ticket-runner, config.sh, labels.sh, ticket-decide.py and update-checkout, the
-// example project's .triphammer/project.json (or `project`), plus `files`, and a runner that executes the checkout's
-// copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its Triphammer config is Triphammer's,
-// with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
+// A machine whose checkout holds this branch's ticket-runner, config.sh, labels.sh, ticket-decide.py, update-checkout
+// and session-sandbox, the example project's .triphammer/project.json (or `project`), plus `files`, and a runner that
+// executes the checkout's copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its
+// Triphammer config is Triphammer's, with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
-// no containers, so a test never reaches the machine's real Docker.
+// no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
+// to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
+// `bin` entry named bwrap replaces it.
 export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'), 'utf8'), files = {}, bin = {}, gh = {},
   project = projectJson, config = {}} = {}) {
   const r = checkoutSetup(t, {
@@ -303,16 +305,25 @@ export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'
     'bin/labels.sh': readFileSync(join(here, 'labels.sh'), 'utf8'),
     'bin/ticket-decide.py': readFileSync(join(here, 'ticket-decide.py'), 'utf8'),
     'bin/update-checkout': readFileSync(join(here, 'update-checkout'), 'utf8'),
+    'bin/session-sandbox': readFileSync(join(here, 'session-sandbox'), 'utf8'),
     'bin/demo-publish': '#!/bin/sh\nexit 0\n',
     '.triphammer/project.json': project,
     ...files,
   }, config);
   const fake = fakeGh(join(r.root, 'gh'), {'api users/': {stdout: 'User\n'}, ...gh});
   const docker = fakeDocker(join(r.root, 'docker'), fake.bin);
+  const bwrapCalls = join(r.root, 'bwrap-calls');
+  writeFileSync(join(fake.bin, 'bwrap'), `#!/bin/sh
+python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> '${bwrapCalls}'
+while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+shift
+exec "$@"
+`, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
   const env = {...r.env, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
     ...r, env, gh: fake, docker,
+    bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
     runTicketRunner: (args = [], extraEnv = {}) =>
       run(join(r.checkout, 'bin/ticket-runner'), args, {env: {...env, ...extraEnv}}),
     log: () => readFileSync(join(r.root, 'state/ticket-runner/log'), 'utf8'),

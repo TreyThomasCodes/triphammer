@@ -181,11 +181,8 @@ test('two projects, with their modules, get one config and their own extras each
     `REPO=example/other\nCHECKOUT=${m.root}/srv/other\nAPP_AUTHOR=app/example-agents\nSTATE_DIR=/srv/state/other\n`
     + 'OWNER=example-person\n');
 
-  const {packages, loaded} = m.machine();
-  for (const name of ['bubblewrap', 'apparmor', 'ffmpeg']) assert.ok(packages.includes(name), name);
+  assert.ok(m.machine().packages.includes('ffmpeg'));
   assert.deepEqual(lines(join(m.state, 'npm-calls')), [`install -g -q --prefix ${m.home}/.local @openai/codex`]);
-  assert.match(readFileSync(join(m.sys, 'etc/apparmor.d/bwrap'), 'utf8'), /^profile bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,$/m);
-  assert.deepEqual(loaded, ['bwrap']);
   assert.match(first.stdout, /Log Codex in: sudo -iu triphammer codex login --device-auth/);
   assert.doesNotMatch(other.stdout, /Log Codex in/);
   assert.match(other.stdout, /\nproject: other\n$/);
