@@ -357,11 +357,12 @@ fi
 if module_on codex && tool codex Codex "install the Codex CLI (npm install -g @openai/codex) $units_path"; then
   codex login status >/dev/null 2>&1 || problem "Codex is not logged in" "run codex login --device-auth as this user"
 fi
-# Codex's sandbox is bwrap, which needs unprivileged user namespaces; Ubuntu restricts them with AppArmor.
-if module_on codex && tool bwrap bubblewrap "install bubblewrap (apt-get install bubblewrap) $units_path"; then
+# The sessions' write limit (bin/session-sandbox) is bwrap, as is Codex's sandbox, and it needs unprivileged user
+# namespaces; Ubuntu restricts them with AppArmor. Without it the runner starts no session.
+if tool bwrap bubblewrap "install bubblewrap (apt-get install bubblewrap) $units_path; the sessions' write limit needs it"; then
   bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1 \
-    || problem "bwrap cannot create a user namespace, so Codex's sandbox fails" \
-      "install the AppArmor profile /etc/apparmor.d/bwrap that allows it userns and load it (apparmor_parser -r), as triphammer add does with the codex module (bin/README.md, Codex)"
+    || problem "bwrap cannot create a user namespace, so the sessions' write limit fails and no session starts" \
+      "install the AppArmor profile /etc/apparmor.d/bwrap that allows it userns and load it (apparmor_parser -r), as triphammer update does (bin/README.md, The write limit)"
 fi
 
 if module_on qwen-audit; then

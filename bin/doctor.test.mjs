@@ -142,18 +142,17 @@ test('a Chromium that does not start headless is reported, the newest revision c
   assert.equal(r.doctor().status, 0);
 });
 
-test('with the codex module on, a bwrap that cannot create a user namespace, or none, is reported', t => {
-  const off = doctorSetup(t);
-  off.broken('bwrap');
-  assert.equal(off.doctor().status, 0);
-  const on = doctorSetup(t, {config: {MODULES: 'codex'}});
-  assert.equal(on.doctor().status, 0);
-  assert.deepEqual(lines(join(on.root, 'bwrap/calls')).map(line => JSON.parse(line)),
-    [['--version'], ['--unshare-user', '--ro-bind', '/', '/', 'true']]);
-  on.answers('bwrap', {'--version': {stdout: 'bubblewrap 0.11.0\n'}, '--unshare-user': {exit: 1, stderr: 'bwrap: setting up uid map: Permission denied\n'}});
-  assertOneProblem(on.doctor(), /^bwrap cannot create a user namespace, so Codex's sandbox fails\. Fix: install the AppArmor profile \/etc\/apparmor\.d\/bwrap/);
-  on.broken('bwrap');
-  assertOneProblem(on.doctor(), /^bubblewrap \(bwrap\) is not installed or does not run on the units' PATH\. Fix: install bubblewrap/);
+test('with or without the codex module, a bwrap that cannot create a user namespace, or none, is reported', t => {
+  for (const config of [{}, {MODULES: 'codex'}]) {
+    const r = doctorSetup(t, {config});
+    assert.equal(r.doctor().status, 0);
+    assert.deepEqual(lines(join(r.root, 'bwrap/calls')).map(line => JSON.parse(line)),
+      [['--version'], ['--unshare-user', '--ro-bind', '/', '/', 'true']]);
+    r.answers('bwrap', {'--version': {stdout: 'bubblewrap 0.11.0\n'}, '--unshare-user': {exit: 1, stderr: 'bwrap: setting up uid map: Permission denied\n'}});
+    assertOneProblem(r.doctor(), /^bwrap cannot create a user namespace, so the sessions' write limit fails and no session starts\. Fix: install the AppArmor profile \/etc\/apparmor\.d\/bwrap .*as triphammer update does/);
+    r.broken('bwrap');
+    assertOneProblem(r.doctor(), /^bubblewrap \(bwrap\) is not installed or does not run on the units' PATH\. Fix: install bubblewrap \(apt-get install bubblewrap\) where the units' PATH finds it; the sessions' write limit needs it$/);
+  }
 });
 
 test('a .NET SDK outside global.json\'s pin and rollForward is reported', t => {

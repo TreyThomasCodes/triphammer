@@ -509,6 +509,36 @@ test('a main without the plugin\'s ticket-run skill starts no session', t => {
   assert.equal(r.ran(), false);
 });
 
+// The sessions' write limit (bin/session-sandbox; bin/README.md, The write limit), through the fixture's bwrap.
+for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['repair', repairSetup, 'pr-40']]) {
+  test(`a ${kind} run's session runs under the write limit, after a dry run of it`, t => {
+    const r = setup(t);
+    r.tick();
+    assert.equal(r.ran(), true);
+    const calls = r.bwrapCalls();
+    assert.equal(calls.length, 2, JSON.stringify(calls));
+    const [dry, session] = calls;
+    const run = join(r.checkout, '.worktrees', worktree);
+    assert.deepEqual(dry.slice(dry.indexOf('--')), ['--', 'true']);
+    assert.deepEqual(session.slice(session.indexOf('--'), session.indexOf('--') + 3), ['--', 'claude', '-p']);
+    const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
+    assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
+    assert.ok(binds(session).includes(run), JSON.stringify(session));
+    assert.ok(binds(session).includes(join(r.checkout, '.git')), JSON.stringify(session));
+    assert.ok(!binds(session).includes(r.checkout), 'the main checkout is not writable');
+    assert.deepEqual(session.slice(session.indexOf('--ro-bind'), session.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
+  });
+}
+
+test('a machine where the write limit does not work starts no session and counts no run', t => {
+  const r = ticketSetup(t, [issue(7)], {bin: {bwrap: '#!/bin/sh\necho "bwrap: setting up uid map: Permission denied" >&2\nexit 1\n'}});
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: the sessions' write limit does not work here, so no session starts: bwrap: setting up uid map: Permission denied \(ticket-runner --doctor names the fix\)/);
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false);
+  assert.deepEqual(labelCalls(r.ghCalls()), []);
+});
+
 // Weekly upkeep.
 const isoDaysAgo = days => new Date(Date.now() - days * 86400000).toISOString().replace(/\.\d{3}Z$/, 'Z');
 const upkeepIssue = (number, days, state) =>

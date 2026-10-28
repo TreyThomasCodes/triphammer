@@ -40,9 +40,14 @@ test('on a fresh machine it installs everything but a project, and a second run 
   const first = m.provision(...at(m, tri));
   assert.equal(first.status, 0, first.output);
 
-  const {packages, users, linger} = m.machine();
-  for (const name of ['git', 'jq', 'python3', 'shellcheck', 'curl', 'docker-ce', 'docker-compose-plugin', 'gh']) assert.ok(packages.includes(name), name);
-  for (const name of ['codex', 'bubblewrap', 'ffmpeg', 'docker.io']) assert.ok(!packages.includes(name), name);
+  const {packages, users, linger, loaded} = m.machine();
+  for (const name of ['git', 'jq', 'python3', 'shellcheck', 'curl', 'bubblewrap', 'apparmor', 'docker-ce', 'docker-compose-plugin', 'gh']) {
+    assert.ok(packages.includes(name), name);
+  }
+  for (const name of ['codex', 'ffmpeg', 'docker.io']) assert.ok(!packages.includes(name), name);
+  // The sessions' write limit is bwrap, with its user namespaces, whatever modules the projects turn on.
+  assert.match(readFileSync(join(m.sys, 'etc/apparmor.d/bwrap'), 'utf8'), /^profile bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,$/m);
+  assert.deepEqual(loaded, ['bwrap']);
   assert.match(first.stdout, /^Docker Engine: from Docker's repository$/m);
   assert.match(first.stdout, /^GitHub CLI: from the GitHub CLI's repository$/m);
   assert.match(readFileSync(join(m.sys, 'etc/apt/sources.list.d/docker.sources'), 'utf8'), new RegExp(`^Suites: ${codename}$`, 'm'));
@@ -167,7 +172,8 @@ test('--dry-run on a fresh machine lists the changes and makes none', t => {
   const m = machine(t, {'example/triphammer': triphammerFiles});
   const result = m.provision(...at(m, tri), '--dry-run');
   assert.equal(result.status, 0, result.output);
-  assert.match(result.stdout, /^would: install ca-certificates curl git jq python3 openssl xz-utils shellcheck$/m);
+  assert.match(result.stdout, /^would: install ca-certificates curl git jq python3 openssl xz-utils shellcheck bubblewrap apparmor$/m);
+  assert.match(result.stdout, /^would: load the AppArmor profile .*\/etc\/apparmor\.d\/bwrap$/m);
   assert.match(result.stdout, /^would: create the user triphammer with the home /m);
   assert.match(result.stdout, /^would: clone example\/triphammer into /m);
   assert.match(result.stdout, /^would: write .*\/etc\/triphammer\.conf$/m);

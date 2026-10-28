@@ -15,10 +15,12 @@
 # line saying the machine is ready. --no-owner-steps leaves that out, and --owner-steps prints only that, for the user
 # and home the machine file names, and changes nothing; triphammer update uses both, so its report comes last.
 #
-# It installs, each only when it is not there already: git, jq, Python 3, curl and the like from Ubuntu's archive;
+# It installs, each only when it is not there already: git, jq, Python 3, curl, bubblewrap and the like from Ubuntu's
+# archive;
 # Docker Engine with Compose v2 and the GitHub CLI from their vendors' apt repositories, or Ubuntu's own packages when
 # a vendor's repository does not serve this release (it says which); the service user (default `triphammer`) in the
-# docker group with lingering on; Triphammer's checkout, cloned as that user; Node from nodejs.org at the version the
+# docker group with lingering on; the AppArmor profile /etc/apparmor.d/bwrap that lets bwrap, the sessions' write
+# limit, create user namespaces; Triphammer's checkout, cloned as that user; Node from nodejs.org at the version the
 # checkout's .node-version pins; Claude Code through its installer. It links the units and scripts as the README's
 # Install section does, installs the Triphammer plugin and the humanizer plugin (from the blader/humanizer
 # marketplace on GitHub) at user scope, points git's github.com credentials at
@@ -98,7 +100,7 @@ if user_exists; then
 fi
 checkout_state "$tri_repo" "$tri_checkout" >/dev/null
 
-apt_install ca-certificates curl git jq python3 openssl xz-utils shellcheck
+apt_install ca-certificates curl git jq python3 openssl xz-utils shellcheck bubblewrap apparmor
 
 # vendor_repo <name> <key URL> <keyring> <sources file> <sources> <package...>: adds a vendor's apt repository and
 # installs its packages, or fails, leaving no sources file behind, so the caller falls back to Ubuntu's packages.
@@ -166,6 +168,37 @@ fi
 if [ "$(loginctl show-user "$user" --property=Linger --value 2>/dev/null)" != yes ]; then
   change "turn lingering on for $user, so its user units run without a login" loginctl enable-linger "$user" \
     || fail "loginctl enable-linger failed"
+fi
+
+# bwrap's user namespaces, for the sessions' write limit (bin/session-sandbox) and Codex's sandbox: Ubuntu restricts
+# them with AppArmor, which this profile lifts for /usr/bin/bwrap alone. A profile at that path that is not this
+# script's is left alone. The marker keeps the words earlier runs wrote, so their profiles stay provision's.
+profile="$root/etc/apparmor.d/bwrap"
+marker="# Triphammer's provision: lets bwrap, Codex's sandbox, create user namespaces (bin/README.md)."
+text="$marker
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+"
+loaded=""
+if [ -e "$profile" ] && ! grep -qxF -- "$marker" "$profile"; then
+  note "AppArmor: leaving $profile alone, as it is not provision's"
+elif ! same_root_file "$profile" 644 "$text"; then
+  root_file "$profile" 644 "$text"
+  change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+  loaded=1
+fi
+userns() { as_user bwrap --unshare-user --ro-bind / / true >/dev/null 2>&1; }
+if [ -z "$dry_run" ] && ! userns; then
+  if [ -z "$loaded" ] && grep -qxF -- "$marker" "$profile" 2>/dev/null; then
+    change "load the AppArmor profile $profile" apparmor_parser -r "$profile" || fail "apparmor_parser could not load $profile"
+  fi
+  userns || fail "bwrap still cannot create a user namespace as $user, which the sessions' write limit needs; check $profile and the kernel's apparmor_restrict_unprivileged_userns"
 fi
 
 # The App's directory, for the owner to fill in, and git's github.com credentials, which come from github-app-token

@@ -181,8 +181,13 @@
 # from its input (xargs systemctl --user enable, or -I{} ... {}), the upstream options xargs adds to git branch,
 # push, fetch, pull, checkout or switch from its input (xargs git branch with -u or --set-upstream-to in the input,
 # which keeps git branch --merged | xargs git branch -d allowed), and outside a Triphammer session the operands
-# xargs adds from its input. There is no OS-level limit on what a Triphammer session may write behind this hook,
-# and every round of review has found another shell feature this parser misses: this hook is the only line.
+# xargs adds from its input. Every round of review has found another shell feature this parser misses, so behind this
+# hook a session ticket-runner starts runs under an OS-level write limit (bin/session-sandbox; bin/README.md, The write
+# limit): the file system is read-only to it and to everything it starts but for its worktree, the main checkout's .git
+# and Triphammer's checkout's .git (both writable until each run gets a clone of its own), the temporary directories,
+# the caches and what Claude Code and these hooks write in the home directory. The limit does not cover what the
+# session reaches through a socket, such as Docker's, and a session started any other way has no such limit: this hook
+# is its only line.
 #
 # `# guard-override: <reason>` anywhere in a Bash command lifts only the shell-edit rule, the false positives it exists
 # for: a git-tracked file under a shellEditRoots path rewritten through the shell. It does not lift the persistence

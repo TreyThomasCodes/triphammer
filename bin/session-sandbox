@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Runs a command under the sessions' write limit: bubblewrap (bwrap) mounts the whole file system read-only and makes
+# writable only what a session needs, so neither the command nor anything it starts (Edit and Write, Bash, python and
+# node scripts, subagents, git hooks) can write anywhere else. ticket-runner starts every session through it.
+# See bin/README.md (The write limit).
+#
+#   session-sandbox <run directory> <command> [argument...]
+#
+# Writable inside, each only when it exists (the ones marked * are created first):
+#   - the run directory, the session's worktree;
+#   - the git common directory of the run directory (git rev-parse --git-common-dir): the main checkout's .git, where
+#     a worktree writes its commits, refs and worktrees/<name>. It stays writable only until each run gets a clone of
+#     its own (the next slice of #45);
+#   - the git common directory of Triphammer's checkout (the one this file lives in), which land-pr fetches main into
+#     during a session; the same directory as above when the project is Triphammer, and writable until that slice too;
+#   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
+#   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude} and ~/.claude.json, its
+#     state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm and ~/.nuget;
+#   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
+#     ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer*) and agent-guard.py's guard-overrides.log* in the shared
+#     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone.
+# Inside the Claude Code directory, the parts that would change later sessions stay read-only: settings*.json,
+# CLAUDE.md, agents, commands, skills, hooks and plugins, the ones that exist when the command starts.
+#
+# The command also gets a /dev of its own, and a process namespace of its own with its /proc, so it cannot see or
+# signal the machine's other processes; the processes outside still see it, so ticket-runner's brake stops it. The
+# network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
+# when the command exits.
+#
+# Not covered: a ~/.claude part named above that does not exist when the command starts, or that is a symlink (the
+# session may create or replace it); anything a writable path above lets a later session read (a cache, ~/.claude.json);
+# and the Docker socket, or any other socket of a service outside, which the command can still reach: a container
+# started through Docker can write anywhere on the machine.
+#
+# Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout or bwrap fails.
+set -euo pipefail
+
+fail() { echo "session-sandbox: $1" >&2; exit "${2:-1}"; }
+[ $# -ge 2 ] || fail "usage: session-sandbox <run directory> <command> [argument...]" 2
+here="$(dirname "$(readlink -f "$0")")"
+run_dir="$(readlink -f -- "$1")" && [ -d "$run_dir" ] || fail "$1 is not a directory" 2
+shift
+common="$(git -C "$run_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || fail "$run_dir is not in a git checkout"
+triphammer_git="$(git -C "$here" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+  || fail "$here is not in a git checkout, so Triphammer's checkout is unknown"
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}"
+claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+humanizer="${TRIPHAMMER_HUMANIZER_STATE:-$state/triphammer/humanizer}"
+overrides="${TRIPHAMMER_SHARED_DIR:-$state/triphammer}/guard-overrides.log"
+mkdir -p -- "$HOME/.cache"
+[ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
+(umask 077 && mkdir -p -- "$humanizer" && mkdir -p -- "$(dirname "$overrides")" && : >> "$overrides")
+
+args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc)
+# bind <option> <path...>: mounts each path that exists onto itself, symlinks resolved, after what came before, so a
+# later mount wins inside an earlier one.
+bind() {
+  local option="$1" path
+  shift
+  for path; do
+    [ -n "$path" ] && [ -e "$path" ] || continue
+    path="$(readlink -f -- "$path")"
+    args+=("$option" "$path" "$path")
+  done
+}
+bind --bind "$common" "$triphammer_git" "$run_dir" /tmp "${TMPDIR:-}" \
+  "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "$humanizer" "$overrides"
+bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$claude/commands" "$claude/skills" \
+  "$claude/hooks" "$claude/plugins"
+bind --bind "$claude/plugins/data"
+
+exec bwrap "${args[@]}" -- "$@"
