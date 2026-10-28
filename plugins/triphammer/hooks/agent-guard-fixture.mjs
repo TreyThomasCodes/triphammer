@@ -160,15 +160,26 @@ export function assertOutsideDenied(reason, what, {file = false} = {}) {
   assert.ok(reason, `expected a deny: ${what}`);
   assert.match(reason, /worktree-only rule/, what);
   assert.match(reason, /\$TMPDIR, \/tmp and \/var\/tmp/, what);
-  if (file) assert.match(reason, /a file tool has no override/, what);
-  else assert.match(reason, /# guard-override: <reason>/, what);
+  if (file) assert.match(reason, /leave .*to the owner and report it/i, what);
+  assertNoOverrideHint(reason, what);
 }
 
-// A deny by the named rule that a command's `# guard-override:` lets through.
+// A deny by the named rule, which `# guard-override:` does not lift, so the reason does not name it.
 export function assertRuleDenied(reason, rule, what) {
   assert.ok(reason, `expected a deny: ${what}`);
   assert.match(reason, new RegExp(`${rule} rule`), what);
-  assert.match(reason, /# guard-override: <reason>/, what);
+  assertNoOverrideHint(reason, what);
+}
+
+export function assertNoOverrideHint(reason, what) {
+  assert.doesNotMatch(reason, /# guard-override/, what);
+}
+
+// The same command with the override token appended stays refused by rule (only the shell-edit rule is lifted).
+export function assertNotLifted(command, rule, cwd, options) {
+  for (const token of ['  # guard-override: the owner asked for it', '\n# guard-override: the owner asked for it']) {
+    assertRuleDenied(decide(`${command}${token}`, cwd, options), rule, `${command} with the override token`);
+  }
 }
 
 // Places outside the session's worktree and temporary directories, relative to a triphammerSession.

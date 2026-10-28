@@ -434,7 +434,7 @@ if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo
      | select((.repository | not)
          or ((.repository.owner.login // "") + "/" + (.repository.name // "") | ascii_downcase) == ($repo | ascii_downcase))
      | .number] end) as $own
-  | [.[] | select((.number | IN($own[])) and any(.labels[]?; .name == "cleanup")) | "#\(.number)"]
+  | [.[] | select((.number | IN($own[])) and any(.labels[]?; .name | ascii_downcase == "cleanup")) | "#\(.number)"]
   | join(" ")' "$state/issues.json" 2>/dev/null)"; then
   no_proposals="could not look up whether the run's issue is labelled cleanup"
 elif [ -n "$cleanup_issues" ]; then
@@ -591,9 +591,9 @@ app_login="$app_author"
 # shellcheck disable=SC2016  # the jq and GraphQL variables are theirs, not the shell's
 issue_brake() {
   local facts by closer
-  if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq '(.labels | map(.name)) as $names
-      | [if $names | index("hold") then "hold" else empty end,
-         if $names | index("needs-owner") then "needs-owner" else empty end,
+  if ! facts="$(gh issue view "$number" -R "$repo" --json labels,state --jq '(.labels | map(.name)) as $names | ($names | map(ascii_downcase)) as $lower
+      | [if $lower | index("hold") then "hold" else empty end,
+         if $lower | index("needs-owner") then "needs-owner" else empty end,
          if .state != "OPEN" and ($names | index("upkeep") | not) then "closed" else empty end] | join(" ")' 2>/dev/null)"
   then
     log "$kind #$number: could not look up the brakes on issue #$number" >&2
@@ -603,7 +603,7 @@ issue_brake() {
   if [[ "$facts" == *" hold "* ]]; then echo "labelled hold"; return 0; fi
   if [[ "$facts" == *" needs-owner "* ]]; then
     by="$(gh api "repos/$repo/issues/$number/events" --paginate --jq '.[]
-      | select(.event == "labeled" and .label.name == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
+      | select(.event == "labeled" and (.label.name | ascii_downcase) == "needs-owner") | .actor.login' 2>/dev/null | tail -n 1)" || by=""
     if [ -z "$by" ]; then
       log "$kind #$number: could not look up who labelled issue #$number needs-owner" >&2
     elif [ "${by,,}" != "${app_login,,}" ]; then
@@ -636,7 +636,7 @@ run_brake() {
     [ -z "$found" ] || found="issue #$number is $found"
   elif [ -z "$found" ]; then
     found="$(gh pr view "$number" -R "$repo" --json labels \
-      --jq 'if .labels | map(.name) | index("hold") then "labelled hold" else "" end' 2>/dev/null)" \
+      --jq 'if .labels | map(.name | ascii_downcase) | index("hold") then "labelled hold" else "" end' 2>/dev/null)" \
       || { log "$kind #$number: could not look up the brakes on pull request #$number" >&2; found=""; }
     [ -z "$found" ] || found="pull request #$number is $found"
   fi
@@ -857,7 +857,7 @@ fi
 
 if [ "$kind" = ticket ]; then
   progressed="$(gh issue view "$number" -R "$repo" --json state,labels --jq \
-    'if .state != "OPEN" or (.labels | map(.name) | index("needs-owner")) then "yes" else "" end')"
+    'if .state != "OPEN" or (.labels | map(.name | ascii_downcase) | index("needs-owner")) then "yes" else "" end')"
   # An open pull request GitHub links as closing the issue: the list above.
   [ -n "$progressed" ] || [ -z "$review_prs" ] || progressed=yes
   [ -n "$progressed" ] || progressed="$(gh issue list -R "$repo" --state all --search "\"of #$number\" in:body" --json number \

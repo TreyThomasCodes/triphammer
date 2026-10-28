@@ -36,7 +36,7 @@ With no closed upkeep issue, the window is the last 7 days.
 - Approvals that stopped counting: a pull request whose `owner-approval` status was `success` on one head and, on a later head, `pending` with a description that starts `Escalate: waiting for`. List its heads with `gh pr view <n> --json commits,files`, and read each head's latest status with `gh api repos/{owner}/{repo}/commits/<sha>/statuses --jq '[.[] | select(.context == "owner-approval")][0] | .state + " " + .description'` (newest first). Note which of its `files` differ between the approved head and the later one (`git diff --name-only <approved> <later>`).
 - Conflict repairs: the `repair #N (conflicts): run k of 3 starting` lines in `$STATE_DIR/log`, with the files the pull request changes.
 - Branch updates per merge: the `<repo>#N: armed but behind its base at <sha>; updating the branch` lines in the merge queue's log, divided by its `merged by merge-when-ready` lines.
-- Hook overrides: search the transcripts in the window for `guard-override` and `text-lint-override`, and quote the reason given with each.
+- Hook overrides: search the transcripts in the window for `guard-override` and `text-lint-override`, and read the lines of `guard-overrides.log` in the shared directory (`${TRIPHAMMER_SHARED_DIR:-${XDG_STATE_HOME:-~/.local/state}/triphammer}`) whose `time` falls in the window; quote the reason given with each. The log holds only the overrides the hook honored, which lift the shell-edit rule alone.
 
 Read these with `grep`, `jq` or short scripts. Keep counts and short excerpts in your context, never whole transcripts.
 
@@ -94,7 +94,7 @@ Post one comment on the upkeep issue covering the window, with its start and end
 - in the first upkeep of a month, the security audit's findings and filed issues, or why it was skipped (its module was off, or the exit 3 or 4 reason);
 - `LSP` calls and Bash `grep` calls, in total and per run;
 - approvals that stopped counting, conflict repairs, and branch updates per merge; when either of the first two comes to more than 3 a week, name the files involved;
-- auto-mode classifier denials, and hook overrides (`guard-override`, `text-lint-override`) with their reasons;
+- auto-mode classifier denials, and hook overrides (`guard-override`, `text-lint-override`) with their reasons, from the transcripts and `guard-overrides.log`;
 - links to every issue you filed or commented on, and the suspicions you could not reproduce.
 
 Then close the issue (`gh issue close <n>`). End with one line saying how many issues you filed and that the upkeep issue is closed, followed by the run record line of `triphammer:ticket-run` (Run record).

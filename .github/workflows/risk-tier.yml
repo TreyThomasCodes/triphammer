@@ -74,7 +74,7 @@ jobs:
             echo "job.workflow_repository or job.workflow_sha is empty, so Triphammer's commit is unknown" >&2
             exit 1
           fi
-          if [ "$WORKFLOW_REPOSITORY" = "$REPOSITORY" ]; then
+          if [ "${WORKFLOW_REPOSITORY,,}" = "${REPOSITORY,,}" ]; then
             { echo "TRIPHAMMER_DIR=."; echo "TRIPHAMMER_AT=$BASE"; } >> "$GITHUB_ENV"
           else
             { echo "TRIPHAMMER_DIR=$RUNNER_TEMP/triphammer"; echo "TRIPHAMMER_AT=$WORKFLOW_SHA"; } >> "$GITHUB_ENV"
@@ -227,7 +227,7 @@ jobs:
           # (a branch update from main). The push that started this run can reach the activity a little after the event,
           # so the lookup is repeated for up to a minute until the head commit is in it. A failed lookup leaves the pull
           # request waiting.
-          if [ "${PULL_REQUEST_AUTHOR,,}" = "${OWNER,,}" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+          if [ "${PULL_REQUEST_AUTHOR,,}" = "${OWNER,,}" ] && [ "${HEAD_REPOSITORY,,}" = "${REPOSITORY,,}" ]; then
             activity='[]'
             for attempt in 1 2 3 4 5 6; do
               activity="$(gh api -X GET --paginate --slurp "repos/$REPOSITORY/activity" -f "ref=refs/heads/$HEAD_REF" \

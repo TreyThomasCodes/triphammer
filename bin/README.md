@@ -214,6 +214,7 @@ share the shared directory, `$TRIPHAMMER_SHARED_DIR` or else `${XDG_STATE_HOME:-
 | `stop` | The owner's shared brake: while it exists no project's runner or merge queue does anything. The `stop` file in a project's state directory stops only that project. |
 | `last` | The project whose run started last. |
 | `waiting/<project>` | The time a tick of that project last had a run to start; removed when it starts one or has nothing to do. |
+| `guard-overrides.log` | One JSON line per `# guard-override:` the plugin's `agent-guard.py` honors (`time`, `session`, `rule`, `reason`, `command`), from any session on the machine. The override lifts only the shell-edit rule; upkeep reads the log. The hook creates the directory and the file when missing; a session cannot write the log itself. |
 
 Projects take turns when the slots run out: a tick that took the last free slot yields when its project is the one in
 `last` and another project's `waiting` mark is at most 30 minutes old (three ticks). It logs `<project> ran last and
@@ -249,8 +250,9 @@ the plugin's. The plugin's hooks run in the session and its subagents. The runne
 the plugin's `agent-guard.py` that Triphammer started it: such a session writes only inside that worktree (not its `.git`)
 and the temporary directories, writes no git configuration (`git config` and `git remote` only read, and an upstream is
 set only for its own branch in its worktree), sets no one-command `git -c` key that makes git run a command or changes
-what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`; the hook's header lists what it checks and what it
-does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
+what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`. A `# guard-override:`
+token lifts none of these, only the shell-edit rule, and the hook logs each override it honors to `guard-overrides.log`
+in the shared directory; the hook's header lists what it checks and what it does not cover. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
 that are on. A tick whose Triphammer `origin/main` has no
 `plugins/triphammer/skills/ticket-run/SKILL.md` starts no session.
 
@@ -415,6 +417,9 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
 | `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
 | `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
+
+The runner and `merge-when-ready` read `hold`, `needs-owner`, `stop-agents`, `next` and `cleanup` in any case, as
+GitHub matches label names, so `Hold` brakes as `hold` does; `light` and `upkeep` they read as written.
 
 `ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
 are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine

@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {run, decide, triphammerSession} from './agent-guard-fixture.mjs';
+import {run, decide, triphammerSession, assertNoOverrideHint, assertNotLifted} from './agent-guard-fixture.mjs';
 
 // The self-kill rule.
 
@@ -14,7 +14,13 @@ test('pkill -f with a plain pattern is refused with the rule, the bracket form, 
   assert.ok(reason.includes(`pkill -f '[w]eb-e2e'`), reason);
   assert.match(reason, /kill "\$pid"/);
   assert.match(reason, /kill %1/);
-  assert.match(reason, /# guard-override: <reason>/);
+  assertNoOverrideHint(reason);
+});
+
+test('the override token does not lift the self-kill rule', () => {
+  for (const command of ['pkill -f web-e2e', 'pgrep -f "dotnet test"', 'kill $PPID', 'kill $$']) {
+    assertNotLifted(command, 'self-kill', tmpdir());
+  }
 });
 
 test('pgrep -f with a quoted plain pattern is refused', () => {
@@ -29,7 +35,7 @@ test('pkill -9f, a signal and -f in one group, is refused', () => {
   assert.ok(reason, 'expected a deny');
   assert.match(reason, /self-kill rule/);
   assert.ok(reason.includes(`pkill -f '[d]otnet'`), reason);
-  assert.match(reason, /# guard-override: <reason>/);
+  assertNoOverrideHint(reason);
 });
 
 test('pkill -f inside a longer command is refused', () => {
@@ -70,14 +76,14 @@ const selfKills = [
 ];
 
 for (const [command, process_] of selfKills) {
-  test(`${command} is refused with the rule, a saved PID, kill %1 and the override token`, () => {
+  test(`${command} is refused with the rule, a saved PID and kill %1, without naming the override`, () => {
     const reason = decide(command, tmpdir());
     assert.ok(reason, 'expected a deny');
     assert.match(reason, /self-kill rule/);
     assert.match(reason, process_);
     assert.match(reason, /kill "\$pid"/);
     assert.match(reason, /kill %1/);
-    assert.match(reason, /# guard-override: <reason>/);
+    assertNoOverrideHint(reason);
   });
 }
 
@@ -91,8 +97,9 @@ test('in a Triphammer session xargs running kill, pkill, pgrep or killall is ref
       const reason = decide(command, s.worktree, {env: s.env});
       assert.match(reason ?? '', /self-kill rule/, command);
       assert.match(reason, /kill "\$pid"/, command);
-      assert.match(reason, /# guard-override: <reason>/, command);
+      assertNoOverrideHint(reason, command);
     }
+    assertNotLifted('echo $PPID | xargs kill', 'self-kill', s.worktree, {env: s.env});
     for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l']) {
       assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
     }

@@ -353,6 +353,34 @@ test('an issue labelled cleanup and next is taken before an ordinary ready issue
   assert.equal(decide(t, [cleanup(50, ['next']), next(52)]).action, 'ticket 52');
 });
 
+// GitHub matches label names in any case, so the runner reads `hold`, `needs-owner`, `stop-agents`, `next` and `cleanup`
+// in any case.
+
+test('a parent labelled with a brake in another case stays open when its last slice closes', t => {
+  for (const brake of ['Hold', 'Needs-Owner', 'STOP-AGENTS']) {
+    const {action, log} = decide(t, [issue(10, '', {labels: [brake]}), closed(11, 'Slice 1 of #10.'), issue(20)]);
+    assert.equal(action, 'ticket 20', brake);
+    assert.match(log, new RegExp(`skip close 10: labelled ${brake.toLowerCase()}`));
+  }
+});
+
+test('an issue labelled with a brake in another case is skipped', t => {
+  for (const brake of ['Hold', 'Needs-Owner', 'Stop-Agents']) {
+    assert.equal(decide(t, [issue(50, '', {labels: [brake]}), issue(51)]).action, 'ticket 51', brake);
+  }
+});
+
+test('a pull request labelled Hold is not repaired', t => {
+  assert.equal(decide(t, [issue(30)], [pr(40, 30, {mergeStateStatus: 'DIRTY', labels: ['Hold']})]).action, '');
+});
+
+test('an issue labelled Next is taken first and one labelled Cleanup last', t => {
+  assert.equal(decide(t, [issue(50), issue(52, '', {labels: ['Next']})]).action, 'ticket 52');
+  assert.equal(decide(t, [issue(50, '', {labels: ['Cleanup']}), issue(52)]).action, 'ticket 52');
+  const {log} = decide(t, [issue(49), issue(52, 'Depends on #49.', {labels: ['NEXT']})]);
+  assert.match(log, /#52 waits: it depends on #49, still open/);
+});
+
 // Superseded check runs.
 
 test('a check with a cancelled older run and a passing newer run is not repaired', t => {
