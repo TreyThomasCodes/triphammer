@@ -684,6 +684,7 @@ file_proposals() {
   while IFS= read -r line || [ -n "$line" ]; do
     at=$((at + 1))
     [ -n "${line//[[:space:]]/}" ] || continue
+    # jq before 1.8 (Ubuntu 24.04 ships 1.7.1) rejects an object value with an operator outside parentheses.
     if ! entry="$(jq -Rc --arg where "$where #$number" '
         def text: type == "string" and (gsub("\\s"; "") | length > 0);
         def quote: gsub("[\r\u000b\u000c\u001c-\u001e\u0085  ]"; "\n") | split("\n") | map("> " + .)
@@ -693,9 +694,9 @@ file_proposals() {
             and (.locations | type == "array" and length > 0 and all(.[]; text)))
         | {slug: (.mechanism | ascii_downcase | gsub("[^a-z0-9]+"; "-") | .[:100] | gsub("^-+|-+$"; "")),
            title: (.title | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
-           body: "A ticket runner session proposed this cleanup while it worked on \($where). Its text is quoted.\n\n"
+           body: ("A ticket runner session proposed this cleanup while it worked on \($where). Its text is quoted.\n\n"
              + "Mechanism:\n\n\(.mechanism | quote)\n\nCopies:\n\n\(.locations | map("- " + .) | join("\n") | quote)\n\n"
-             + "Suggested fix:\n\n\(.fix | quote)\n"}
+             + "Suggested fix:\n\n\(.fix | quote)\n")}
         | select(.slug != "")' <<< "$line" 2>/dev/null)" || [ -z "$entry" ]; then
       log "$kind #$number: proposal on line $at is not a JSON object with a title, mechanism, locations and fix; skipped"
       continue
