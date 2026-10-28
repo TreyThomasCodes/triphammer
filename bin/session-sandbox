@@ -23,7 +23,17 @@
 #     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone;
 #   - what the upkeep audits write through local-audit --model codex: its run count in
 #     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and ${CODEX_HOME:-~/.codex}, where Codex writes its databases,
-#     logs, sessions, caches and refreshed login in the directory itself.
+#     logs, sessions, caches and refreshed login in the directory itself;
+#   - when docker is installed or ${DOCKER_CONFIG:-~/.docker} exists, its buildx* directory, where docker build and
+#     docker compose build keep their builder state; the rest of the directory (config.json, cli-plugins, contexts)
+#     configures docker, which the runner also runs outside the limit, and stays read-only, created or not;
+#   - when dotnet is installed or ${DOTNET_CLI_HOME:-~}/.dotnet exists, that .dotnet* and .templateengine* beside it,
+#     each as a tmpfs that the session's writes go to and that is gone when it ends: the CLI writes its per-user state
+#     (first-use sentinels per SDK version, toolResolverCache, telemetry) into .dotnet, which also holds the SDK when
+#     it is installed there and is on PATH, and dotnet new its template cache into .templateengine. In .dotnet the
+#     entries that exist when the command starts stay there read-only (the dotnet host, sdk, shared, host, packs,
+#     templates, the global tools in tools, the sentinels), but for the CLI's state directories toolResolverCache,
+#     TelemetryStorageService and sdk-advertising, which start empty; .templateengine starts empty.
 # Inside these directories, the parts that would change later sessions stay read-only, the ones that exist when the
 # command starts: in Claude Code's, settings*.json, CLAUDE.md, agents, commands, skills, hooks and plugins; in Codex's,
 # *.toml (config.toml*, created empty when the directory exists, as Codex itself adds to it), .env, AGENTS*.md,
@@ -39,8 +49,8 @@
 # Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
 # session may create or replace it), such as a ~/.codex/AGENTS.md or ~/.nuget/NuGet/NuGet.Config the machine does not
 # have; anything a writable path
-# above lets a later session read (a cache, ~/.claude.json, Codex's databases, local-audit's run count);
-# and the Docker socket, or any other socket of a service outside, which the command can still reach: a container
+# above lets a later session read (a cache, ~/.claude.json, Codex's databases, local-audit's run count, or buildx's
+# builder state, which picks the builder a later docker build uses); and the Docker socket, or any other socket of a service outside, which the command can still reach: a container
 # started through Docker can write anywhere on the machine.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout or bwrap fails.
@@ -91,5 +101,23 @@ bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$c
   "$codex/prompts" "$codex/skills" "$codex/plugins" "$codex/themes" \
   "$HOME/.nuget/NuGet"/[Nn]u[Gg]et.[Cc]onfig "$HOME/.nuget/config"
 bind --bind "$claude/plugins/data"
+docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
+if [ -d "$docker_config" ] || command -v docker >/dev/null 2>&1; then
+  (umask 077 && mkdir -p -- "$docker_config/buildx")
+  bind --bind "$docker_config/buildx"
+fi
+# .dotnet and .templateengine as tmpfs, what .dotnet holds read-only on top of it but for the CLI's state directories.
+dotnet_home="${DOTNET_CLI_HOME:-$HOME}/.dotnet"
+if [ -d "$dotnet_home" ] || command -v dotnet >/dev/null 2>&1; then
+  templates="$(dirname "$dotnet_home")/.templateengine"
+  mkdir -p -- "$dotnet_home" "$templates"
+  dotnet_home="$(readlink -f -- "$dotnet_home")"
+  args+=(--tmpfs "$(readlink -f -- "$templates")" --tmpfs "$dotnet_home")
+  for path in "$dotnet_home"/* "$dotnet_home"/.[!.]* "$dotnet_home"/..?*; do
+    [ -e "$path" ] || continue
+    case "${path##*/}" in toolResolverCache | TelemetryStorageService | sdk-advertising) continue ;; esac
+    args+=(--ro-bind "$path" "$path")
+  done
+fi
 
 exec bwrap "${args[@]}" -- "$@"

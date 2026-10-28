@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
-import {dirname, join} from 'node:path';
-import {git, gitEnv, here} from './fixture.mjs';
+import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {delimiter, dirname, join} from 'node:path';
+import {fakeAnswers, fakeDocker, git, gitEnv, here} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -44,13 +44,25 @@ function sandboxRig(t) {
   mkdirSync(join(home, '.nuget/NuGet'), {recursive: true});
   writeFileSync(join(home, '.nuget/NuGet/NuGet.Config'), '<configuration />\n');
   const {TMPDIR, XDG_STATE_HOME, XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
-    NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, ...env} = gitEnv;
+    NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...env} = gitEnv;
   const inside = (command, extra = {}) => {
     const result = spawnSync(join(triphammer, 'bin/session-sandbox'), [worktree, 'sh', '-c', command],
       {cwd: worktree, env: {...env, HOME: home, ...extra}, encoding: 'utf8'});
     return {status: result.status, output: result.stdout + result.stderr};
   };
   return {root, main, triphammer, home, worktree, inside};
+}
+
+// Asserts that writing each of `paths` under the limit, with `extra` in the environment, is refused and leaves it as
+// it was.
+function assertReadOnly(r, paths, extra) {
+  for (const path of paths) {
+    const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
+    const {status, output} = r.inside(`echo planted > '${path}'`, extra);
+    assert.notEqual(status, 0, `${path} was written`);
+    assert.match(output, /Read-only file system/, path);
+    assert.equal(existsSync(path) ? readFileSync(path, 'utf8') : null, before, `${path} changed`);
+  }
 }
 
 const pythonWrite = path => `python3 -c "open('${path}', 'w').write('planted')"`;
@@ -139,6 +151,88 @@ test('a Codex directory without a config.toml gets an empty one, read-only under
   assert.notEqual(status, 0, 'config.toml was written');
   assert.match(output, /Read-only file system/);
   assert.equal(readFileSync(config, 'utf8'), '');
+});
+
+test("under the limit, buildx's state in Docker's config directory is writable and the rest of it read-only", {skip}, t => {
+  const r = sandboxRig(t);
+  const docker = join(r.home, '.docker');
+  mkdirSync(join(docker, 'cli-plugins'), {recursive: true});
+  writeFileSync(join(docker, 'config.json'), '{}\n');
+  const {status, output} = r.inside(`mkdir -p '${docker}/buildx/refs' && echo ref > '${docker}/buildx/refs/r' && : > '${docker}/buildx/.lock'`);
+  assert.equal(status, 0, output);
+  assert.equal(readFileSync(join(docker, 'buildx/refs/r'), 'utf8'), 'ref\n');
+  assertReadOnly(r, [join(docker, 'config.json'), join(docker, 'cli-plugins/docker-planted'), join(docker, 'contexts')]);
+  const config = join(r.root, 'docker-config');
+  mkdirSync(config);
+  const {status: elsewhere, output: why} = r.inside(`echo built > '${config}/buildx/current'`, {DOCKER_CONFIG: config});
+  assert.equal(elsewhere, 0, why);
+  assertReadOnly(r, [join(config, 'config.json')], {DOCKER_CONFIG: config});
+});
+
+test('with docker installed and no Docker config directory, it gets one with buildx writable and no config.json can be planted', {skip}, t => {
+  const r = sandboxRig(t);
+  const bin = join(r.root, 'bin');
+  mkdirSync(bin);
+  fakeDocker(join(r.root, 'docker'), bin);
+  const path = {PATH: `${bin}${delimiter}${gitEnv.PATH}`};
+  const docker = join(r.home, '.docker');
+  const {status, output} = r.inside(`echo built > '${docker}/buildx/current'`, path);
+  assert.equal(status, 0, output);
+  assertReadOnly(r, [join(docker, 'config.json')], path);
+});
+
+test("under the limit, the dotnet CLI's state is writable for the session alone and the SDK beside it read-only", {skip}, t => {
+  const r = sandboxRig(t);
+  const dotnet = join(r.home, '.dotnet');
+  for (const dir of ['sdk/9.9.9', 'shared', 'host', 'packs', 'templates', 'tools', 'toolResolverCache']) {
+    mkdirSync(join(dotnet, dir), {recursive: true});
+  }
+  writeFileSync(join(dotnet, 'dotnet'), 'host\n', {mode: 0o755});
+  writeFileSync(join(dotnet, 'sdk/9.9.9/dotnet.dll'), 'sdk\n');
+  writeFileSync(join(dotnet, 'toolResolverCache/old'), 'old\n');
+  const {status, output} = r.inside(`set -e
+cat '${dotnet}/sdk/9.9.9/dotnet.dll'
+: > '${dotnet}/9.9.9.dotnetFirstUseSentinel'
+test ! -e '${dotnet}/toolResolverCache/old'
+mkdir -p '${dotnet}/toolResolverCache/1' '${dotnet}/TelemetryStorageService' '${r.home}/.templateengine/dotnetcli/9.9.9'
+echo cache > '${dotnet}/toolResolverCache/1/tool'
+echo cache > '${r.home}/.templateengine/dotnetcli/9.9.9/templatecache.json'`);
+  assert.equal(status, 0, output);
+  assert.match(output, /^sdk$/m);
+  assert.ok(!existsSync(join(dotnet, '9.9.9.dotnetFirstUseSentinel')), 'the sentinel outlived the session');
+  assert.ok(!existsSync(join(dotnet, 'toolResolverCache/1')), "the session's toolResolverCache outlived it");
+  assert.ok(!existsSync(join(r.home, '.templateengine/dotnetcli')), "the session's template cache outlived it");
+  assert.equal(readFileSync(join(dotnet, 'toolResolverCache/old'), 'utf8'), 'old\n');
+  assertReadOnly(r, ['dotnet', 'sdk/9.9.9/dotnet.dll', 'sdk/9.9.9/planted', 'shared/planted', 'host/planted',
+    'packs/planted', 'templates/planted', 'tools/planted'].map(path => join(dotnet, path)));
+});
+
+test('with dotnet installed, the CLI home that DOTNET_CLI_HOME names gets writable state for the session', {skip}, t => {
+  const r = sandboxRig(t);
+  const cliHome = join(r.root, 'cli-home');
+  mkdirSync(cliHome);
+  const bin = join(r.root, 'bin');
+  mkdirSync(bin);
+  fakeAnswers(bin, 'dotnet', join(r.root, 'dotnet'), {});
+  const extra = {DOTNET_CLI_HOME: cliHome, PATH: `${bin}${delimiter}${gitEnv.PATH}`};
+  const {status, output} = r.inside(
+    `: > '${cliHome}/.dotnet/9.9.9.dotnetFirstUseSentinel' && : > '${cliHome}/.templateengine/cache'`, extra);
+  assert.equal(status, 0, output);
+  assertReadOnly(r, [join(cliHome, 'planted')], extra);
+});
+
+test('without docker or dotnet, the home directory gets neither directory', {skip}, t => {
+  const r = sandboxRig(t);
+  const bin = join(r.root, 'bin');
+  mkdirSync(bin);
+  for (const name of ['bash', 'env', 'sh', 'git', 'bwrap', 'readlink', 'dirname', 'mkdir']) {
+    symlinkSync(spawnSync('sh', ['-c', `command -v ${name}`], {encoding: 'utf8'}).stdout.trim(), join(bin, name));
+  }
+  const {status, output} = r.inside('true', {PATH: bin});
+  assert.equal(status, 0, output);
+  for (const name of ['.docker', '.dotnet', '.templateengine']) {
+    assert.ok(!existsSync(join(r.home, name)), `${name} was created`);
+  }
 });
 
 test('under the limit, the command cannot see or signal the processes outside', {skip}, t => {

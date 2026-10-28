@@ -296,7 +296,20 @@ and only these paths writable:
   `*.toml`, `.env`, `AGENTS*.md`, `hooks.json`, `agents`, `rules`, `prompts`, `skills`, `plugins` and `themes`, which
   stay read-only. Codex adds a project's trust level to `config.toml` itself, so `session-sandbox` first creates an
   empty one when `~/.codex` has none. Under the limit Codex can neither save that trust level nor refresh its plugin
-  cache; it carries on without them.
+  cache; it carries on without them;
+- when docker is installed, buildx's builder state in `~/.docker/buildx` (or `$DOCKER_CONFIG/buildx`), which
+  `docker build` and `docker compose build` write; `session-sandbox` creates it when it is missing. The rest of the
+  Docker config directory, `config.json`, `cli-plugins` and `contexts` among it, configures the `docker` the runner
+  also runs outside the limit, and stays read-only;
+- when dotnet is installed, the dotnet CLI's per-user state for the session alone: `~/.dotnet` (or
+  `$DOTNET_CLI_HOME/.dotnet`) and `~/.templateengine` beside it each become a tmpfs that is gone when the session
+  ends. The CLI writes its first-use sentinels per SDK version, `toolResolverCache` (for `dotnet tool restore`) and
+  telemetry into `~/.dotnet`, and `dotnet new` its template cache into `~/.templateengine`. `~/.dotnet` also holds the
+  SDK when it is installed there and is on `PATH`, so what it holds when the session starts stays there read-only
+  on top of the tmpfs: the `dotnet` host, `sdk`, `shared`, `host`, `packs`, `templates`, the global tools in `tools`
+  and the sentinels, but for the CLI's state directories `toolResolverCache`, `TelemetryStorageService` and
+  `sdk-advertising`, which start empty. Each session therefore restores its local tools' resolution from
+  `~/.nuget/packages` and, after an SDK update nothing outside has run, goes through the CLI's first use again.
 
 Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
 directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:
@@ -310,7 +323,8 @@ tool (Edit and Write go through permission rules alone), and the model can ask t
 covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
 the machine; a protected `~/.claude`, `~/.codex`, `local-audit` or NuGet part that does not exist when the session
 starts, or is a symlink, such as a `~/.codex/AGENTS.md` or `~/.nuget/NuGet/NuGet.Config` the machine does not have; and what a writable path above lets a later
-session read, such as a cache or Codex's databases.
+session read, such as a cache, Codex's databases or buildx's builder state, which picks the builder a later `docker
+build` uses.
 
 Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without
 `bwrap` or where `bwrap` cannot create a user namespace, the runner logs why, starts no session and exits 1; `ticket-runner
