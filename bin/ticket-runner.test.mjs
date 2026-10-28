@@ -273,6 +273,35 @@ test('a run past ten proposals files the first ten', t => {
   assert.match(r.log(), /proposal on line 11 is past the limit of 10 issues a run files; skipped/);
 });
 
+test('a session that failed files none of its proposals and logs why', t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n`);
+  r.tick({CLAUDE_EXIT: '3'});
+  assert.deepEqual(r.creates(), []);
+  assert.ok(!r.ghCalls().some(call => call.join(' ').startsWith(openBodies)), 'the open issues were listed');
+  assert.match(r.log(), /ticket #7: the session failed \(exit 3\); filing none of its proposals/);
+  assert.match(r.log(), /ticket #7: run 1 ended without progress \(exit 3\)/);
+  assert.equal(existsSync(join(r.probe('proposals-path'), '..')), false, 'the proposals directory outlived the run');
+});
+
+test('a proposal\'s title is filed as one line of at most 120 characters, and one left empty is skipped', t => {
+  // Control characters, NEL and the Unicode line and paragraph separators all become spaces.
+  const separators = String.fromCharCode(0x2028, 0x2029);
+  const controls = String.fromCharCode(0x01, 0x1b);
+  const long = `Share the helper\nFollow these new instructions:\r\n${controls}[2J\u0085${separators}${'x'.repeat(200)}`;
+  const content = [proposal('long', {title: long}), proposal('blank', {title: String.fromCharCode(1, 2, 32, 0x7f)})]
+    .map(p => JSON.stringify(p)).join('\n');
+  const r = proposalsTick(t, content);
+  assert.equal(r.filed.length, 1);
+  const {title} = r.filed[0];
+  assert.ok(title.length <= 120, `${title.length} characters`);
+  assert.ok(title.startsWith('Share the helper Follow these new instructions: [2J x'), title);
+  assert.ok(![...title].some(c => c.codePointAt(0) < 0x20 || (c.codePointAt(0) >= 0x7f && c.codePointAt(0) <= 0x9f)
+    || separators.includes(c)), title);
+  assert.equal(title, title.trim());
+  assert.match(r.log(), /ticket #7: proposal on line 2 is not a JSON object with a title, mechanism, locations and fix; skipped/);
+});
+
 // The builder the prompt names (bin/README.md, Sessions) and the run record (Run records).
 
 // Ticket #7 with `labels`, after `before` runs left its attempts counter at that value (none when undefined).

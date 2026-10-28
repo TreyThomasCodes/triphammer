@@ -656,8 +656,10 @@ proposals_limit=10
 # file_proposals: files each proposal in $proposals as an issue labelled `cleanup`, as the App, with a hidden marker
 # built from its mechanism, skipping one whose marker an open issue's body holds already or an earlier line of the
 # file repeats. Each line is a JSON object with a title, a mechanism, a list of locations and a fix, all non-empty
-# text. A missing or empty file files nothing; a file that is not a regular file, is too large, or a line that is no
-# such object is logged and skipped; and a failed lookup or filing is logged. None of it changes how the run ends.
+# text. The title is filed as data: one line, its control characters, line separators and runs of white space turned
+# into one space, trimmed, at most 120 characters; one that ends up empty is skipped as malformed. A missing or empty
+# file files nothing; a file that is not a regular file, is too large, or a line that is no such object is logged and
+# skipped; and a failed lookup or filing is logged. None of it changes how the run ends.
 # The session's text goes into the body quoted, line by line, so no `Slice k of #N.` or `Depends on #N.` in it counts
 # (ticket-decide.py ignores blockquotes).
 # shellcheck disable=SC2016  # the jq variables are jq's
@@ -687,17 +689,18 @@ file_proposals() {
     # jq before 1.8 (Ubuntu 24.04 ships 1.7.1) rejects an object value with an operator outside parentheses.
     if ! entry="$(jq -Rc --arg where "$where #$number" '
         def text: type == "string" and (gsub("\\s"; "") | length > 0);
+        def oneline: gsub("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}\\s]+"; " ") | ltrimstr(" ") | rtrimstr(" ");
         def quote: gsub("[\r\u000b\u000c\u001c-\u001e\u0085  ]"; "\n") | split("\n") | map("> " + .)
           | join("\n");
         fromjson
         | select(type == "object" and (.title | text) and (.mechanism | text) and (.fix | text)
             and (.locations | type == "array" and length > 0 and all(.[]; text)))
         | {slug: (.mechanism | ascii_downcase | gsub("[^a-z0-9]+"; "-") | .[:100] | gsub("^-+|-+$"; "")),
-           title: (.title | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")),
+           title: (.title | oneline | .[:120] | oneline),
            body: ("A ticket runner session proposed this cleanup while it worked on \($where). Its text is quoted.\n\n"
              + "Mechanism:\n\n\(.mechanism | quote)\n\nCopies:\n\n\(.locations | map("- " + .) | join("\n") | quote)\n\n"
              + "Suggested fix:\n\n\(.fix | quote)\n")}
-        | select(.slug != "")' <<< "$line" 2>/dev/null)" || [ -z "$entry" ]; then
+        | select(.slug != "" and .title != "")' <<< "$line" 2>/dev/null)" || [ -z "$entry" ]; then
       log "$kind #$number: proposal on line $at is not a JSON object with a title, mechanism, locations and fix; skipped"
       continue
     fi
@@ -771,8 +774,13 @@ if [ -f "$brake_file" ]; then
   rm -f "$brake_file"
   exit 0
 fi
-# A run that ended without the owner's brake files the session's proposals, however the session ended.
-file_proposals || log "$kind #$number: filing the proposals failed"
+# A session that succeeded (exit 0) and was not braked files its proposals. A failed or timed-out session files none:
+# what it left is not taken as finished work, and the skip is logged.
+if [ "$status" -ne 0 ]; then
+  log "$kind #$number: the session failed (exit $status); filing none of its proposals"
+else
+  file_proposals || log "$kind #$number: filing the proposals failed"
+fi
 # A security-findings repair session that ended normally followed its head up: the security-followed-up record gets the
 # head's line, so neither ticket-decide.py nor merge-when-ready waits on it any more. Only the runner writes the record
 # (agent-guard keeps sessions out of the state directory), so no comment can forge a follow-up. A failed or timed-out

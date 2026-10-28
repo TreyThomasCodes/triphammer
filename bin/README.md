@@ -296,16 +296,19 @@ all non-empty text:
 {"title": "Share the retry loop around gh", "mechanism": "retry loop around gh", "locations": ["bin/a:12", "bin/b:40", "bin/c:7"], "fix": "One retry_gh helper in bin/config.sh"}
 ```
 
-`locations` lists each copy. When the session has ended, on every path but a brake, the runner files each proposal as
-the App with `gh issue create --label cleanup` (creating the label when the repository lacks it). The body starts
-with the hidden marker `<!-- triphammer-cleanup: <slug> -->`, the slug being the mechanism lowercased with each run of
-other characters than `a-z` and `0-9` turned into one `-`, and quotes the session's text line by line, so no
-`Slice k of #N.` or `Depends on #N.` in it counts. One `gh issue list --state open` call reads the open issues'
-bodies first: a proposal whose marker one of them holds is skipped, so two runs that find the same copies file one
-issue, and so is a proposal whose slug an earlier line of the file had. A run files at most 10 issues. A missing file,
-or one holding only blank lines, files nothing. A file that is not a regular file or is over 256 KiB, a line that is
-not such an object (or whose mechanism has no letter or digit), a failed listing (then nothing is filed) and a failed
-filing are logged and never change how the run ends. The EXIT trap removes the directory on every ending.
+`locations` lists each copy. When the session has ended with exit status 0 and no brake, the runner files each
+proposal as the App with `gh issue create --label cleanup` (creating the label when the repository lacks it). A session
+that failed or timed out files none, and the runner logs that it skipped them. The title is filed as data: one line,
+with control characters, line separators and runs of white space each turned into one space, trimmed and cut to 120
+characters. The body starts with the hidden marker `<!-- triphammer-cleanup: <slug> -->`, the slug being the
+mechanism lowercased with each run of other characters than `a-z` and `0-9` turned into one `-`, and quotes the
+session's text line by line, so no `Slice k of #N.` or `Depends on #N.` in it counts. One `gh issue list --state open`
+call reads the open issues' bodies first: a proposal whose marker one of them holds is skipped, so two runs that find
+the same copies file one issue, and so is a proposal whose slug an earlier line of the file had. A run files at most 10
+issues. A missing file, or one holding only blank lines, files nothing. A file that is not a regular file or is over
+256 KiB, a line that is not such an object (or whose mechanism has no letter or digit, or whose title is empty once
+made one line), a failed listing (then nothing is filed) and a failed filing are logged and never change how the run
+ends. The EXIT trap removes the directory on every ending.
 
 With the `demo` module on, when a session ends, on every path but a brake (below), before the worktree can be removed,
 `ticket-runner` runs `publish-demos` on it.
