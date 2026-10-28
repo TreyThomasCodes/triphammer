@@ -298,7 +298,9 @@ all non-empty text:
 
 `locations` lists each copy. When the session has ended with exit status 0 and no brake, the runner files each
 proposal as the App with `gh issue create --label cleanup` (creating the label when the repository lacks it). A session
-that failed or timed out files none, and the runner logs that it skipped them. The title is filed as data: one line,
+that failed or timed out files none, and the runner logs that it skipped them. So does a run whose issue is labelled
+`cleanup` (a ticket's own, or one a repaired pull request closes), or whose issue's labels it could not read, so a
+filed cleanup never files more. The title is filed as data: one line,
 with control characters, line separators and runs of white space each turned into one space, trimmed and cut to 120
 characters. The body starts with the hidden marker `<!-- triphammer-cleanup: <slug> -->`, the slug being the
 mechanism lowercased with each run of other characters than `a-z` and `0-9` turned into one `-`, and quotes the

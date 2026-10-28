@@ -33,7 +33,7 @@
 # a branch cannot change the skills, agents or hooks it runs under), in a worktree of the project's main checkout
 # branched from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
 # its prompt names Triphammer
-# config's modules that are on. When it ends, unless a brake ended it, the runner files the cleanups the session
+# config's modules that are on. When it ends, unless a brake ended it, it failed or its issue is labelled `cleanup`, the runner files the cleanups the session
 # proposed in its proposals file ($TRIPHAMMER_PROPOSALS, file_proposals) as issues labelled `cleanup`. With the demo
 # module on, the runner publishes the demos it left in that worktree (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
 # of the run (it comments only on escalated ones that touch Triphammer and records the heads whose review found
@@ -424,6 +424,23 @@ if [ "$kind" = ticket ] && jq -e --argjson n "$number" \
   [ "$attempts" -gt 1 ] || [ -e "$reset_file" ] || builder=triphammer:builder-light builder_model=sonnet
 fi
 
+# A run on a `cleanup` issue, a ticket's own or one a repaired pull request closes in this repository, files none of
+# its session's proposals (file_proposals), so a filed cleanup cannot file cleanups in turn. $no_proposals holds the
+# reason; a failed lookup files none either.
+# shellcheck disable=SC2016  # the jq variables are jq's
+no_proposals=""
+if ! cleanup_issues="$(jq -r --arg kind "$kind" --argjson n "$number" --arg repo "$repo" --slurpfile prs "$state/prs.json" '
+  (if $kind == "ticket" then [$n] else [$prs[0][] | select(.number == $n) | .closingIssuesReferences[]?
+     | select((.repository | not)
+         or ((.repository.owner.login // "") + "/" + (.repository.name // "") | ascii_downcase) == ($repo | ascii_downcase))
+     | .number] end) as $own
+  | [.[] | select(.number as $i | $own | index($i)) | select(any(.labels[]?; .name == "cleanup")) | "#\(.number)"]
+  | join(" ")' "$state/issues.json" 2>/dev/null)"; then
+  no_proposals="could not look up whether the run's issue is labelled cleanup"
+elif [ -n "$cleanup_issues" ]; then
+  no_proposals="issue $cleanup_issues is labelled cleanup"
+fi
+
 # A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
 # tracks origin/main: the Co-Authored-By trailer), so a branch cut before a hook existed, or a project without hooks of
 # its own, still gets it and a branch cannot change its own hook. core.hooksPath is set in that worktree's own config,
@@ -672,6 +689,11 @@ file_proposals() {
     return 0
   fi
   [ -e "$proposals" ] || return 0
+  if [ -n "$no_proposals" ]; then
+    grep -q '[^[:space:]]' "$proposals" || return 0
+    log "$kind #$number: $no_proposals; filing none of the session's $(grep -c '[^[:space:]]' "$proposals") proposals"
+    return 0
+  fi
   if [ "$(stat -c %s "$proposals")" -gt 262144 ]; then
     log "$kind #$number: the proposals file is larger than 256 KiB; filing none"
     return 0

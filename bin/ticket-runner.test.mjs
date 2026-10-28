@@ -284,6 +284,33 @@ test('a session that failed files none of its proposals and logs why', t => {
   assert.equal(existsSync(join(r.probe('proposals-path'), '..')), false, 'the proposals directory outlived the run');
 });
 
+test('a run on a cleanup issue files none of its session\'s proposals and logs why', t => {
+  const r = ticketSetup(t, [issue(7, {labels: ['cleanup']})]);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n${JSON.stringify(proposal('b'))}\n`);
+  r.tick();
+  assert.deepEqual(r.creates(), []);
+  assert.ok(!r.ghCalls().some(call => call.join(' ').startsWith(openBodies)), 'the open issues were listed');
+  assert.match(r.log(), /ticket #7: issue #7 is labelled cleanup; filing none of the session's 2 proposals/);
+  assert.match(r.log(), /ticket #7: run 1 ended without progress \(exit 0\)/);
+});
+
+test('a repair of a pull request that closes a cleanup issue files none of its session\'s proposals', t => {
+  const r = repairSetup(t);
+  r.gh.json('issues.json', [issue(30, {labels: ['cleanup']})]);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n`);
+  r.tick();
+  assert.deepEqual(r.creates(), []);
+  assert.match(r.log(), /repair #40: issue #30 is labelled cleanup; filing none of the session's 1 proposals/);
+});
+
+test('a repair of a pull request that closes no cleanup issue files its session\'s proposals', t => {
+  const r = repairSetup(t);
+  writeFileSync(join(r.root, 'proposals.jsonl'), `${JSON.stringify(proposal('a'))}\n`);
+  r.tick();
+  assert.equal(r.creates().length, 1);
+  assert.match(r.log(), /repair #40: filed #90 for the proposed cleanup of a/);
+});
+
 test('a proposal\'s title is filed as one line of at most 120 characters, and one left empty is skipped', t => {
   // Control characters, NEL and the Unicode line and paragraph separators all become spaces.
   const separators = String.fromCharCode(0x2028, 0x2029);
