@@ -237,7 +237,7 @@ for repository in $repositories; do
   armed="$(gh api graphql -f query="$query" -f owner="$owner" -f name="$name" --jq '
     .data.repository as $r | [$r.pullRequests.nodes[]
     | select(.autoMergeRequest != null and .baseRefName == $r.defaultBranchRef.name)] | sort_by(.autoMergeRequest.enabledAt, .number)[]
-    | "\(.number) \(.headRefOid) \(.mergeStateStatus) \(if any(.labels.nodes[]; .name == "hold") then "hold" else "-" end) \(.headRefName)"')"
+    | "\(.number) \(.headRefOid) \(.mergeStateStatus) \(if any(.labels.nodes[]; .name | ascii_downcase == "hold") then "hold" else "-" end) \(.headRefName)"')"
   queue=() branch_of=()
   merge_number="" merge_head=""
   while read -r number head state hold branch; do

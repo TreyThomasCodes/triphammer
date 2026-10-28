@@ -418,6 +418,9 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
 | `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
 
+The runner and `merge-when-ready` read `hold`, `needs-owner`, `stop-agents`, `next` and `cleanup` in any case, as
+GitHub matches label names, so `Hold` brakes as `hold` does; `light` and `upkeep` they read as written.
+
 `ticket-runner --labels` creates each of them that the repository lacks, as the App, and leaves the ones it has as they
 are; it fails when it cannot list the labels or create one, and starts no tick. `triphammer add` runs it (On a machine
 of its own), and the doctor reports each one missing. `upkeep` is not among them: the runner makes sure it exists when

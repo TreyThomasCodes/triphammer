@@ -74,7 +74,7 @@ ${refresh ? `<meta http-equiv="refresh" content="${refreshSeconds}">` : ''}
 
 /** @param {string[]} labels */
 function labelBadges(labels) {
-  return labels.map(label => `<span class="label${brakeLabels.has(label) ? ' brake' : ''}">${escape(label)}</span>`).join('');
+  return labels.map(label => `<span class="label${brakeLabels.has(label.toLowerCase()) ? ' brake' : ''}">${escape(label)}</span>`).join('');
 }
 
 /**

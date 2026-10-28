@@ -79,7 +79,10 @@ app = sys.argv[3]
 utc = lambda at: datetime.fromisoformat(at.replace("Z", "+00:00"))
 now = utc(sys.argv[4])
 repo = sys.argv[5]
-labels = lambda item: {label["name"] for label in item["labels"]}
+# Label names lowercased, as GitHub compares them: `Hold` brakes as `hold` does. `upkeep` alone is read as written
+# (`names`), as ticket-runner reads it.
+names = lambda item: {label["name"] for label in item["labels"]}
+labels = lambda item: {name.lower() for name in names(item)}
 author = lambda item: (item.get("author") or {}).get("login") or ""
 # The authors the runner acts for: it repairs only the App's pull requests, and takes, and reads slice declarations
 # from, only issues by the App or the owner. An issue without an author is no one's, so it is skipped. GitHub logins
@@ -197,6 +200,6 @@ for n in sorted(issues, key=lambda n: ("next" not in labels(issues[n]), "cleanup
 # Weekly upkeep (the triphammer:upkeep skill) only when nothing else is due: no issue labelled `upkeep`, open or
 # closed, was created in the last 7 days. One without a creation time counts as recent, so missing data never opens a
 # duplicate.
-if not any("upkeep" in labels(i) and (not i.get("createdAt") or utc(i["createdAt"]) >= now - timedelta(days=7))
+if not any("upkeep" in names(i) and (not i.get("createdAt") or utc(i["createdAt"]) >= now - timedelta(days=7))
            for i in issues.values()):
     print("upkeep")

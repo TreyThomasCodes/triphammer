@@ -166,7 +166,7 @@ async function readState(config, commands, nowMs = Date.now(), allPaused = false
   const {backoffUntil, backoffActive} = files;
   const {queue, gh} = await readQueue(config, commands);
   const stopFile = files.stopFile !== null;
-  const stopAgents = queue.items.filter(item => item.type === 'issue' && item.labels.includes('stop-agents')).map(item => item.number);
+  const stopAgents = queue.items.filter(item => item.type === 'issue' && item.labels.some(label => label.toLowerCase() === 'stop-agents')).map(item => item.number);
   const paused = allPaused || files.paused || stopAgents.length > 0;
   // A run counts as in progress, here and on the page, when the lock is held, or the lock table is unreadable and the
   // log has a start with no end.

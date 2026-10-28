@@ -2,7 +2,8 @@
 
 A read-only web page for watching the ticket runner (`bin/ticket-runner`) of every project on the machine from a
 phone. It reads the shared directory and each project's state directory on every request and has no buttons: the owner
-still brakes through GitHub labels and the `stop` files.
+still brakes through GitHub labels and the `stop` files. It reads `hold`, `needs-owner` and `stop-agents` in any case,
+as the runner does, so a `Hold` label counts as `hold`.
 
 ## What it shows
 
