@@ -118,17 +118,8 @@ test('the matcher flags a case-sensitive identity comparison and passes a lowerc
 
 // Comparisons the scan finds in files the agents' App cannot change (.github/workflows/), which only the owner can
 // lowercase or annotate. Each entry is the file and the exact trimmed line; once the owner fixes the line, the entry
-// matches nothing and the scan fails until it is removed. Issue #78 tracks the owner's fix of the two below.
-const owed = [
-  // github.repository against job.workflow_repository, equal in Triphammer's own runs. Both name the same repository
-  // as GitHub records it, but were they ever to differ in case, the run would take its scripts from WORKFLOW_SHA, a
-  // commit the pull request can change, instead of the default branch.
-  ['.github/workflows/risk-tier.yml', 'if [ "$WORKFLOW_REPOSITORY" = "$REPOSITORY" ]; then'],
-  // github.repository against the pull request's head.repo.full_name. A difference in case leaves the owner's pull
-  // request waiting for approval, the safe side.
-  ['.github/workflows/risk-tier.yml',
-    'if [ "${PULL_REQUEST_AUTHOR,,}" = "${OWNER,,}" ] && [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then'],
-];
+// matches nothing and the scan fails until it is removed.
+const owed = [];
 
 test('no script or workflow compares a login, owner or repository name case-sensitively', () => {
   const files = scanned();
