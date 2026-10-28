@@ -98,7 +98,7 @@ if user_exists; then
 fi
 checkout_state "$tri_repo" "$tri_checkout" >/dev/null
 
-apt_install ca-certificates curl git jq python3 openssl xz-utils
+apt_install ca-certificates curl git jq python3 openssl xz-utils shellcheck
 
 # vendor_repo <name> <key URL> <keyring> <sources file> <sources> <package...>: adds a vendor's apt repository and
 # installs its packages, or fails, leaving no sources file behind, so the caller falls back to Ubuntu's packages.

@@ -70,9 +70,9 @@ Run these steps on the server, as a user who can use `sudo`.
    sudo -iu triphammer claude auth login
    ```
 
-The installer sets up git, Docker, Node, the GitHub CLI and Claude Code. It creates a `triphammer` user and clones
-Triphammer to `/srv/triphammer`. For that user it installs the Triphammer plugin and the humanizer plugin, which comes
-from the `blader/humanizer` marketplace on GitHub.
+The installer sets up git, ShellCheck, Docker, Node, the GitHub CLI and Claude Code. It creates a `triphammer` user and
+clones Triphammer to `/srv/triphammer`. For that user it installs the Triphammer plugin and the humanizer plugin, which
+comes from the `blader/humanizer` marketplace on GitHub.
 
 It asks for your password once, and it's safe to run again: it only changes what isn't right yet. To preview its
 changes, end the line with `bash -s -- --dry-run` instead of `bash`. When it finishes, it lists what's still left for

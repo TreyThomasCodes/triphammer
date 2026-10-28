@@ -18,7 +18,7 @@ const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rol
 // everything the doctor checks is right: HOME and XDG_CONFIG_HOME (HOME's .config) in the temporary directory, with
 // the drop-in that
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
-// `bin`) and ~/.dotnet (a fake dotnet), fake node, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
+// `bin`) and ~/.dotnet (a fake dotnet), fake node, shellcheck, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
 // in, with the Triphammer and humanizer plugins at user scope), codex, curl (QWEN_BASE_URL answers), gh (acting as
 // the App) and docker (Compose v2) in `bin`, the App's files and a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
 // that starts headless, and a repository that has every label Triphammer uses (`repoLabels`, as gh label list prints
@@ -47,6 +47,7 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     fakeAnswers(name === 'dotnet' ? join(home, '.dotnet') : bin, name, join(r.root, name), routes);
   answers('dotnet', {'--list-sdks': {stdout: '8.0.100 [/sdk]\n10.0.402 [/sdk]\n'}});
   answers('node', {'--version': {stdout: 'v24.22.1\n'}});
+  answers('shellcheck', {'--version': {stdout: 'ShellCheck - shell script analysis tool\nversion: 0.10.0\n'}});
   answers('systemctl', {'--user is-enabled': {stdout: 'enabled\n'}});
   answers('bwrap', {'--version': {stdout: 'bubblewrap 0.11.0\n'}, '--unshare-user': {}});
   const sessions = join(r.root, 'sessions');
@@ -280,7 +281,7 @@ test('Chromium is checked only for a checkout whose tracked package.json, at any
   assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in /);
 });
 
-for (const name of ['git', 'jq', 'python3', 'gh', 'claude', 'node']) {
+for (const name of ['git', 'jq', 'python3', 'shellcheck', 'gh', 'claude', 'node']) {
   test(`a missing ${name} is reported`, t => {
     const r = doctorSetup(t);
     // The doctor itself runs git, so its fake still does everything but report a version. jq is gone altogether:
