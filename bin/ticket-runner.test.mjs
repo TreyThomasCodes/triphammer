@@ -1913,7 +1913,7 @@ test('an issue whose needs-owner events cannot be looked up is not started', t =
   assert.equal(r.tick({}, ['--plan']).trim(), 'idle');
   r.tick();
   assert.equal(r.ran(), false);
-  assert.match(r.log(), /#7: could not look up who added or removed needs-owner on issue #7; skipping it this tick/);
+  assert.match(r.log(), /#7: could not read the events of issue #7, so the owner's brakes on it are unknown; skipping it this tick/);
 });
 
 test("the owner's needs-owner ends a session in progress after the App removed it, or after the App added it again", t => {
@@ -1947,6 +1947,184 @@ test('a failed brake lookup is logged and does not end the session', t => {
   assert.doesNotMatch(log, /owner's brake/);
   assert.match(log, /ticket #7: run 1 ended without progress \(exit 0\)/);
   assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '1');
+});
+
+// The owner's hold and close outlive the label and the issue's state the same way, and stop-agents outlives the App's
+// unlabelling or closing of its issue; a failed read of the events brakes.
+const stateEvent = (event, login) => ({event, actor: {login}});
+const holdThenApp = [labelEvent('labeled', 'Example-Owner', 'hold'), labelEvent('unlabeled', 'example-agents[bot]', 'hold')];
+const holdThenOwner = [labelEvent('labeled', 'Example-Owner', 'Hold'), labelEvent('unlabeled', 'example-owner', 'hold')];
+const closedThenApp = [stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'example-agents[bot]')];
+const closedThenOwner = [stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'Example-Owner')];
+const failedRead = {stderr: 'gh: HTTP 502\n', exit: 1};
+
+test("an issue whose hold the owner added and the App removed is not started; the owner's removal lifts it", t => {
+  const braked = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(braked, 7, holdThenApp);
+  assert.equal(braked.tick({}, ['--plan']).trim(), 'ticket 8');
+
+  const alone = ticketSetup(t, [upkeepIssue(1, 1, 'CLOSED'), issue(7)]);
+  serveEvents(alone, 7, holdThenApp);
+  alone.tick();
+  assert.equal(alone.ran(), false);
+  assert.match(alone.log(), /#7: skipped: the owner added hold, and only the owner's removal lifts it/);
+
+  const lifted = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(lifted, 7, holdThenOwner);
+  assert.equal(lifted.tick({}, ['--plan']).trim(), 'ticket 7');
+});
+
+test("an issue the owner closed and the App reopened is neither started nor closed; the owner's reopening lifts it", t => {
+  const braked = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(braked, 7, closedThenApp);
+  assert.equal(braked.tick({}, ['--plan']).trim(), 'ticket 8');
+
+  const alone = ticketSetup(t, [upkeepIssue(1, 1, 'CLOSED'), issue(7)]);
+  serveEvents(alone, 7, closedThenApp);
+  alone.tick();
+  assert.equal(alone.ran(), false);
+  assert.match(alone.log(), /#7: skipped: the owner closed it, and only the owner's reopening lifts it/);
+
+  const parent = ticketSetup(t, [{...issue(10), body: ''}, {...issue(11, {state: 'CLOSED'}), body: 'Slice 1 of #10.'}, issue(20)]);
+  serveEvents(parent, 10, closedThenApp);
+  assert.equal(parent.tick({}, ['--plan']).trim(), 'ticket 20');
+
+  const lifted = ticketSetup(t, [issue(7), issue(8)]);
+  serveEvents(lifted, 7, closedThenOwner);
+  assert.equal(lifted.tick({}, ['--plan']).trim(), 'ticket 7');
+});
+
+test("a pull request whose hold the owner added and the App removed is not repaired; the owner's removal lifts it", t => {
+  const braked = repairSetup(t);
+  serveEvents(braked, 40, holdThenApp);
+  assert.equal(braked.tick({}, ['--plan']).trim(), 'upkeep');
+  braked.tick();
+  assert.match(braked.log(), /#40: skipped: the owner added hold, and only the owner's removal lifts it/);
+  assert.doesNotMatch(braked.log(), /repair #40/);
+
+  const unread = repairSetup(t);
+  unread.gh.respond({[eventsCall(40)]: failedRead});
+  assert.equal(unread.tick({}, ['--plan']).trim(), 'upkeep');
+  unread.tick();
+  assert.match(unread.log(), /#40: could not read the events of pull request #40, so the owner's brakes on it are unknown/);
+
+  const lifted = repairSetup(t);
+  serveEvents(lifted, 40, holdThenOwner);
+  assert.equal(lifted.tick({}, ['--plan']).trim(), 'repair 40 30 conflicts');
+});
+
+test("the owner's hold or close ends a ticket session in progress after the App removed or reopened it", t => {
+  for (const [events, reason] of [[holdThenApp, "issue #7 is under the owner's hold, which the App removed"],
+    [closedThenApp, "issue #7 is under the owner's close, which only the owner's reopening lifts"]]) {
+    const r = ticketSetup(t);
+    r.gh.json('events.json', events);
+    brakeSession(r)({BRAKE_ROUTES: {[eventsCall(7)]: {file: 'events.json'}}});
+    assertBrakeEnded(r, reason);
+  }
+});
+
+test("the owner's hold or close lifted by the owner does not end the session", t => {
+  for (const events of [holdThenOwner, closedThenOwner]) {
+    const r = ticketSetup(t);
+    r.gh.json('events.json', events);
+    brakeSession(r)({BRAKE_ROUTES: {[eventsCall(7)]: {file: 'events.json'}}, SESSION_SECONDS: '1'});
+    assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'the events were looked up');
+    assert.doesNotMatch(r.log(), /owner's brake|could not/);
+  }
+});
+
+test("a failed read of the issue's events ends a ticket session in progress", t => {
+  const r = ticketSetup(t);
+  brakeSession(r)({BRAKE_ROUTES: {[eventsCall(7)]: failedRead}});
+  assertBrakeEnded(r, "issue #7 is unchecked: its events, which hold the owner's brakes, could not be read");
+  assert.match(r.log(), /ticket #7: could not read the events of issue #7/);
+});
+
+test("the owner's hold the App removed, or a failed read of the events, ends the repair session in progress", t => {
+  for (const [route, reason] of [[{file: 'events.json'}, "pull request #40 is under the owner's hold, which the App removed"],
+    [failedRead, "pull request #40 is unchecked: its events, which hold the owner's hold, could not be read"]]) {
+    const r = repairSetup(t);
+    r.gh.json('events.json', holdThenApp);
+    brakeSession(r)({BRAKE_ROUTES: {[eventsCall(40)]: route}});
+    assertBrakeEnded(r, reason, {kind: 'repair', number: 40, labelled: 'pr edit 40'});
+  }
+});
+
+// The repository's issue events (newest first) name the issues someone labelled stop-agents; issue #9's own events then
+// say whether the owner's stop-agents still holds.
+const repoEventsCall = `api repos/${repo}/issues/events`;
+const repoEvent = (number, event, login, name, created_at = '2026-10-17T10:00:00Z') =>
+  ({created_at, event, actor: {login}, label: {name}, issue: {number}});
+const stopAgentsBy = login => [repoEvent(9, 'labeled', login, 'stop-agents')];
+const serveStopAgents = (r, issueEvents, repoEvents = stopAgentsBy('Example-Owner')) => {
+  r.gh.json('repo-events.json', repoEvents);
+  r.gh.json('stop-events.json', issueEvents);
+  r.gh.respond({[repoEventsCall]: {file: 'repo-events.json'}, [eventsCall(9)]: {file: 'stop-events.json'}});
+};
+const stopLabel = (event, login) => labelEvent(event, login, 'stop-agents');
+const stopAgentsCases = {
+  'closed by the App': [stopLabel('labeled', 'Example-Owner'), stateEvent('closed', 'example-agents[bot]')],
+  'unlabelled by the App': [stopLabel('labeled', 'Example-Owner'), stopLabel('unlabeled', 'example-agents[bot]')],
+};
+const stopAgentsLifted = {
+  'closed by the owner': [stopLabel('labeled', 'Example-Owner'), stateEvent('closed', 'Example-Owner')],
+  'unlabelled by the owner': [stopLabel('labeled', 'Example-Owner'), stopLabel('unlabeled', 'example-owner')],
+};
+const stopAgentsPaused = /paused: issue #9, under the owner's stop-agents, which only the owner's unlabelling or closing lifts/;
+
+test("an issue the owner labelled stop-agents pauses the project after the App closed or unlabelled it; the owner's lifts it", t => {
+  for (const [name, events] of Object.entries(stopAgentsCases)) {
+    const r = ticketSetup(t);
+    serveStopAgents(r, events);
+    r.tick();
+    assert.equal(r.ran(), false, name);
+    assert.match(r.log(), stopAgentsPaused, name);
+    assert.match(r.tick({}, ['--plan']), stopAgentsPaused, name);
+  }
+  for (const [name, events] of Object.entries(stopAgentsLifted)) {
+    const r = ticketSetup(t);
+    serveStopAgents(r, events);
+    assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7', name);
+  }
+  const byApp = ticketSetup(t);
+  serveStopAgents(byApp, stopAgentsCases['closed by the App'], stopAgentsBy('example-agents[bot]'));
+  assert.equal(byApp.tick({}, ['--plan']).trim(), 'ticket 7', "the App's own label pauses only while the issue is open with it");
+});
+
+test('an issue the owner labelled stop-agents keeps pausing after its label event is past the events the runner reads again', t => {
+  const r = ticketSetup(t);
+  serveStopAgents(r, stopAgentsCases['unlabelled by the App']);
+  assert.match(r.tick({}, ['--plan']), stopAgentsPaused);
+  r.gh.json('repo-events.json', [repoEvent(3, 'labeled', 'Example-Owner', 'bug', '2026-10-17T11:00:00Z')]);
+  r.tick();
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), stopAgentsPaused);
+  r.gh.json('stop-events.json', stopAgentsLifted['unlabelled by the owner']);
+  assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7');
+});
+
+test('a failed read of the stop-agents events pauses the project', t => {
+  for (const routes of [{[repoEventsCall]: failedRead}, {[eventsCall(9)]: failedRead}]) {
+    const r = ticketSetup(t);
+    serveStopAgents(r, stopAgentsCases['closed by the App']);
+    r.gh.respond(routes);
+    r.tick();
+    assert.equal(r.ran(), false);
+    assert.match(r.log(), /could not read the stop-agents events of Example-Owner\/example-project/);
+    assert.match(r.log(), /paused: the stop-agents events of Example-Owner\/example-project, which could not be read/);
+  }
+});
+
+test("the owner's stop-agents the App closed, or a failed read of its events, ends a session in progress", t => {
+  for (const [routes, reason] of [[{[eventsCall(9)]: {file: 'stop-events.json'}},
+    "issue #9, under the owner's stop-agents, which only the owner's unlabelling or closing lifts"],
+  [{[eventsCall(9)]: failedRead}, 'the stop-agents events of \\S+, which could not be read']]) {
+    const r = ticketSetup(t);
+    r.gh.json('repo-events.json', stopAgentsBy('Example-Owner'));
+    r.gh.json('stop-events.json', stopAgentsCases['closed by the App']);
+    brakeSession(r)({BRAKE_ROUTES: {[repoEventsCall]: {file: 'repo-events.json'}, ...routes}});
+    assertBrakeEnded(r, reason);
+  }
 });
 
 test('with no brake a session checked while it runs ends as before, and its watcher ends with it', t => {

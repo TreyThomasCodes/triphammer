@@ -7,8 +7,8 @@
 # `now` is the tick's time in UTC (2026-10-17T12:00:00Z), and `owner-login` the person the runner acts for (Triphammer
 # config's OWNER), by default the owner part of owner/repo, and `state-dir` the runner's state directory, whose
 # `security-findings` and `security-followed-up` records say which pull request heads wait for a security-findings
-# repair (none without it), and whose `owner-brakes` record lists the issues the owner's needs-owner brakes with or
-# without the label (none without it). Prints one action, "close <issue>",
+# repair (none without it), and whose `owner-brakes` record lists the issues and pull requests the owner's brakes
+# hold whatever their labels and state (none without it). Prints one action, "close <issue>",
 # "repair <pr> <issue> <reason>", "ticket <issue>" or "upkeep", or nothing. Notes on why an otherwise ready issue,
 # or an issue labelled `next`, waits, on why a parent whose slices are all closed stays open (a brake label), and on
 # each issue or pull request skipped for more labels than gh reads, go to stderr. With --closed it prints, one per
@@ -108,8 +108,9 @@ def records(name):
 # lines match, so a record of an older head starts nothing.
 pending_follow_up = records("security-findings") - records("security-followed-up")
 BRAKES = {"hold", "needs-owner", "stop-agents"}  # the runner never closes or starts an issue labelled with one
-# The issues ticket-runner found braked by the owner's needs-owner, label or no label, or could not look up
-# (its owner_brake), one number per line; it never closes or starts them either.
+# The issues and pull requests ticket-runner found braked by the owner's needs-owner, hold or close, label or no label
+# and open or not, or whose events it could not read (its owner_brake), one number per line; it never closes, starts
+# or repairs them either. Issues and pull requests share one series of numbers.
 owner_brakes = records("owner-brakes")
 # `gh --json labels` returns only an item's first 100 labels, so a brake may be past them: the runner's session brakes
 # (labels_unread in bin/labels.sh) stop a session on an item with 100 labels or more. The runner adds `agent-working`
@@ -157,7 +158,7 @@ for parent in sorted(slices):
             print(f"skip close {parent}: labelled {', '.join(brakes)}", file=sys.stderr)
             continue
         if str(parent) in owner_brakes:
-            print(f"skip close {parent}: the owner's needs-owner brakes it", file=sys.stderr)
+            print(f"skip close {parent}: an owner's brake the runner read from its events brakes it", file=sys.stderr)
             continue
         if unread(issues[parent]):
             print(f"skip close {parent}: {UNREAD_NOTE}", file=sys.stderr)
@@ -166,7 +167,7 @@ for parent in sorted(slices):
 
 failing = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "ERROR"}
 for pr in sorted(prs, key=lambda pr: pr["number"]):
-    if author(pr).lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr):
+    if author(pr).lower() != app.lower() or pr["isDraft"] or "hold" in labels(pr) or str(pr["number"]) in owner_brakes:
         continue
     if unread(pr):
         print(f"skip repair {pr['number']}: {UNREAD_NOTE}", file=sys.stderr)

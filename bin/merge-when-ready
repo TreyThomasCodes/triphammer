@@ -19,9 +19,12 @@
 # Disabling auto-merge on a pull request opts it out; the ruleset still refuses any merge that is not ready.
 # The owner's brakes stop it, as they stop the ticket runner:
 #   - the file `stop` in ticket-runner's state directory (the Triphammer config's STATE_DIR) or in the shared directory every
-#     project shares (config.sh), or an open issue labelled `stop-agents` in any installation repository, means a
-#     tick does nothing; a tick whose stop-agents query fails does nothing either;
-#   - a pull request labelled `hold` is never merged or updated, and does not hold the line;
+#     project shares (config.sh), an open issue labelled `stop-agents` in any installation repository, or one there
+#     under the owner's stop-agents, which the App's unlabelling or closing does not lift (owner_stop_agents in
+#     bin/labels.sh, with a record per repository next to the log), means a tick does nothing; a tick whose
+#     stop-agents query or events read fails does nothing either;
+#   - a pull request labelled `hold`, or under the owner's hold, which the App's removal does not lift (owner_brake in
+#     bin/labels.sh), is never merged or updated, and does not hold the line; nor is one whose events cannot be read;
 #   - a pull request of the served repository whose current head security-review recorded findings for, and which
 #     ticket-runner has not yet followed up, is neither merged nor updated: its line "<REPO> <n> <head>" is in
 #     security-findings in ticket-runner's state directory and not in security-followed-up there. An update would make
@@ -52,10 +55,13 @@ stall_minutes=45
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
-# labelled_jq, which the hold check below reads labels through.
+# labelled_jq, which the hold check below reads labels through, and owner_brake and owner_stop_agents, which read the
+# owner's brakes from the events.
 # shellcheck source=bin/labels.sh
 source "$bin/labels.sh"
 load_config merge-when-ready "$bin/.."
+# The App's login in the issue events API, whose events lift no owner's brake.
+app_login="$(event_login "$cfg_app_author")"
 # The repository ticket-runner serves, and its state directory.
 served="$cfg_repo" runner_state="$cfg_state_dir"
 # Whether repositories $1 and $2 are the same one: GitHub ignores the case of owner and repository names, and the
@@ -111,6 +117,14 @@ read_brakes() {
     fi
     if [ -n "$stop_issues" ]; then
       brakes="paused: an open issue in $repository is labelled stop-agents"
+      return
+    fi
+    if ! stop_issues="$(owner_stop_agents "$repository" "$state_home/merge-when-ready$suffix.stop-agents-${repository/\//_}")"; then
+      brakes="paused: reading the stop-agents events of $repository failed"
+      return
+    fi
+    if [ -n "$stop_issues" ]; then
+      brakes="paused: issue #${stop_issues%% *} in $repository is under the owner's stop-agents, which only the owner's unlabelling or closing lifts"
       return
     fi
   done
@@ -252,6 +266,14 @@ for repository in $repositories; do
       why="labelled hold"
       [ "$hold" = hold ] || why="more labels than merge-when-ready reads, so it may be labelled hold"
       case "$state" in CLEAN|BEHIND) skips+="$repository#$number: $why; not merging or updating it"$'\n' ;; esac
+      continue
+    fi
+    if ! held="$(owner_brake "$repository" "$number" hold < /dev/null)"; then
+      skips+="$repository#$number: could not read its events, which hold the owner's hold; not merging or updating it"$'\n'
+      continue
+    fi
+    if [ "$held" = on ]; then
+      skips+="$repository#$number: under the owner's hold, which the App removed; not merging or updating it"$'\n'
       continue
     fi
     if [ "$state" = CLEAN ] && pending_follow_up "$repository" "$number" "$head"; then

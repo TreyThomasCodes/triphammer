@@ -455,27 +455,42 @@ of these fails the run. Agents never run `demo-publish`.
 
 The owner's brakes stop a session in progress, not only the next one. While a session runs, `ticket-runner` checks
 them every `TICKET_RUNNER_BRAKE_SECONDS` (a positive number, default 60): the project's and the shared `stop` files, an open `stop-agents`
-issue, `hold` on a ticket's issue, the owner's `needs-owner` on it, the ticket's issue being closed, and `hold` on the
-pull request a repair works on. So do 100 labels or more on the ticket's issue or the repair's pull request, as `gh`
-reads only the first 100 and a `hold` or `needs-owner` may be past them. `needs-owner` that someone other than the App added brakes until someone other than the
-App removes it, whether or not the label is still on the issue: the runner reads the issue's `labeled` and `unlabeled`
-events for it (the issue events API, oldest first, where the App is `<APP_AUTHOR without app/>[bot]`), and the brake
-is on when the last such `labeled` event by anyone but the App comes after the last such `unlabeled` one. The App's
-events count for nothing either way: a session adds the label itself when it stops for the owner (review-loop step 4,
-ticket-run), which is no brake on the run that added it, and the App removing the owner's label lifts nothing. The
-same rule keeps a tick from closing or starting the issue (What a tick decides). A closed issue brakes
-unless it is labelled `upkeep` (whose session closes its own issue) or a merged pull request closed it (the last
-`ClosedEvent` of the issue's timeline names it as the closer): the run's own pull request, which `merge-when-ready` may
-merge while the session's demo agent still runs. When a brake applies, the runner ends the session the way
+issue or the owner's `stop-agents`, `hold` on a ticket's issue, the owner's `hold` and `needs-owner` on it, the ticket's
+issue being closed, the owner's close of it, and `hold` and the owner's `hold` on the pull request a repair works on.
+So do 100 labels or more on the ticket's issue or the repair's pull request, as `gh` reads only the first 100 and a
+`hold` or `needs-owner` may be past them.
+
+A brake that someone other than the App set holds until someone other than the App lifts it, whatever the labels and
+state are now, since a session acts with the App's token. The runner and `merge-when-ready` read who did what from the
+events of the issue or pull request (the issue events API, oldest first, where the App is
+`<APP_AUTHOR without app/>[bot]`; `owner_brake` in `bin/labels.sh`). The owner's `hold` or `needs-owner` is on when the
+last `labeled` or `unlabeled` event for it by anyone but the App is `labeled`, whether or not the label is still there;
+the owner's close is on when the last `closed` or `reopened` event by anyone but the App is `closed`, even though the
+issue is open again. The App's events count for nothing either way: a session adds `needs-owner` itself when it stops
+for the owner (review-loop step 4, ticket-run), which is no brake on the run that added it, the runner's own `hold` on a
+pull request three repairs could not move brakes while the label is on, and the App removing the owner's label or
+reopening the owner's issue lifts nothing. The same rules keep a tick from closing or starting the issue or repairing
+the pull request (What a tick decides). The owner's `stop-agents` is an issue that someone other than the App labelled
+`stop-agents` and that no one other than the App has unlabelled or closed since, open or not and labelled or not
+(`owner_stop_agents` in `bin/labels.sh`): its candidates are the issues with such a `labeled` event in the repository's
+issue events, which GitHub lists newest first, and a record keeps them between checks (`stop-agents-events` in the state
+directory, and `merge-when-ready<-project>.stop-agents-<owner>_<name>` next to the merge queue's log), so each check
+reads the events back to an hour before the newest one it read last, and the whole list when the record is missing. A
+candidate stays in the record until someone other than the App removes its label, and an issue whose events cannot be
+read, a deleted one too, pauses the project until the owner removes its line. A closed issue brakes unless it is
+labelled `upkeep` (whose session closes its own issue) or a merged pull request closed it (the last `ClosedEvent` of
+the issue's timeline names it as the closer): the run's own pull request, which `merge-when-ready` may merge while the
+session's demo agent still runs. When a brake applies, the runner ends the session the way
 `systemctl stop` ends the unit's cgroup: SIGTERM to every process of the session, then SIGKILL to whatever is left after
 `TICKET_RUNNER_BRAKE_GRACE_SECONDS` (default 90, systemd's default `TimeoutStopSec`). Claude Code runs each Bash tool
 command in a session of its own, so the runner finds the session's processes by parent pid and process group in `/proc`
 and walks them again each second, which also catches the ones a dying parent leaves behind; a process forked by a parent
 that exits between two walks, outside every process group it knows (a double fork), escapes it. It logs
 `ended by the owner's brake: <brake>; not counted`, does not count the run toward the three, publishes no demo, starts
-no security review, keeps the run's clone, and removes `agent-working` and `current` as on every other ending. A brake
-lookup that fails (`gh` exits non-zero), or a `needs-owner` label with no event for it or a closer GitHub does not
-report yet, is logged and the session goes on.
+no security review, keeps the run's clone, and removes `agent-working` and `current` as on every other ending. A read of
+the events that fails (`gh` exits non-zero) is logged and brakes. Any other brake lookup that fails, or a `needs-owner`
+label with no event for it or a closer GitHub does not report yet, is logged and the session goes on, but a closer that
+cannot be looked up on an issue the owner closed brakes.
 
 ## Run clones and databases nothing uses
 
@@ -536,11 +551,12 @@ prints the one action described in `ticket-runner`'s header. A few rules decide 
 - Several issues may claim the same `Slice k of #N`. Any open one keeps parent `#N` open and holds back slice `k+1`.
   A parent labelled `hold`, `needs-owner` or `stop-agents` stays open after its last slice closes, and the reason is
   printed to standard error.
-- An issue the owner's `needs-owner` brakes after the label is gone (Sessions has the rule) is neither closed nor
-  started. `ticket-decide.py` reads only labels, so before `ticket-runner` closes or starts an issue it reads the
-  issue's label events; when the owner's brake is on, or the lookup fails, it logs why, adds the issue to the state
-  directory's `owner-brakes` record (rewritten each tick), which `ticket-decide.py` skips, and decides again. Only the
-  issue it would act on is looked up, never the whole list.
+- An issue the owner's `needs-owner`, `hold` or close brakes after the label is gone or the issue is open again
+  (Sessions has the rules) is neither closed nor started, and a pull request the owner's `hold` brakes is not repaired.
+  `ticket-decide.py` reads only labels and states, so before `ticket-runner` closes or starts an issue or repairs a pull
+  request it reads that one's events; when one of the owner's brakes is on, or the read fails, it logs why, adds the
+  number to the state directory's `owner-brakes` record (rewritten each tick), which `ticket-decide.py` skips, and
+  decides again. Only the issue or pull request it would act on is looked up, never the whole list.
 - An issue or pull request with 99 labels or more besides `agent-working`, in any case, counts as braked. `gh` reads
   only the first 100, so a brake may be past them, and the session brakes (Sessions) stop a session at 100; the runner
   adds `agent-working` before its first brake check, so an item picked at 99 would be braked there, uncounted, on every
@@ -561,9 +577,14 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 
 | Label | What Triphammer does with it |
 | --- | --- |
-| `hold` | The owner's brake: the runner starts nothing on an issue or pull request that carries it and stops a run on it (Sessions), and `merge-when-ready` neither merges nor updates such a pull request. A pull request three repair runs could not move gets it. |
+| `hold` | The owner's brake: the runner starts nothing on an issue or pull request that carries it and stops a run on it (Sessions), and `merge-when-ready` neither merges nor updates such a pull request. Added by anyone but the App, it holds until anyone but the App removes it, even after the App removed it (Sessions). A pull request three repair runs could not move gets it from the App, and then it holds while it is on. |
 | `needs-owner` | Waits for the owner: the runner starts no run on an issue that carries it, a session adds it when it stops for the owner, and a ticket that ends three runs without a pull request gets it. Added by anyone but the App, it stops a run on its issue and keeps the runner off the issue until anyone but the App removes it, even after the App removed it (Sessions). The `risk-tier` workflow adds it to a pull request that escalates. |
-| `stop-agents` | An open issue that carries it pauses the project and stops a run in progress. |
+| `stop-agents` | An open issue that carries it pauses the project and stops a run in progress, and `merge-when-ready` merges and updates nothing in any repository of the installation. Added by anyone but the App, it pauses until anyone but the App removes it or closes the issue, even after the App removed it or closed the issue (Sessions). |
+
+Closing an issue is a brake too: an issue that anyone but the App closed stops a run on it, and the runner neither
+starts nor closes it until anyone but the App reopens it, even after the App reopened it (Sessions). So each of the
+owner's brakes holds until someone other than the App lifts it, and a failed read of the events that say who lifted it
+brakes.
 | `next` | Ready issues that carry it are taken first (What a tick decides). |
 | `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
 | `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |

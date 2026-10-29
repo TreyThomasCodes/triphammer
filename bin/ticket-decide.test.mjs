@@ -289,12 +289,19 @@ test('held, needs-owner, stop-agents and in-flight issues are skipped', t => {
   assert.equal(decide(t, issues, [pr(60, 53)]).action, 'ticket 54');
 });
 
-test("an issue the owner's needs-owner brakes after its label is gone (the owner-brakes record) is neither started nor closed", t => {
+test("a pull request an owner's brake holds after its label is gone (the owner-brakes record) is not repaired", t => {
+  const conflicted = [pr(40, 30, {mergeStateStatus: 'DIRTY'}), pr(41, 31, {mergeStateStatus: 'DIRTY'})];
+  assert.equal(decide(t, [issue(30), issue(31)], conflicted, {state: {'owner-brakes': ['40']}}).action,
+    'repair 41 31 conflicts');
+  assert.equal(decide(t, [issue(30)], conflicted.slice(0, 1), {state: {'owner-brakes': ['40']}}).action, '');
+});
+
+test("an issue an owner's brake holds after its label is gone (the owner-brakes record) is neither started nor closed", t => {
   assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['51']}}).action, 'ticket 52');
   assert.equal(decide(t, [issue(51, '', {labels: ['next']}), issue(52)], [],{state: {'owner-brakes': ['51']}}).action, 'ticket 52');
   const parent = decide(t, [issue(10), closed(11, 'Slice 1 of #10.'), issue(20)], [], {state: {'owner-brakes': ['10']}});
   assert.equal(parent.action, 'ticket 20');
-  assert.match(parent.log, /skip close 10: the owner's needs-owner brakes it/);
+  assert.match(parent.log, /skip close 10: an owner's brake the runner read from its events brakes it/);
   assert.equal(decide(t, [issue(51), issue(52)], [], {state: {'owner-brakes': ['5']}}).action, 'ticket 51',
     'whole lines only');
 });
