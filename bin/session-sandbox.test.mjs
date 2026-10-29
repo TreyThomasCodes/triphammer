@@ -441,7 +441,7 @@ test('without docker or dotnet, the home directory gets neither directory', {ski
   const bin = join(r.root, 'bin');
   mkdirSync(bin);
   for (const name of ['bash', 'env', 'sh', 'git', 'bwrap', 'readlink', 'dirname', 'mkdir']) {
-    symlinkSync(realCommand(name),join(bin, name));
+    symlinkSync(realCommand(name), join(bin, name));
   }
   const {status, output} = r.inside('true', {PATH: bin});
   assert.equal(status, 0, output);
