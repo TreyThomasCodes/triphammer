@@ -51,7 +51,7 @@ function sandboxRig(t) {
       {cwd: worktree, env: {...env, HOME: home, ...extra}, encoding: 'utf8'});
     return {status: result.status, output: result.stdout + result.stderr};
   };
-  return {root, main, triphammer, home, worktree, inside};
+  return {root, main, triphammer, home, worktree, env: {...env, HOME: home}, inside};
 }
 
 // Asserts that writing each of `paths` under the limit, with `extra` in the environment, is refused and leaves it as
@@ -368,10 +368,9 @@ test('a token file the runner rewrites through a rename shows inside the limit w
   const {own} = tokenFiles(r);
   const signal = mkdtempSync('/tmp/session-sandbox-token-');
   t.after(() => rmSync(signal, {recursive: true, force: true}));
-  const {TMPDIR, XDG_STATE_HOME, ...env} = withoutSandboxPaths(gitEnv);
   const child = spawn(join(r.triphammer, 'bin/session-sandbox'), [r.worktree, 'sh', '-c', `cat '${own}'; : > '${signal}/read'
 for i in $(seq 100); do [ -e '${signal}/renamed' ] && break; sleep 0.1; done; cat '${own}'`],
-  {cwd: r.worktree, env: {...env, HOME: r.home, TRIPHAMMER_TOKEN_FILE: own}});
+  {cwd: r.worktree, env: {...r.env, TRIPHAMMER_TOKEN_FILE: own}});
   let output = '';
   child.stdout.on('data', data => { output += data; });
   child.stderr.on('data', data => { output += data; });

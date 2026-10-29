@@ -1679,7 +1679,7 @@ function assertBrakeEnded(r, brake, {kind = 'ticket', number = 7, labelled = `is
   assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`${labelled} -R ${repo} --remove-label agent-working`]);
   assert.equal(existsSync(r.current), false);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/brake')), false);
-  assert.equal(existsSync(join(r.root, 'state/triphammer/tokens/triphammer')), false, "the session's token is removed");
+  assert.equal(existsSync(tokenPaths(r).dir), false, "the session's token is removed");
   assert.deepEqual(r.securityCalls(), [], 'a stopped run reviews nothing');
   assert.deepEqual(r.demoCalls(), [], 'and publishes nothing');
 }
@@ -2053,7 +2053,9 @@ test('a run killed mid-session frees its slot for a later tick', t => {
 pkill -KILL -P "$pid"
 kill -KILL "$pid"
 `);
-  assert.throws(() => p.a.tick({...brakeEnv, DURING_SESSION: kill}), error => error.signal === 'SIGKILL');
+  // Short sleeps, as an orphaned watcher's or token refresher's sleep holds the tick's output open until it ends.
+  assert.throws(() => p.a.tick({...brakeEnv, TICKET_RUNNER_TOKEN_SECONDS: '0.1', DURING_SESSION: kill}),
+    error => error.signal === 'SIGKILL');
   assert.equal(p.a.runs(), 1);
   p.b.tick({DURING_SESSION: p.c.tickCommand()});
   assert.equal(p.b.runs(), 1);
