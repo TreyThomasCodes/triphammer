@@ -15,11 +15,12 @@ export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim()
 // A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
 // `checkout`'s objects through an alternate.
 export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);
-// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable
-// or hides, so the sandbox derives each from HOME and a test never writes the machine's own ~/.codex or ~/.claude.
+// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable,
+// hides or reads, or that it points at the caches inside, so the sandbox derives each from HOME and a test never
+// writes the machine's own ~/.codex or ~/.claude.
 export const withoutSandboxPaths = ({XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
   NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, XDG_CACHE_HOME,
-  GITHUB_APP_CONFIG_DIR, ...env}) => env;
+  GITHUB_APP_CONFIG_DIR, npm_config_cache, NPM_CONFIG_CACHE, BUILDX_CONFIG, PLAYWRIGHT_BROWSERS_PATH, ...env}) => env;
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
 // `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.
