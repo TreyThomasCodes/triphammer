@@ -284,8 +284,8 @@ does not count, so the next run is the same run again with the same builder. Rep
 ### The write limit
 
 Every session runs under an OS-level write limit, below the guard hook: `ticket-runner` starts `claude -p` through
-`session-sandbox <run's clone>`, and the project's `worktreeTeardown` the same way, which runs each under bubblewrap (`bwrap`) with the whole file system mounted read-only
-and only these paths writable:
+`session-sandbox <run's clone>`, and the project's `worktreeTeardown` the same way, which runs each under bubblewrap
+(`bwrap`) with the whole file system mounted read-only and only these paths writable:
 
 - the run's clone, with its own `.git`, where its commits and refs go. The main checkout's `.git` is read-only to the
   session, the objects the clone reads through its alternate included, so no config (`core.fsmonitor`,
