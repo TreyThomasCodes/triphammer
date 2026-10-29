@@ -471,8 +471,9 @@ for the owner (review-loop step 4, ticket-run), which is no brake on the run tha
 pull request three repairs could not move brakes while the label is on, and the App removing the owner's label or
 reopening the owner's issue lifts nothing. The same rules keep a tick from closing or starting the issue or repairing
 the pull request (What a tick decides). The owner's `stop-agents` is an issue that someone other than the App labelled
-`stop-agents` and that no one other than the App has unlabelled or closed since, open or not and labelled or not
-(`owner_stop_agents` in `bin/labels.sh`): its candidates are the issues with such a `labeled` event in the repository's
+`stop-agents` and that no one other than the App has unlabelled or closed since, open or not and labelled or not, read
+from its events in order, so a close before the label lifts nothing and a reopening by someone other than the App while
+that label is on holds again (`owner_stop_agents` in `bin/labels.sh`): its candidates are the issues with such a `labeled` event in the repository's
 issue events, which GitHub lists newest first, and a record keeps them between checks (`stop-agents-events` in the state
 directory, and `merge-when-ready<-project>.stop-agents-<owner>_<name>` next to the merge queue's log), so each check
 reads the events back to an hour before the newest one it read last, and the whole list when the record is missing. A

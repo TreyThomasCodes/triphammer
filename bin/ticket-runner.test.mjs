@@ -2065,10 +2065,18 @@ const stopLabel = (event, login) => labelEvent(event, login, 'stop-agents');
 const stopAgentsCases = {
   'closed by the App': [stopLabel('labeled', 'Example-Owner'), stateEvent('closed', 'example-agents[bot]')],
   'unlabelled by the App': [stopLabel('labeled', 'Example-Owner'), stopLabel('unlabeled', 'example-agents[bot]')],
+  'labelled after an owner close the App reopened, then closed by the App': [stateEvent('closed', 'Example-Owner'),
+    stateEvent('reopened', 'example-agents[bot]'), stopLabel('labeled', 'Example-Owner'),
+    stateEvent('closed', 'example-agents[bot]')],
+  'closed and reopened by the owner, then unlabelled by the App': [stopLabel('labeled', 'Example-Owner'),
+    stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'Example-Owner'),
+    stopLabel('unlabeled', 'example-agents[bot]')],
 };
 const stopAgentsLifted = {
   'closed by the owner': [stopLabel('labeled', 'Example-Owner'), stateEvent('closed', 'Example-Owner')],
   'unlabelled by the owner': [stopLabel('labeled', 'Example-Owner'), stopLabel('unlabeled', 'example-owner')],
+  'closed by the owner and reopened by the App': [stopLabel('labeled', 'Example-Owner'),
+    stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'example-agents[bot]')],
 };
 const stopAgentsPaused = /paused: issue #9, under the owner's stop-agents, which only the owner's unlabelling or closing lifts/;
 

@@ -74,21 +74,28 @@ event_login() {
   if [[ "${1,,}" == app/* ]]; then echo "${1:4}[bot]"; else echo "$1"; fi  # case-sensitive: lowered, against a lowercase literal
 }
 
+# brake_events <owner/repo> <number>: the labeled, unlabeled, closed and reopened events of issue or pull request
+# <number>, oldest first, one per line: "<event> <login> <label name, lowercased>". Fails when they cannot be read.
+brake_events() {
+  gh api "repos/$1/issues/$2/events" --paginate --jq '.[]
+    | select(.event == "labeled" or .event == "unlabeled" or .event == "closed" or .event == "reopened")
+    | "\(.event) \(.actor.login // "-") \(.label.name // "" | ascii_downcase)"' 2>/dev/null
+}
+
 # owner_brake <owner/repo> <number> <brake>...: whether each brake named holds issue or pull request <number> of
 # <owner/repo>, from its events (oldest first), whatever its labels and state are now. A brake is a label name, given
 # in lowercase, whose `labeled` and `unlabeled` events count, or `closed`, whose `closed` and `reopened` events count.
 # Prints, for each brake in order and separated by spaces, "on" when the last of its events by anyone but the App sets
 # it (labeled, closed), "off" when that one lifts it or the App's are its only ones, and "none" when it has no event.
 # Label names and logins compare case-insensitively. Fails, printing nothing, when the events cannot be read.
+# Each brake is judged from its own events alone: combining two brakes' states loses their order.
 # shellcheck disable=SC2154  # app_login is the caller's
 owner_brake() {
   local repository="$1" number="$2" events event actor name i
   shift 2
   local -a asked=("$@") states=()
   for i in "${!asked[@]}"; do states[i]=none; done
-  events="$(gh api "repos/$repository/issues/$number/events" --paginate --jq '.[]
-    | select(.event == "labeled" or .event == "unlabeled" or .event == "closed" or .event == "reopened")
-    | "\(.event) \(.actor.login // "-") \(.label.name // "" | ascii_downcase)"' 2>/dev/null)" || return 1
+  events="$(brake_events "$repository" "$number")" || return 1
   while read -r event actor name; do
     [ -n "$event" ] || continue
     for i in "${!asked[@]}"; do
@@ -107,8 +114,9 @@ owner_brake() {
 
 # owner_stop_agents <owner/repo> <record>: prints, separated by spaces, the issues of <owner/repo> that the owner's
 # stop-agents holds, whatever their labels and state are now: each one that someone other than the App labelled
-# stop-agents and did not unlabel or close afterwards (owner_brake stop-agents is on and owner_brake closed is not).
-# The App's unlabelling or closing lifts nothing. The candidates are the issues with a `labeled` stop-agents event by
+# stop-agents and did not unlabel or close afterwards, judged from its events (brake_events) in order, so a close
+# before the label lifts nothing, and a reopening by someone other than the App while their label is on holds again.
+# The App's unlabelling, closing or reopening counts for nothing. The candidates are the issues with a `labeled` stop-agents event by
 # someone other than the App in the repository's issue events, which GitHub lists newest first. <record>, a file only
 # the caller writes, keeps them between calls after a first line with the time of the newest event read, so a call
 # reads the events back to an hour before that time (pages of 100 until a short one or one that reaches it), and the
@@ -118,7 +126,7 @@ owner_brake() {
 # record.
 owner_stop_agents() {
   local repository="$1" record="$2" mark="" cutoff="" newest="" candidates="" kept="" paused="" failed="" page=1
-  local events count oldest at number event actor name n out label closed
+  local events count oldest at number event actor name n out label held
   if [ -f "$record" ] && { read -r mark < "$record"; } 2>/dev/null \
       && [[ "$mark" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
     candidates="$(tail -n +2 "$record")"
@@ -143,13 +151,23 @@ owner_stop_agents() {
   done
   candidates="$(grep -xE '[1-9][0-9]*' <<< "$candidates" | sort -nu || true)"
   for n in $candidates; do
-    if ! out="$(owner_brake "$repository" "$n" stop-agents closed)"; then
+    if ! out="$(brake_events "$repository" "$n")"; then
       failed=1 kept="$candidates"$'\n'
       break
     fi
-    read -r label closed <<< "$out"
+    label=none held=""
+    while read -r event actor name; do
+      if [ "$event" = closed ] || [ "$event" = reopened ]; then
+        [ "${actor,,}" != "${app_login,,}" ] || continue
+        if [ "$event" = closed ]; then held=""; elif [ "$label" = on ]; then held=1; fi
+      elif [ "$name" = stop-agents ]; then
+        [ "$label" != none ] || label=off
+        [ "${actor,,}" != "${app_login,,}" ] || continue
+        if [ "$event" = labeled ]; then label=on held=1; else label=off held=""; fi
+      fi
+    done <<< "$out"
     [ "$label" = off ] || kept+="$n"$'\n'
-    [ "$label" != on ] || [ "$closed" = on ] || paused+="$n "
+    [ -z "$held" ] || paused+="$n "
   done
   if [ -n "$newest" ]; then
     { printf '%s\n%s' "$newest" "$kept" > "$record.$BASHPID" && mv -f "$record.$BASHPID" "$record"; } 2>/dev/null || true

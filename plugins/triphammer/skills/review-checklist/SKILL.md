@@ -86,3 +86,12 @@ A rule that judges the command after `xargs` as written misses the operands xarg
 - Does a command that only reads with the operands written become a write once more operands follow?
 
 Found in: a guard hook's xargs handling, which allowed `echo /tmp/h | xargs git config core.hooksPath` and `echo ~/.newfile true | xargs flock`.
+
+## 13. Brakes judged from separate per-kind last events
+
+A brake that one kind of event sets and another lifts (a label and a close, a close and a reopening) must be judged from those events in order. Summarizing each kind as its last event and then combining the summaries loses which came first, so an old lift cancels a newer set.
+
+- Where a brake combines two kinds of event, is it decided in one pass over the events in order, or from each kind's last event alone?
+- Is there a test where the lifting event comes before the setting one, and does the brake still hold?
+
+Found in: a stop-agents brake that read "labelled, and not closed" from separate last events, so an owner's close before the owner's label lifted the label.

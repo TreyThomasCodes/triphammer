@@ -266,19 +266,24 @@ test('a pull request whose events cannot be read is neither merged nor updated',
 
 test("an issue the owner labelled stop-agents stops every merge after the App closed or unlabelled it; the owner's lifts it", t => {
   const paused = /paused: issue #9 in o\/b is under the owner's stop-agents, which only the owner's unlabelling or closing lifts/;
-  for (const [after, held] of [[stateEvent('closed', 'agents[bot]'), true],
-    [labelEvent('unlabeled', 'agents[bot]', 'Stop-Agents'), true],
-    [stateEvent('closed', 'Example-Owner'), false], [labelEvent('unlabeled', 'example-owner', 'stop-agents'), false]]) {
+  const labelled = labelEvent('labeled', 'Example-Owner', 'stop-agents');
+  for (const [issueEvents, held] of [[[labelled, stateEvent('closed', 'agents[bot]')], true],
+    [[labelled, labelEvent('unlabeled', 'agents[bot]', 'Stop-Agents')], true],
+    // The owner's close lifts only a label it follows.
+    [[stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'agents[bot]'), labelled,
+      stateEvent('closed', 'agents[bot]')], true],
+    [[labelled, stateEvent('closed', 'Example-Owner')], false],
+    [[labelled, labelEvent('unlabeled', 'example-owner', 'stop-agents')], false]]) {
     const r = queueSetup(t);
     r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'BEHIND')]);
     events(r, 'o/b/issues', stopAgentsLabelled);
-    events(r, 'o/b/issues/9', [labelEvent('labeled', 'Example-Owner', 'stop-agents'), after]);
+    events(r, 'o/b/issues/9', issueEvents);
     assert.equal(r.tick().status, 0);
     if (held) {
-      assert.deepEqual(r.calls(), [], JSON.stringify(after));
+      assert.deepEqual(r.calls(), [], JSON.stringify(issueEvents));
       assert.match(r.log(), paused);
     } else {
-      assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`, 'update-branch o/a#2'], JSON.stringify(after));
+      assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`, 'update-branch o/a#2'], JSON.stringify(issueEvents));
     }
   }
 });
