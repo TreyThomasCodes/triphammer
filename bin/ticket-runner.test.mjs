@@ -1545,9 +1545,10 @@ if [ -n "$BRAKE_ROUTES_THEN" ]; then
 fi
 wait
 `, {mode: 0o755});
-  return (env = {}) => {
+  return (env = {}) => {  // $BRAKE_ROUTES and $BRAKE_ROUTES_THEN as objects, written as JSON
     const started = Date.now();
-    r.tick({...brakeEnv, DURING_SESSION: script, ...env});
+    const json = Object.entries(env).map(([key, value]) => [key, typeof value === 'object' ? JSON.stringify(value) : value]);
+    r.tick({...brakeEnv, DURING_SESSION: script, ...Object.fromEntries(json)});
     return Date.now() - started;
   };
 }
@@ -1603,10 +1604,7 @@ test("each of the owner's brakes ends a ticket session in progress, uncounted, a
     r.gh.json('by-owner.json', labelledBy('Example-Owner'));
     r.gh.json('brake-closed.json', issue(7, {state: 'CLOSED'}));
     r.gh.json('closed-by-hand.json', closedBy(null));
-    const env = {BRAKE_FILE: brake.BRAKE_FILE && join(r.root, brake.BRAKE_FILE),
-      BRAKE_ROUTES: brake.BRAKE_ROUTES && JSON.stringify(brake.BRAKE_ROUTES),
-      BRAKE_ROUTES_THEN: brake.BRAKE_ROUTES_THEN && JSON.stringify(brake.BRAKE_ROUTES_THEN)};
-    const took = brakeSession(r)(env);
+    const took = brakeSession(r)({...brake, BRAKE_FILE: brake.BRAKE_FILE && join(r.root, brake.BRAKE_FILE)});
     assert.ok(took < 20000, `${reason}: the run ended in ${took} ms, not after the session's 30 s`);
     assertBrakeEnded(r, reason);
   }
@@ -1618,8 +1616,8 @@ test("the owner's Hold and Needs-Owner, in another case, end a ticket session in
     const r = ticketSetup(t);
     r.gh.json(file, issue(7, {labels: ['agent-working', ...labels]}));
     r.gh.json('by-owner.json', labelledBy('Example-Owner', 'Needs-Owner'));
-    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file}}),
-      BRAKE_ROUTES_THEN: JSON.stringify({[eventsCall(7)]: {file: 'by-owner.json'}})});
+    brakeSession(r)({BRAKE_ROUTES: {[issueView(7)]: {file}},
+      BRAKE_ROUTES_THEN: {[eventsCall(7)]: {file: 'by-owner.json'}}});
     assertBrakeEnded(r, reason);
   }
 });
@@ -1627,7 +1625,7 @@ test("the owner's Hold and Needs-Owner, in another case, end a ticket session in
 test('Hold, in another case, on the pull request a repair works on ends the repair session in progress', t => {
   const r = repairSetup(t);
   r.gh.json('brake-pr.json', {labels: [{name: 'Hold'}]});
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  brakeSession(r)({BRAKE_ROUTES: {[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}}});
   assertBrakeEnded(r, 'pull request #40 is labelled hold', {kind: 'repair', number: 40, labelled: 'pr edit 40'});
 });
 
@@ -1635,14 +1633,14 @@ test('Hold, in another case, on the pull request a repair works on ends the repa
 test('a ticket whose issue has 100 labels or more, which may hide a brake, ends the session in progress', t => {
   const r = ticketSetup(t);
   r.gh.json('brake-unread.json', issue(7, {labels: manyLabels(100)}));
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
+  brakeSession(r)({BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-unread.json'}}});
   assertBrakeEnded(r, 'issue #7 is labelled more than the runner reads, so it may be labelled hold or needs-owner');
 });
 
 test('a repair whose pull request has 100 labels or more, which may hide hold, ends the session in progress', t => {
   const r = repairSetup(t);
   r.gh.json('brake-pr.json', {labels: manyLabels(100).map(name => ({name}))});
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  brakeSession(r)({BRAKE_ROUTES: {[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}}});
   assertBrakeEnded(r, 'pull request #40 is labelled more than the runner reads, so it may be labelled hold',
     {kind: 'repair', number: 40, labelled: 'pr edit 40'});
 });
@@ -1652,7 +1650,7 @@ test('a repair whose pull request has 100 labels or more, which may hide hold, e
 test('an issue with 99 labels besides agent-working is not picked, so no session starts and is braked', t => {
   const r = ticketSetup(t, [recentUpkeep, issue(7, {labels: manyLabels(99)})]);
   r.gh.json('brake-unread.json', issue(7, {labels: [...manyLabels(99), 'agent-working']}));
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'brake-unread.json'}})});
+  brakeSession(r)({BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-unread.json'}}});
   assert.equal(r.ran(), false);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'no run of #7 started');
   assert.equal(labelCalls(r.ghCalls()).length, 0, 'agent-working is never added');
@@ -1664,7 +1662,7 @@ test('a session that labels its own issue Needs-Owner, in another case, ends as 
   r.gh.json('by-app.json', labelledBy('example-agents[bot]', 'Needs-Owner'));
   const routes = {[issueView(7)]: {file: 'self-needs-owner.json'}, [eventsCall(7)]: {file: 'by-app.json'},
     [`issue view 7 -R ${repo} --json state,labels`]: {file: 'self-needs-owner.json'}};
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});
+  brakeSession(r)({BRAKE_ROUTES: routes, SESSION_SECONDS: '1'});
   const log = r.log();
   assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'who added Needs-Owner was looked up');
   assert.doesNotMatch(log, /owner's brake|could not look up/);
@@ -1675,7 +1673,7 @@ test('a session that labels its own issue Needs-Owner, in another case, ends as 
 test('hold on the pull request a repair works on ends the repair session in progress', t => {
   const r = repairSetup(t);
   r.gh.json('brake-pr.json', {labels: [{name: 'hold'}]});
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}})});
+  brakeSession(r)({BRAKE_ROUTES: {[`pr view 40 -R ${repo} --json labels`]: {file: 'brake-pr.json'}}});
   assertBrakeEnded(r, 'pull request #40 is labelled hold', {kind: 'repair', number: 40, labelled: 'pr edit 40'});
 });
 
@@ -1696,7 +1694,7 @@ test("the run's own pull request merging and closing the issue does not end the 
   // merge-when-ready merges the session's pull request while its demo agent still runs, and GitHub closes #7.
   const routes = {[issueView(7)]: {file: 'merged-closed.json'}, [closerCall(7)]: {file: 'closed-by-merge.json'},
     [`issue view 7 -R ${repo} --json state,labels`]: {file: 'merged-closed.json'}};
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});
+  brakeSession(r)({BRAKE_ROUTES: routes, SESSION_SECONDS: '1'});
   const log = r.log();
   assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(closerCall(7))), 'the closer was looked up');
   assert.doesNotMatch(log, /owner's brake|could not look up/);
@@ -1714,7 +1712,7 @@ for (const [appAuthor, appLogin] of [['app/example-agents', 'example-agents[bot]
   r.gh.json('by-app.json', labelledBy(appLogin));
   const routes = {[issueView(7)]: {file: 'self-needs-owner.json'}, [eventsCall(7)]: {file: 'by-app.json'},
     [`issue view 7 -R ${repo} --json state,labels`]: {file: 'self-needs-owner.json'}};
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify(routes), SESSION_SECONDS: '1'});  // then writes its comment
+  brakeSession(r)({BRAKE_ROUTES: routes, SESSION_SECONDS: '1'});  // then writes its comment
   const log = r.log();
   assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'who added needs-owner was looked up');
   assert.doesNotMatch(log, /owner's brake|could not look up/);
@@ -1801,8 +1799,8 @@ test("the owner's needs-owner ends a session in progress after the App removed i
     const r = ticketSetup(t);
     r.gh.json('braked.json', issue(7, {labels: ['agent-working', ...labels]}));
     r.gh.json('events.json', events);
-    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'braked.json'}}),
-      BRAKE_ROUTES_THEN: JSON.stringify({[eventsCall(7)]: {file: 'events.json'}})});
+    brakeSession(r)({BRAKE_ROUTES: {[issueView(7)]: {file: 'braked.json'}},
+      BRAKE_ROUTES_THEN: {[eventsCall(7)]: {file: 'events.json'}}});
     assertBrakeEnded(r, reason);
   }
 });
@@ -1811,7 +1809,7 @@ test("needs-owner the owner added and removed again does not end the session", t
   const r = ticketSetup(t);
   r.gh.json('events.json', ownerThenOwner);
   r.gh.respond({'issue view 7 -R': {stdout: 'yes\n'}});  // and progressed
-  brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[eventsCall(7)]: {file: 'events.json'}}), SESSION_SECONDS: '1'});
+  brakeSession(r)({BRAKE_ROUTES: {[eventsCall(7)]: {file: 'events.json'}}, SESSION_SECONDS: '1'});
   assert.ok(r.ghCalls().some(call => call.join(' ').startsWith(eventsCall(7))), 'the events were looked up');
   assert.doesNotMatch(r.log(), /owner's brake|could not look up/);
   assert.match(r.log(), /ticket #7: run 1 finished \(exit 0\)/);
