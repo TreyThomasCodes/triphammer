@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
 
@@ -39,8 +39,10 @@ function sandboxRig(t) {
   git(triphammer, 'commit', '-q', '-m', 'first');
   mkdirSync(join(home, '.claude/skills'), {recursive: true});
   writeFileSync(join(home, '.claude/settings.json'), '{}\n');
+  writeFileSync(join(home, '.claude/.credentials.json'), '{}\n');
   mkdirSync(join(home, '.codex/rules'), {recursive: true});
   writeFileSync(join(home, '.codex/config.toml'), '');
+  writeFileSync(join(home, '.codex/auth.json'), '{}\n');
   mkdirSync(join(home, '.local/state/local-audit'), {recursive: true});
   writeFileSync(join(home, '.local/state/local-audit/codex-settings'), 'weekly_cap=1\n');
   mkdirSync(join(home, '.nuget/NuGet'), {recursive: true});
@@ -172,8 +174,13 @@ echo ran > '${r.home}/.local/state/triphammer/humanizer/marker'
 echo override >> '${r.home}/.local/state/triphammer/guard-overrides.log'
 echo 1 > '${r.home}/.local/state/local-audit/codex-runs.new'
 mv '${r.home}/.local/state/local-audit/codex-runs.new' '${r.home}/.local/state/local-audit/codex-runs'
-echo state > '${r.home}/.codex/state_5.sqlite'
-mkdir -p '${r.home}/.codex/sessions' && echo session > '${r.home}/.codex/sessions/s.jsonl'
+mkdir -p '${r.home}/.codex/sessions/2026' && echo session > '${r.home}/.codex/sessions/2026/s.jsonl'
+echo log > '${r.home}/.codex/log/codex-tui.log'
+mkdir -p '${r.home}/.codex/tmp/arg0' && ln -s /bin/true '${r.home}/.codex/tmp/arg0/apply_patch'
+echo refreshed > '${r.home}/.codex/auth.json'
+echo refreshed > '${r.home}/.claude/.credentials.json'
+echo snapshot > '${r.home}/.claude/shell-snapshots/snapshot-bash.sh'
+mkdir -p '${r.home}/.claude/todos' && echo todo > '${r.home}/.claude/todos/t.json'
 mkdir -p '${r.home}/.nuget/packages/p' && echo package > '${r.home}/.nuget/packages/p/p.nupkg'
 mkdir -p '${r.home}/.local/share/NuGet/http-cache' && echo index > '${r.home}/.local/share/NuGet/http-cache/vuln_index.dat-new'`);
   assert.equal(status, 0, output);
@@ -186,9 +193,79 @@ mkdir -p '${r.home}/.local/share/NuGet/http-cache' && echo index > '${r.home}/.l
   assert.equal(readFileSync(join(r.home, '.claude/projects/p/session.jsonl'), 'utf8'), 'session\n');
   assert.equal(readFileSync(join(r.home, '.local/state/triphammer/guard-overrides.log'), 'utf8'), 'override\n');
   assert.equal(readFileSync(join(r.home, '.local/state/local-audit/codex-runs'), 'utf8'), '1\n');
-  assert.equal(readFileSync(join(r.home, '.codex/state_5.sqlite'), 'utf8'), 'state\n');
-  assert.equal(readFileSync(join(r.home, '.codex/sessions/s.jsonl'), 'utf8'), 'session\n');
+  assert.equal(readFileSync(join(r.home, '.codex/sessions/2026/s.jsonl'), 'utf8'), 'session\n');
+  assert.equal(readFileSync(join(r.home, '.codex/log/codex-tui.log'), 'utf8'), 'log\n');
+  assert.equal(readFileSync(join(r.home, '.codex/auth.json'), 'utf8'), 'refreshed\n');
+  assert.equal(readFileSync(join(r.home, '.claude/.credentials.json'), 'utf8'), 'refreshed\n');
+  assert.equal(readFileSync(join(r.home, '.claude/shell-snapshots/snapshot-bash.sh'), 'utf8'), 'snapshot\n');
+  assert.equal(readFileSync(join(r.home, '.claude/todos/t.json'), 'utf8'), 'todo\n');
 });
+
+test("under the limit, Codex's databases go to a directory of their own that is gone when the command ends", {skip}, t => {
+  const r = sandboxRig(t);
+  const sqlite = join(r.home, '.codex/sqlite');
+  const {status, output} = r.inside(`set -e
+test "$CODEX_SQLITE_HOME" = '${sqlite}'
+echo state > "$CODEX_SQLITE_HOME/state_5.sqlite" && : > "$CODEX_SQLITE_HOME/state_5.sqlite-wal"
+rm "$CODEX_SQLITE_HOME/state_5.sqlite-wal"
+cat "$CODEX_SQLITE_HOME/state_5.sqlite"`);
+  assert.equal(status, 0, output);
+  assert.equal(output, 'state\n');
+  assert.ok(!existsSync(sqlite), 'the databases outlived the command');
+});
+
+test("under the limit, what Claude Code or Codex adds elsewhere in its directory is gone when the command ends", {skip}, t => {
+  const r = sandboxRig(t);
+  const added = [join(r.home, '.claude/keybindings.json'), join(r.home, '.claude/history.jsonl'),
+    join(r.home, '.codex/models_cache.json'), join(r.home, '.codex/state_5.sqlite')];
+  const {status, output} = r.inside(added.map(path => `echo added > '${path}' && cat '${path}'`).join('\n'));
+  assert.equal(status, 0, output);
+  assert.equal(output, 'added\n'.repeat(added.length));
+  for (const path of added) assert.ok(!existsSync(path), `${path} outlived the command`);
+});
+
+// What later Claude Code and Codex sessions load from their directories, and the auto memory of the run directory:
+// each part, and for a directory, the file in it to write.
+function loadedParts(r) {
+  const memory = join('.claude/projects', realpathSync(r.worktree).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+  return [
+    ...['CLAUDE.md', 'settings.json', 'settings.local.json'].map(name => [`.claude/${name}`]),
+    ...[['skills', 'planted/SKILL.md'], ['agents', 'planted.md'], ['commands', 'planted.md'], ['hooks', 'planted.sh'],
+      ['rules', 'planted.md'], ['output-styles', 'planted.md'], ['plugins', 'installed_plugins.json']]
+      .map(([name, file]) => [`.claude/${name}`, file]),
+    [memory, 'MEMORY.md'],
+    ...['AGENTS.md', 'AGENTS.override.md', 'config.toml', '.env', 'hooks.json'].map(name => [`.codex/${name}`]),
+    ...[['rules', 'planted.rules'], ['skills', 'planted/SKILL.md'], ['prompts', 'planted.md'], ['agents', 'planted.toml'],
+      ['plugins', 'planted.json'], ['themes', 'planted.tmTheme']].map(([name, file]) => [`.codex/${name}`, file]),
+  ].map(([part, file]) => ({part: join(r.home, part), path: join(r.home, part, file ?? '')}));
+}
+
+for (const existed of [true, false]) {
+  test(`under the limit, the instructions, settings, skills, agents, commands, hooks, rules, output styles and memory later Claude Code and Codex sessions load cannot be ${existed ? 'changed' : 'created'}`, {skip}, t => {
+    const r = sandboxRig(t);
+    const parts = loadedParts(r);
+    for (const {part, path} of parts) {
+      rmSync(part, {recursive: true, force: true});
+      if (existed) {
+        mkdirSync(dirname(path), {recursive: true});
+        writeFileSync(path, 'owner\n');
+      }
+    }
+    for (const {part, path} of parts) {
+      const before = existsSync(path) ? readFileSync(path, 'utf8') : null;
+      const commands = [pythonWrite(path), `echo planted > '${path}'`, `echo planted > /tmp/planted-$$ && mv -f /tmp/planted-$$ '${path}'`,
+        part === path ? `rm -f '${path}' && echo planted > '${path}'` : `mkdir -p '${part}/sub' && echo planted > '${part}/sub/planted'`];
+      for (const command of commands) {
+        const {output} = r.inside(`(${command}) 2>/dev/null && echo wrote; cat '${path}' 2>/dev/null; true`);
+        assert.doesNotMatch(output, /wrote|planted/, `${path} was written with ${command}`);
+      }
+      assert.equal(existsSync(path) ? readFileSync(path, 'utf8') : null, before, `${path} changed`);
+      assert.ok(!existsSync(join(part, 'sub')), `${part}/sub was created`);
+    }
+    const {output} = r.inside('echo "$CLAUDE_CODE_DISABLE_AUTO_MEMORY"');
+    assert.equal(output, '1\n', 'Claude Code loads no auto memory inside');
+  });
+}
 
 test('under the limit, the NuGet caches that XDG_DATA_HOME and the NUGET_* variables name are created and writable', {skip}, t => {
   const r = sandboxRig(t);
@@ -209,14 +286,14 @@ test('under the limit, the NuGet caches that XDG_DATA_HOME and the NUGET_* varia
   assert.match(why, /Read-only file system/);
 });
 
-test('a Codex directory without a config.toml gets an empty one, read-only under the limit', {skip}, t => {
+test('a Codex directory without a config.toml gets an empty read-only one under the limit, and none outside', {skip}, t => {
   const r = sandboxRig(t);
   const config = join(r.home, '.codex/config.toml');
   rmSync(config);
-  const {status, output} = r.inside(`echo 'notify = ["planted"]' > '${config}'`);
+  const {status, output} = r.inside(`wc -c < '${config}' && echo 'notify = ["planted"]' > '${config}'`);
   assert.notEqual(status, 0, 'config.toml was written');
-  assert.match(output, /Read-only file system/);
-  assert.equal(readFileSync(config, 'utf8'), '');
+  assert.match(output, /^0\n.*Read-only file system/s);
+  assert.ok(!existsSync(config), 'config.toml was created outside');
 });
 
 test("under the limit, buildx's state in Docker's config directory is writable and the rest of it read-only", {skip}, t => {

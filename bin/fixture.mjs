@@ -305,7 +305,8 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
 // `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory, with a ~/.codex, so the
-// sandbox's Codex config (~/.codex/config.toml) lands there as it does on a machine with Codex. Its
+// runtime directories the sandbox creates in Codex's directory (~/.codex/sessions) land there as they do on a machine
+// with Codex. Its
 // bin/github-app-token appends its arguments and $GITHUB_APP_OWNER to $XDG_STATE_HOME/github-app-token-calls
 // (`tokenCalls`), fails when $TOKEN_FAIL is set, and for `session-file <file>` writes the account's token ghs_session_<n>,
 // n its call count, expiring in 2099, to the file through a rename.
