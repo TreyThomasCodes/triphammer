@@ -551,6 +551,8 @@ test('a main without the plugin\'s ticket-run skill starts no session', t => {
 });
 
 // The sessions' write limit (bin/session-sandbox; bin/README.md, The write limit), through the fixture's bwrap.
+// The paths a bwrap call's `--bind` arguments make writable.
+const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
 for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['repair', repairSetup, 'pr-40']]) {
   test(`a ${kind} run's session runs under the write limit, after a dry run of it`, t => {
     const r = setup(t);
@@ -562,7 +564,6 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     const run = join(r.checkout, '.worktrees', worktree);
     assert.deepEqual(dry.slice(dry.indexOf('--')), ['--', 'true']);
     assert.deepEqual(session.slice(session.indexOf('--'), session.indexOf('--') + 3), ['--', 'claude', '-p']);
-    const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
     assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
     assert.ok(binds(session).includes(run), JSON.stringify(session));
     const mainGit = join(r.checkout, '.git');
@@ -578,8 +579,8 @@ test("the write limit's Codex config lands in the fixture's home, never the real
   r.tick();
   assert.equal(r.ran(), true);
   assert.equal(existsSync(join(r.home, '.codex/config.toml')), true);
-  const binds = r.bwrapCalls().flatMap(call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []));
-  assert.ok(binds.includes(join(r.home, '.codex')), JSON.stringify(binds));
+  const writable = r.bwrapCalls().flatMap(binds);
+  assert.ok(writable.includes(join(r.home, '.codex')), JSON.stringify(writable));
 });
 
 test('a machine where the write limit does not work starts no session and counts no run', t => {
