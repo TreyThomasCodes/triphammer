@@ -1521,17 +1521,27 @@ test('a TRIPHAMMER_PROJECT that is not a project name stops the runner before an
 
 // The owner's brakes during a session. The session (the fake `claude` through $DURING_SESSION) starts a child that
 // ignores SIGTERM, records its pid, applies the brake $BRAKE names (touches the file $BRAKE_FILE, or adds the gh
-// routes in $BRAKE_ROUTES) and then waits $SESSION_SECONDS (default 30) for that child; the runner checks the brakes
-// every tenth of a second and allows one second between SIGTERM and SIGKILL.
+// routes in $BRAKE_ROUTES, then those in $BRAKE_ROUTES_THEN once gh has been called with a route of $BRAKE_ROUTES) and
+// then waits $SESSION_SECONDS (default 30) for that child; the runner checks the brakes every tenth of a second and
+// allows one second between SIGTERM and SIGKILL. A brake check reads the issue's labels and then its events, so a test
+// that changes both adds the labels first and the events then: a check never reads the old labels with the new events.
 const brakeEnv = {TICKET_RUNNER_BRAKE_SECONDS: '0.1', TICKET_RUNNER_BRAKE_GRACE_SECONDS: '1'};
 function brakeSession(r) {
   const script = join(r.root, 'during-session');
   writeFileSync(script, `#!/bin/sh
 sh -c 'trap "" TERM; sleep "\${SESSION_SECONDS:-30}"' & echo $! > "$PROBE/session-child"
 [ -z "$BRAKE_FILE" ] || { mkdir -p "\${BRAKE_FILE%/*}"; touch "$BRAKE_FILE"; }
-if [ -n "$BRAKE_ROUTES" ]; then
-  jq --argjson more "$BRAKE_ROUTES" '. + $more' "$PROBE/gh/routes.json" > "$PROBE/gh/routes.tmp"
+add_routes() {
+  jq --argjson more "$1" '. + $more' "$PROBE/gh/routes.json" > "$PROBE/gh/routes.tmp"
   mv "$PROBE/gh/routes.tmp" "$PROBE/gh/routes.json"
+}
+[ -z "$BRAKE_ROUTES" ] || add_routes "$BRAKE_ROUTES"
+if [ -n "$BRAKE_ROUTES_THEN" ]; then
+  seen="$(wc -l < "$PROBE/gh/calls")" tries=0
+  until tail -n "+$((seen + 1))" "$PROBE/gh/calls" | jq -se --argjson routes "$BRAKE_ROUTES" \\
+      'any(.[] | join(" "); . as $call | $routes | keys | any(. as $key | $call | startswith($key)))' >/dev/null 2>&1 \\
+      || [ "$((tries += 1))" -gt 200 ]; do sleep 0.05; done
+  add_routes "$BRAKE_ROUTES_THEN"
 fi
 wait
 `, {mode: 0o755});
@@ -1581,8 +1591,8 @@ test("each of the owner's brakes ends a ticket session in progress, uncounted, a
     [{BRAKE_ROUTES: {[`issue list -R ${repo} --state open --label stop-agents`]: {stdout: '99\n'}}},
       'an open issue is labelled stop-agents'],
     [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-hold.json'}}}, 'issue #7 is labelled hold'],
-    [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-needs-owner.json'}, [eventsCall(7)]: {file: 'by-owner.json'}}},
-      'issue #7 is labelled needs-owner'],
+    [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-needs-owner.json'}},
+      BRAKE_ROUTES_THEN: {[eventsCall(7)]: {file: 'by-owner.json'}}}, 'issue #7 is labelled needs-owner'],
     [{BRAKE_ROUTES: {[issueView(7)]: {file: 'brake-closed.json'}, [closerCall(7)]: {file: 'closed-by-hand.json'}}},
       'issue #7 is closed'],
   ];
@@ -1594,7 +1604,8 @@ test("each of the owner's brakes ends a ticket session in progress, uncounted, a
     r.gh.json('brake-closed.json', issue(7, {state: 'CLOSED'}));
     r.gh.json('closed-by-hand.json', closedBy(null));
     const env = {BRAKE_FILE: brake.BRAKE_FILE && join(r.root, brake.BRAKE_FILE),
-      BRAKE_ROUTES: brake.BRAKE_ROUTES && JSON.stringify(brake.BRAKE_ROUTES)};
+      BRAKE_ROUTES: brake.BRAKE_ROUTES && JSON.stringify(brake.BRAKE_ROUTES),
+      BRAKE_ROUTES_THEN: brake.BRAKE_ROUTES_THEN && JSON.stringify(brake.BRAKE_ROUTES_THEN)};
     const took = brakeSession(r)(env);
     assert.ok(took < 20000, `${reason}: the run ended in ${took} ms, not after the session's 30 s`);
     assertBrakeEnded(r, reason);
@@ -1607,7 +1618,8 @@ test("the owner's Hold and Needs-Owner, in another case, end a ticket session in
     const r = ticketSetup(t);
     r.gh.json(file, issue(7, {labels: ['agent-working', ...labels]}));
     r.gh.json('by-owner.json', labelledBy('Example-Owner', 'Needs-Owner'));
-    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file}, [eventsCall(7)]: {file: 'by-owner.json'}})});
+    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file}}),
+      BRAKE_ROUTES_THEN: JSON.stringify({[eventsCall(7)]: {file: 'by-owner.json'}})});
     assertBrakeEnded(r, reason);
   }
 });
@@ -1789,7 +1801,8 @@ test("the owner's needs-owner ends a session in progress after the App removed i
     const r = ticketSetup(t);
     r.gh.json('braked.json', issue(7, {labels: ['agent-working', ...labels]}));
     r.gh.json('events.json', events);
-    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'braked.json'}, [eventsCall(7)]: {file: 'events.json'}})});
+    brakeSession(r)({BRAKE_ROUTES: JSON.stringify({[issueView(7)]: {file: 'braked.json'}}),
+      BRAKE_ROUTES_THEN: JSON.stringify({[eventsCall(7)]: {file: 'events.json'}})});
     assertBrakeEnded(r, reason);
   }
 });
