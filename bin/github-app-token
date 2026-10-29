@@ -7,9 +7,17 @@
 #   github-app-token git-credential <any other action, such as store or erase>   do nothing, exit 0
 #   github-app-token app-slug              print the App's slug, the name in app/<slug> (GET /app; not a secret),
 #                                          reading app-id and agents.pem only
+#   github-app-token session-file <file>   write the account's token and its expiry to <file> for a session, through a
+#                                          rename, as {"account", "token", "expires_at"}; ticket-runner uses it
 #
-# It reads the files the owner fills in (bin/README.md, Install) from $GITHUB_APP_CONFIG_DIR, by default
-# ~/.config/github-app: app-id (the App's numeric id), owner (the default account the App is installed on) and
+# Inside a session, where TRIPHAMMER_TOKEN_FILE is set, it never signs or mints: it prints the token the session file
+# names, which ticket-runner wrote outside the write limit for the session's account and rewrites before it expires
+# (bin/README.md, Sessions). It answers only for that account, case aside, and stops with exit 1, printing no token,
+# for any other, for a file that is missing, holds no token or account, or whose token has expired, and for app-slug and
+# session-file. The App's files and the cache below are hidden there (bin/session-sandbox).
+#
+# Outside a session it reads the files the owner fills in (bin/README.md, Install) from $GITHUB_APP_CONFIG_DIR, by
+# default ~/.config/github-app: app-id (the App's numeric id), owner (the default account the App is installed on) and
 # agents.pem (the App's private key). The key only goes to openssl to sign the JWT; this script never prints or copies
 # it.
 # An installation token reaches only the repositories of the account the installation is on, so the token is for the
@@ -18,7 +26,7 @@
 #     credential.https://github.com.useHttpPath set);
 #   - $GITHUB_APP_OWNER (ticket-runner and merge-when-ready set it to their project's owner; bin/gh sets it from
 #     -R/--repo);
-#   - the owner file.
+#   - the owner file (inside a session, the session file's account).
 # Each installation's token and its expiry are cached in ${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json
 # (the account's login in lower case), mode 600 in a directory of mode 700, so one account's token is never handed
 # out for another's.
@@ -28,6 +36,10 @@ set -euo pipefail
 umask 077
 
 fail() { printf 'github-app-token: %s\n' "$*" >&2; exit 1; }
+usage() {
+  printf 'usage: github-app-token [git-credential [get|store|erase] | app-slug | session-file <file>]\n' >&2
+  exit 2
+}
 
 case "${1:-}" in
   '') mode=print ;;
@@ -45,8 +57,55 @@ case "${1:-}" in
       esac
     done ;;
   app-slug) mode=slug ;;
-  *) printf 'usage: github-app-token [git-credential [get|store|erase] | app-slug]\n' >&2; exit 2 ;;
+  session-file)
+    { [ $# -eq 2 ] && [ -n "$2" ]; } || usage
+    mode=session-file session_file="$2" ;;
+  *) usage ;;
 esac
+
+login='^[A-Za-z0-9-]+$'
+# The account asked about, when the request names one, and where it came from, for the messages below.
+asked='' asked_source=''
+if [ "$mode" = credential ] && [ "$git_host" = github.com ] && [ -n "${git_path#/}" ]; then
+  asked="${git_path#/}"
+  asked="${asked%%/*}" asked_source="check the repository git asked about (path=$git_path)"
+  [[ $asked =~ $login ]] || fail "git asked about path=$git_path, whose first segment is not an account's login"
+elif [ "$mode" != slug ] && [ -n "${GITHUB_APP_OWNER:-}" ]; then
+  asked="$GITHUB_APP_OWNER" asked_source='correct GITHUB_APP_OWNER'
+  [[ $asked =~ $login ]] || fail "GITHUB_APP_OWNER must be the login of an account the App is installed on, not $asked"
+fi
+
+# The jq filter that accepts a token record: a token and an expiry, both non-empty and printable without blanks, so a
+# bad record can never be printed as the token or break the credential protocol's lines.
+valid='select((.token | type) == "string" and (.token | test("^[!-~]+$"))
+  and (.expires_at | type) == "string" and (.expires_at | test("^[!-~]+$")))'
+
+# print_token <token>: in the form the mode asks for.
+print_token() {
+  if [ "$mode" = credential ]; then
+    printf 'username=x-access-token\npassword=%s\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# Inside a session: the session file's token, for its account alone, and nothing else.
+if [ -n "${TRIPHAMMER_TOKEN_FILE:-}" ]; then
+  file="$TRIPHAMMER_TOKEN_FILE"
+  case "$mode" in
+    slug | session-file) fail "${1} is not available inside a session, which has only its own token ($file) and mints none" ;;
+  esac
+  record="$(jq -ec --arg login "$login" "$valid"' | select((.account | type) == "string" and (.account | test($login)))
+    | [.account, .token, .expires_at]' "$file" 2>/dev/null)" \
+    || fail "$file holds no token and account for the session; ticket-runner writes it before the session starts"
+  account="$(jq -r '.[0]' <<<"$record")" token="$(jq -r '.[1]' <<<"$record")"
+  expires="$(date -d "$(jq -r '.[2]' <<<"$record")" +%s 2>/dev/null)" && [ "$expires" -gt "$(date +%s)" ] \
+    || fail "the session's token in $file has expired; ticket-runner rewrites it while the session runs"
+  [ -z "$asked" ] || [ "${asked,,}" = "${account,,}" ] \
+    || fail "this session has a token for $account only, not for $asked; $asked_source"
+  print_token "$token"
+  exit 0
+fi
 
 config_dir="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/github-app"
@@ -98,24 +157,11 @@ if [ "$mode" = slug ]; then
 fi
 
 owner="$(cat "$owner_file")"
-login='^[A-Za-z0-9-]+$'
 [[ $owner =~ $login ]] || fail "$owner_file must hold the login of the account the App is installed on; $install_hint"
 # Where the account came from, for the message when the App is not installed on it.
 owner_source="correct $owner_file"
-if [ "$mode" = credential ] && [ "$git_host" = github.com ] && [ -n "${git_path#/}" ]; then
-  owner="${git_path#/}"
-  owner="${owner%%/*}" owner_source="check the repository git asked about (path=$git_path)"
-  [[ $owner =~ $login ]] || fail "git asked about path=$git_path, whose first segment is not an account's login"
-elif [ -n "${GITHUB_APP_OWNER:-}" ]; then
-  owner="$GITHUB_APP_OWNER" owner_source='correct GITHUB_APP_OWNER'
-  [[ $owner =~ $login ]] || fail "GITHUB_APP_OWNER must be the login of an account the App is installed on, not $owner"
-fi
+[ -z "$asked" ] || owner="$asked" owner_source="$asked_source"
 cache="$cache_dir/token-${owner,,}.json"
-
-# The jq filter that accepts a token record: a token and an expiry, both non-empty and printable without blanks, so a
-# bad record can never be printed as the token or break the credential protocol's lines.
-valid='select((.token | type) == "string" and (.token | test("^[!-~]+$"))
-  and (.expires_at | type) == "string" and (.expires_at | test("^[!-~]+$")))'
 
 mint() {
   local jwt installations installation response tmp
@@ -153,10 +199,16 @@ fresh() {
 }
 
 fresh || mint
-token="$(jq -er "$valid | .token" "$cache" 2>/dev/null)" || fail "$cache holds no valid token; delete it and run again"
 
-if [ "$mode" = credential ]; then
-  printf 'username=x-access-token\npassword=%s\n' "$token"
-else
-  printf '%s\n' "$token"
+if [ "$mode" = session-file ]; then
+  tmp="$(mktemp "$session_file.XXXXXX")" || fail "could not write beside $session_file"
+  if ! jq -ec --arg account "$owner" "$valid"' | {account: $account, token, expires_at}' "$cache" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    fail "$cache holds no valid token; delete it and run again"
+  fi
+  mv -f "$tmp" "$session_file"
+  exit 0
 fi
+
+token="$(jq -er "$valid | .token" "$cache" 2>/dev/null)" || fail "$cache holds no valid token; delete it and run again"
+print_token "$token"

@@ -109,6 +109,13 @@ if ! [[ "$brake_seconds" =~ ^[0-9]+(\.[0-9]+)?$ && "$brake_seconds" =~ [1-9] ]] 
   echo "ticket-runner: TICKET_RUNNER_BRAKE_SECONDS must be a positive number of seconds and TICKET_RUNNER_BRAKE_GRACE_SECONDS a whole number" >&2
   exit 2
 fi
+# While a session runs, its token file is rewritten every TICKET_RUNNER_TOKEN_SECONDS (default 300); github-app-token
+# mints again within ten minutes of expiry, so the file always holds a token with five minutes or more left.
+token_seconds="${TICKET_RUNNER_TOKEN_SECONDS:-300}"
+if ! [[ "$token_seconds" =~ ^[0-9]+(\.[0-9]+)?$ && "$token_seconds" =~ [1-9] ]]; then
+  echo "ticket-runner: TICKET_RUNNER_TOKEN_SECONDS must be a positive number of seconds" >&2
+  exit 2
+fi
 mkdir -p "$state/runs" "$state/attempts"
 chmod 700 "$state" "$state/runs" "$state/attempts"
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$state/log"; }
@@ -634,12 +641,16 @@ stop_session() {
   [ "${#tree[@]}" -eq 0 ] || kill -KILL "${!tree[@]}" 2>/dev/null || true
 }
 
-# Ends the watcher, then (when the runner itself is stopped while a session runs) the session.
+# Ends the watcher, then (when the runner itself is stopped while a session runs) the session, then the token refresher,
+# and removes the session's token directory.
 end_session() {
   if [ -n "$watcher" ]; then kill -TERM "$watcher" 2>/dev/null || true; wait "$watcher" 2>/dev/null || true; fi
   watcher=""
   if [ -n "$session" ]; then stop_session || true; fi
   session=""
+  if [ -n "$refresher" ]; then kill -TERM "$refresher" 2>/dev/null || true; wait "$refresher" 2>/dev/null || true; fi
+  refresher=""
+  rm -rf -- "$token_dir"
 }
 
 # Bash runs an EXIT trap on a signal only when that signal is trapped, so a stopped service removes the file too.
@@ -647,7 +658,10 @@ end_session() {
 # Everything the trap calls is defined above it, and a failing step cannot skip the ones after it.
 labelled=issue
 [ "$kind" = ticket ] || labelled="pr"
-session="" watcher=""  # the session's pid and the brake watcher's, once they run
+session="" watcher="" refresher=""  # the session's pid, the brake watcher's and the token refresher's, once they run
+# The session's token directory (bin/README.md, Sessions): one per project in the shared directory's tokens, which every
+# session's write limit hides, so no other project's session reads it. The project's lock lets one run at a time use it.
+token_dir="$shared/tokens/$project" token_file="$shared/tokens/$project/token.json"
 proposals_dir=""  # the run's proposals directory (file_proposals), once it exists
 trap '{ end_session || true; }; rm -f "$state/current" || true; [ -z "$proposals_dir" ] || rm -rf "$proposals_dir" || true
   working_label remove "$labelled" "$number"' EXIT
@@ -742,6 +756,20 @@ brake_watch() {
   done
 }
 
+# Every $token_seconds while the session runs, rewrites its token file (github-app-token session-file, through a
+# rename), logging a failure and trying again on the next round. Ends on SIGTERM.
+refresh_token() {
+  local sleeper="" why
+  trap - EXIT
+  trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+  while :; do
+    sleep "$token_seconds" & sleeper=$!
+    wait "$sleeper" || true
+    why="$("$bin/github-app-token" session-file "$token_file" 2>&1)" \
+      || log "$kind #$number: could not refresh the session's GitHub token: $(tail -n 1 <<< "${why:-no reason printed}")"
+  done
+}
+
 # The session's cleanup proposals (bin/README.md, Cleanup proposals): an empty file in a temporary directory of the
 # run's own, outside the run's clone so nothing commits it, which the session appends to through $TRIPHAMMER_PROPOSALS
 # and file_proposals reads when the session has ended. The EXIT trap removes the directory.
@@ -825,6 +853,17 @@ file_proposals() {
   done < "$proposals"
 }
 
+# The session's GitHub token, minted here, outside the write limit, for the App's installation on GITHUB_APP_OWNER's
+# account alone: the session reads it through TRIPHAMMER_TOKEN_FILE and never sees the App's key or any other token
+# (bin/github-app-token, bin/session-sandbox). Without one no session starts, and the run is not counted.
+rm -rf -- "$token_dir"
+mkdir -p -- "$token_dir"
+chmod 700 "$shared/tokens" "$token_dir"
+if ! why="$("$bin/github-app-token" session-file "$token_file" 2>&1)"; then
+  echo $((attempts - 1)) > "$attempts_file"
+  log "$kind #$number: no GitHub token for the session, so none starts; not counted: $(tail -n 1 <<< "${why:-no reason printed}")"
+  exit 1
+fi
 log "$kind #$number${reason:+ ($reason)}: run $attempts of 3 starting; transcript $run"
 status=0
 brake_file="$state/brake"
@@ -836,16 +875,19 @@ rm -f "$brake_file"
 # directory, besides the temporary ones, it may write (plugins/triphammer/hooks/agent-guard.py, worktree-only).
 # TRIPHAMMER_OWNER is the owner checked above, the login scripts/land-pr.sh requests an escalation's review from; the
 # App's token cannot read repository variables, so the session gets it here. TRIPHAMMER_PROPOSALS is the proposals
-# file, in a temporary directory, which the hook lets a session write. The session and everything it starts run under
-# the write limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories and little
-# else.
-(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# file, in a temporary directory, which the hook lets a session write. TRIPHAMMER_TOKEN_FILE is the session's token
+# file, which its gh and git read through github-app-token. The session and everything it starts run under the write
+# limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories and little else, and
+# read no token but that file.
+(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep
 # a slot taken.
 brake_watch 8>&- 9>&- &
 watcher=$!
+refresh_token 8>&- 9>&- &
+refresher=$!
 wait "$session" || status=$?
 session=""
 end_session

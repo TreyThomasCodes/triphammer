@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {spawn, spawnSync} from 'node:child_process';
+import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
 
@@ -318,4 +318,79 @@ test('a run directory outside any git checkout runs nothing', {skip}, t => {
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
   assert.match(result.stderr, /is not in a git checkout/);
+});
+
+// The App's files, a token cache for two accounts and two sessions' token directories in the shared directory, as the
+// machine and ticket-runner leave them, in the rig's home; `own` is the token file of the session under test.
+function tokenFiles(r) {
+  const app = join(r.home, '.config/github-app');
+  const cache = join(r.home, '.cache/github-app');
+  const tokens = join(r.home, '.local/state/triphammer/tokens');
+  for (const dir of [app, cache, join(tokens, 'example'), join(tokens, 'other-project')]) mkdirSync(dir, {recursive: true});
+  const files = {
+    "the App's private key": join(app, 'agents.pem'),
+    "the App's id": join(app, 'app-id'),
+    "the App's owner file": join(app, 'owner'),
+    "the session account's token cache": join(cache, 'token-example-owner.json'),
+    "another account's token cache": join(cache, 'token-other-org.json'),
+    "another session's token file": join(tokens, 'other-project/token.json'),
+  };
+  for (const path of Object.values(files)) writeFileSync(path, 'secret\n');
+  const own = join(tokens, 'example/token.json');
+  writeFileSync(own, '{"token":"ghs_first"}\n');
+  return {files, own};
+}
+
+test("under the limit, the App's files, the token cache and other sessions' tokens cannot be read; the session's own token can", {skip}, t => {
+  const r = sandboxRig(t);
+  const {files, own} = tokenFiles(r);
+  for (const extra of [{TRIPHAMMER_TOKEN_FILE: own}, {}]) {
+    for (const [what, path] of Object.entries(files)) {
+      const {status, output} = r.inside(`cat '${path}'`, extra);
+      assert.notEqual(status, 0, `${what} was read with ${JSON.stringify(extra)}`);
+      assert.doesNotMatch(output, /secret/, what);
+    }
+    const listed = r.inside(`ls -A '${join(r.home, '.config/github-app')}' '${join(r.home, '.cache/github-app')}'`, extra);
+    assert.equal(listed.status, 0, listed.output);
+    assert.doesNotMatch(listed.output, /agents|token-/, 'the hidden directories list empty');
+  }
+  const read = r.inside(`cat '${own}'`, {TRIPHAMMER_TOKEN_FILE: own});
+  assert.equal(read.status, 0, read.output);
+  assert.equal(read.output, '{"token":"ghs_first"}\n');
+  const without = r.inside(`cat '${own}'`);
+  assert.notEqual(without.status, 0, 'a sandbox given no token file reads no token');
+  assert.doesNotMatch(without.output, /ghs_first/);
+  assertReadOnly(r, [own, join(dirname(own), 'planted')], {TRIPHAMMER_TOKEN_FILE: own});
+});
+
+test('a token file the runner rewrites through a rename shows inside the limit while the session runs', {skip}, async t => {
+  const r = sandboxRig(t);
+  const {own} = tokenFiles(r);
+  const signal = mkdtempSync('/tmp/session-sandbox-token-');
+  t.after(() => rmSync(signal, {recursive: true, force: true}));
+  const {TMPDIR, XDG_STATE_HOME, ...env} = withoutSandboxPaths(gitEnv);
+  const child = spawn(join(r.triphammer, 'bin/session-sandbox'), [r.worktree, 'sh', '-c', `cat '${own}'; : > '${signal}/read'
+for i in $(seq 100); do [ -e '${signal}/renamed' ] && break; sleep 0.1; done; cat '${own}'`],
+  {cwd: r.worktree, env: {...env, HOME: r.home, TRIPHAMMER_TOKEN_FILE: own}});
+  let output = '';
+  child.stdout.on('data', data => { output += data; });
+  child.stderr.on('data', data => { output += data; });
+  const exited = new Promise(done => child.on('exit', done));
+  for (let i = 0; i < 100 && !existsSync(join(signal, 'read')); i++) await new Promise(done => setTimeout(done, 100));
+  writeFileSync(`${own}.new`, '{"token":"ghs_second"}\n');
+  renameSync(`${own}.new`, own);
+  writeFileSync(join(signal, 'renamed'), '');
+  assert.equal(await exited, 0, output);
+  assert.equal(output, '{"token":"ghs_first"}\n{"token":"ghs_second"}\n');
+});
+
+test('a token file outside the shared tokens directory runs nothing', {skip}, t => {
+  const r = sandboxRig(t);
+  tokenFiles(r);
+  for (const file of [join(r.home, '.config/github-app/agents.pem'), join(r.home, '.local/state/triphammer/tokens/token.json')]) {
+    const {status, output} = r.inside('echo ran', {TRIPHAMMER_TOKEN_FILE: file});
+    assert.equal(status, 1, output);
+    assert.doesNotMatch(output, /ran/);
+    assert.match(output, /must lie in a directory of/);
+  }
 });

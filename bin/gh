@@ -2,7 +2,9 @@
 # Agents reach GitHub as the agents' GitHub App, never as the owner: this `gh`, linked into ~/.local/bin ahead of the
 # real one, runs the first other `gh` on PATH with GH_TOKEN from the github-app-token beside it (symlinks resolved).
 # The token is for the App's installation on the account that owns the repository: the owner of a -R/--repo argument
-# ([HOST/]OWNER/REPO) when there is one, otherwise $GITHUB_APP_OWNER or the owner file (github-app-token).
+# ([HOST/]OWNER/REPO) when there is one, otherwise $GITHUB_APP_OWNER or the owner file (github-app-token). Inside a
+# ticket-runner session, github-app-token mints nothing and gives the session's own token, from the file
+# $TRIPHAMMER_TOKEN_FILE names, for the session's account alone, so a -R of another account gets no token.
 # When no token can be had it stops with exit 1 and runs nothing, so gh never falls back to other credentials.
 set -euo pipefail
 

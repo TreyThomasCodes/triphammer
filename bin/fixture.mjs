@@ -15,10 +15,11 @@ export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim()
 // A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
 // `checkout`'s objects through an alternate.
 export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);
-// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable,
-// so the sandbox derives each from HOME and a test never writes the machine's own ~/.codex or ~/.claude.
+// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable
+// or hides, so the sandbox derives each from HOME and a test never writes the machine's own ~/.codex or ~/.claude.
 export const withoutSandboxPaths = ({XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
-  NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...env}) => env;
+  NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, XDG_CACHE_HOME,
+  GITHUB_APP_CONFIG_DIR, ...env}) => env;
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
 // `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.
@@ -304,7 +305,10 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
 // `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory, with a ~/.codex, so the
-// sandbox's Codex config (~/.codex/config.toml) lands there as it does on a machine with Codex.
+// sandbox's Codex config (~/.codex/config.toml) lands there as it does on a machine with Codex. Its
+// bin/github-app-token appends its arguments and $GITHUB_APP_OWNER to $XDG_STATE_HOME/github-app-token-calls
+// (`tokenCalls`), fails when $TOKEN_FAIL is set, and for `session-file <file>` writes the account's token ghs_session_<n>,
+// n its call count, expiring in 2099, to the file through a rename.
 export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'), 'utf8'), files = {}, bin = {}, gh = {},
   project = projectJson, config = {}} = {}) {
   const r = checkoutSetup(t, {
@@ -314,6 +318,14 @@ export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'
     'bin/ticket-decide.py': readFileSync(join(here, 'ticket-decide.py'), 'utf8'),
     'bin/update-checkout': readFileSync(join(here, 'update-checkout'), 'utf8'),
     'bin/session-sandbox': readFileSync(join(here, 'session-sandbox'), 'utf8'),
+    'bin/github-app-token': `#!/bin/sh
+calls="$XDG_STATE_HOME/github-app-token-calls"
+echo "$* $GITHUB_APP_OWNER" >> "$calls"
+[ -z "$TOKEN_FAIL" ] || { echo "github-app-token: $TOKEN_FAIL" >&2; exit 1; }
+[ "$1" = session-file ] || exit 2
+printf '{"account":"%s","token":"ghs_session_%s","expires_at":"2099-01-01T00:00:00Z"}\\n' "$GITHUB_APP_OWNER" \\
+  "$(wc -l < "$calls")" > "$2.tmp" && mv -f "$2.tmp" "$2"
+`,
     'bin/demo-publish': '#!/bin/sh\nexit 0\n',
     '.triphammer/project.json': project,
     ...files,
@@ -334,6 +346,7 @@ exec "$@"
   return {
     ...r, env, home, gh: fake, docker,
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
+    tokenCalls: () => lines(join(r.root, 'state/github-app-token-calls')),
     runTicketRunner: (args = [], extraEnv = {}) =>
       run(join(r.checkout, 'bin/ticket-runner'), args, {env: {...env, ...extraEnv}}),
     log: () => readFileSync(join(r.root, 'state/ticket-runner/log'), 'utf8'),

@@ -40,6 +40,16 @@
 # in ~/.nuget, NuGet/NuGet.Config (in any case NuGet reads) and config, which can point later restores at other
 # package sources.
 #
+# Hidden inside, each under an empty tmpfs mounted after everything above: the GitHub App's files,
+# ${GITHUB_APP_CONFIG_DIR:-~/.config/github-app} (agents.pem, app-id, owner); its token cache,
+# ${XDG_CACHE_HOME:-~/.cache}/github-app*, created first so the command cannot create it in the writable ~/.cache and
+# read the tokens minted into it outside; and tokens* in the shared directory, every session's token directory. A
+# session's GitHub token comes from the file $TRIPHAMMER_TOKEN_FILE names, which ticket-runner writes and rewrites
+# outside the limit (bin/README.md, The session's GitHub token): its directory, which must lie directly in that tokens
+# directory or the command does not run, is mounted back read-only, the directory rather than the file so a rewrite
+# through a rename shows inside. Without TRIPHAMMER_TOKEN_FILE, as in ticket-runner's dry run and teardown, the command
+# gets no token at all.
+#
 # The command also gets a /dev of its own, and a process namespace of its own with its /proc, so it cannot see or
 # signal the machine's other processes; the processes outside still see it, so ticket-runner's brake stops it. The
 # network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
@@ -53,7 +63,7 @@
 # through Docker can write anywhere on the machine.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
-# lies outside it, or bwrap fails.
+# lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory, or bwrap fails.
 set -euo pipefail
 
 fail() { echo "session-sandbox: $1" >&2; exit "${2:-1}"; }
@@ -73,13 +83,25 @@ done
 state="${XDG_STATE_HOME:-$HOME/.local/state}"
 claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 humanizer="${TRIPHAMMER_HUMANIZER_STATE:-$state/triphammer/humanizer}"
-overrides="${TRIPHAMMER_SHARED_DIR:-$state/triphammer}/guard-overrides.log"
+shared="${TRIPHAMMER_SHARED_DIR:-$state/triphammer}"
+overrides="$shared/guard-overrides.log"
+app_files="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
+token_cache="${XDG_CACHE_HOME:-$HOME/.cache}/github-app"
+tokens="$shared/tokens"
+# The session's token directory, which ticket-runner owns: a directory directly in the shared tokens directory.
+token_dir=''
+if [ -n "${TRIPHAMMER_TOKEN_FILE:-}" ]; then
+  token_dir="$(dirname -- "$TRIPHAMMER_TOKEN_FILE")"
+  { [ -d "$token_dir" ] && [ -d "$tokens" ] \
+    && [ "$(dirname -- "$(readlink -f -- "$token_dir")")" = "$(readlink -f -- "$tokens")" ]; } \
+    || fail "TRIPHAMMER_TOKEN_FILE ($TRIPHAMMER_TOKEN_FILE) must lie in a directory of $tokens"
+fi
 codex="${CODEX_HOME:-$HOME/.codex}"
 nuget=("${XDG_DATA_HOME:-$HOME/.local/share}/NuGet" ${NUGET_PACKAGES:+"$NUGET_PACKAGES"}
   ${NUGET_HTTP_CACHE_PATH:+"$NUGET_HTTP_CACHE_PATH"} ${NUGET_PLUGINS_CACHE_PATH:+"$NUGET_PLUGINS_CACHE_PATH"})
 mkdir -p -- "$HOME/.cache" "${nuget[@]}"
 [ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
-(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" && mkdir -p -- "$(dirname "$overrides")" && : >> "$overrides")
+(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" "$token_cache" "$tokens" && : >> "$overrides")
 # Codex adds a project's trust level to its config.toml itself, so a missing one would be created inside; an empty one
 # reads as none and is kept read-only below.
 [ ! -d "$codex" ] || (umask 077 && : >> "$codex/config.toml")
@@ -123,5 +145,12 @@ if [ -d "$dotnet_home" ] || command -v dotnet >/dev/null 2>&1; then
     args+=(--ro-bind "$path" "$path")
   done
 fi
+# Last, so they win over every mount above: an empty tmpfs over the App's files and its token cache, and over every
+# session's token directory, then this session's own back, read-only. The directory, not the file, so the rename that
+# rewrites the file outside shows inside.
+for path in "$app_files" "$token_cache" "$tokens"; do
+  if [ -e "$path" ]; then args+=(--tmpfs "$(readlink -f -- "$path")"); fi
+done
+[ -z "$token_dir" ] || bind --ro-bind "$token_dir"
 
 exec bwrap "${args[@]}" -- "$@"

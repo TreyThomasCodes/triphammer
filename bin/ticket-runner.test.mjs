@@ -62,6 +62,8 @@ printf '%s' "$TRIPHAMMER_SESSION" > "$PROBE/triphammer-session"
 printf '%s' "$GITHUB_APP_OWNER" > "$PROBE/app-owner"
 printf '%s' "$TRIPHAMMER_OWNER" > "$PROBE/triphammer-owner"
 printf '%s' "$TRIPHAMMER_PROPOSALS" > "$PROBE/proposals-path"
+printf '%s' "$TRIPHAMMER_TOKEN_FILE" > "$PROBE/token-file"
+cat "$TRIPHAMMER_TOKEN_FILE" > "$PROBE/token-at-start" 2>/dev/null || true
 [ -s "$TRIPHAMMER_PROPOSALS" ] && echo "not empty" > "$PROBE/proposals-at-start"
 [ ! -f "$PROBE/proposals.jsonl" ] || cat "$PROBE/proposals.jsonl" >> "$TRIPHAMMER_PROPOSALS"
 [ ! -f "$PROBE/no-proposals" ] || rm -f "$TRIPHAMMER_PROPOSALS"
@@ -503,6 +505,68 @@ test("the session gets the token of the App's installation on the served reposit
   const r = ticketSetup(t);
   r.tick({GITHUB_APP_OWNER: 'someone-else'});
   assert.equal(r.probe('app-owner'), 'Example-Owner');
+});
+
+// The session's token directory and file in the fixture's shared directory, and the directory of every session's.
+const tokenPaths = r => {
+  const tokens = join(r.root, 'state/triphammer/tokens');
+  return {tokens, dir: join(tokens, 'triphammer'), file: join(tokens, 'triphammer/token.json')};
+};
+
+for (const [kind, setup] of [['ticket', ticketSetup], ['repair', repairSetup]]) {
+  test(`a ${kind} run mints the session's token for the served account before it starts, hands the session its file alone, and removes it after`, t => {
+    const r = setup(t);
+    r.tick({GITHUB_APP_OWNER: 'someone-else'});
+    const {tokens, dir, file} = tokenPaths(r);
+    assert.equal(r.probe('token-file'), file);
+    assert.deepEqual(JSON.parse(r.probe('token-at-start')),
+      {account: 'Example-Owner', token: 'ghs_session_1', expires_at: '2099-01-01T00:00:00Z'});
+    assert.equal(r.tokenCalls()[0], `session-file ${file} Example-Owner`);
+    const session = r.bwrapCalls().at(-1);
+    const mounts = session.slice(0, session.indexOf('--')).join(' ');
+    assert.ok(mounts.includes(`--tmpfs ${realpathSync(tokens)}`), mounts);
+    const own = join(realpathSync(tokens), 'triphammer');
+    assert.ok(mounts.endsWith(`--ro-bind ${own} ${own}`), mounts);
+    assert.equal(existsSync(dir), false, "the session's token directory outlived the run");
+  });
+}
+
+test("the session's token file is rewritten while the session runs, and the rewriting stops when it ends", async t => {
+  const r = ticketSetup(t);
+  const {dir, file} = tokenPaths(r);
+  const script = join(r.root, 'during-session');
+  writeFileSync(script, `#!/bin/sh
+for i in $(seq 200); do cmp -s '${file}' "$PROBE/token-at-start" || break; sleep 0.05; done
+cat '${file}' > "$PROBE/token-later"
+`, {mode: 0o755});
+  r.tick({DURING_SESSION: script, TICKET_RUNNER_TOKEN_SECONDS: '0.1'});
+  const [start, later] = ['token-at-start', 'token-later'].map(name => Number(/"ghs_session_(\d+)"/.exec(r.probe(name))?.[1]));
+  assert.ok(later > start, `the token went from ${start} to ${later}`);
+  const calls = r.tokenCalls().length;
+  assert.ok(calls >= later, `${calls} calls`);
+  assert.ok(r.tokenCalls().every(call => call === `session-file ${file} Example-Owner`), r.tokenCalls().join('\n'));
+  await new Promise(done => setTimeout(done, 500));
+  assert.equal(r.tokenCalls().length, calls, 'the token was rewritten after the run ended');
+  assert.equal(existsSync(dir), false);
+});
+
+test('a session whose token cannot be minted does not start, is not counted, and the log says why', t => {
+  const r = ticketSetup(t);
+  assert.throws(() => r.tick({TOKEN_FAIL: 'the App is not installed for Example-Owner'}), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: no GitHub token for the session, so none starts; not counted: github-app-token: the App is not installed for Example-Owner/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
+  assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
+  assert.equal(existsSync(tokenPaths(r).dir), false);
+});
+
+test('a bad TICKET_RUNNER_TOKEN_SECONDS stops the runner before any gh call', t => {
+  for (const seconds of ['0', 'soon', '-1']) {
+    const r = ticketSetup(t);
+    assert.throws(() => r.tick({TICKET_RUNNER_TOKEN_SECONDS: seconds}), error => error.status === 2
+      && /TICKET_RUNNER_TOKEN_SECONDS must be a positive number of seconds/.test(error.stderr));
+    assert.deepEqual(r.ghCalls(), []);
+  }
 });
 
 test("the session is marked as Triphammer's, with its clone as the place the agent guard lets it write", t => {
@@ -1615,6 +1679,7 @@ function assertBrakeEnded(r, brake, {kind = 'ticket', number = 7, labelled = `is
   assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`${labelled} -R ${repo} --remove-label agent-working`]);
   assert.equal(existsSync(r.current), false);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/brake')), false);
+  assert.equal(existsSync(join(r.root, 'state/triphammer/tokens/triphammer')), false, "the session's token is removed");
   assert.deepEqual(r.securityCalls(), [], 'a stopped run reviews nothing');
   assert.deepEqual(r.demoCalls(), [], 'and publishes nothing');
 }
