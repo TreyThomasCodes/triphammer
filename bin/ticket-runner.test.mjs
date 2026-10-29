@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {exampleProject, git, here, lines, manyLabels, projectJson, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
@@ -577,16 +577,20 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     assert.deepEqual(session.slice(session.indexOf('--'), session.indexOf('--') + 3), ['--', 'claude', '-p']);
     assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
     assertWriteLimit(r, session, run);
+    // What the sandbox makes writable, and so creates first, lies in the test's directory, not the machine's HOME.
+    const root = realpathSync(r.root);
+    const temporary = ['/tmp', realpathSync(tmpdir())];
+    for (const path of [...binds(dry), ...binds(session)]) {
+      assert.ok(path.startsWith(`${root}/`) || temporary.includes(path), `${path} lies outside the test's directory`);
+    }
   });
 }
 
-test("the write limit's Codex config lands in the fixture's home, never the real one", t => {
+test("the write limit's Codex config lands in the fixture's home", t => {
   const r = ticketSetup(t);
   r.tick();
   assert.equal(r.ran(), true);
   assert.equal(existsSync(join(r.home, '.codex/config.toml')), true);
-  const writable = r.bwrapCalls().flatMap(binds);
-  assert.ok(writable.includes(join(r.home, '.codex')), JSON.stringify(writable));
 });
 
 test('a machine where the write limit does not work starts no session and counts no run', t => {

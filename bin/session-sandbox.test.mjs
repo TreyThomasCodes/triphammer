@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -45,8 +45,7 @@ function sandboxRig(t) {
   writeFileSync(join(home, '.local/state/local-audit/codex-settings'), 'weekly_cap=1\n');
   mkdirSync(join(home, '.nuget/NuGet'), {recursive: true});
   writeFileSync(join(home, '.nuget/NuGet/NuGet.Config'), '<configuration />\n');
-  const {TMPDIR, XDG_STATE_HOME, XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
-    NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...env} = gitEnv;
+  const {TMPDIR, XDG_STATE_HOME, ...env} = withoutSandboxPaths(gitEnv);
   const inside = (command, extra = {}) => {
     const result = spawnSync(join(triphammer, 'bin/session-sandbox'), [worktree, 'sh', '-c', command],
       {cwd: worktree, env: {...env, HOME: home, ...extra}, encoding: 'utf8'});

@@ -15,6 +15,10 @@ export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim()
 // A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
 // `checkout`'s objects through an alternate.
 export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);
+// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable,
+// so the sandbox derives each from HOME and a test never writes the machine's own ~/.codex or ~/.claude.
+export const withoutSandboxPaths = ({XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
+  NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...env}) => env;
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
 // `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.
@@ -299,7 +303,8 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
-// `bin` entry named bwrap replaces it.
+// `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory, with a ~/.codex, so the
+// sandbox's Codex config (~/.codex/config.toml) lands there as it does on a machine with Codex.
 export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'), 'utf8'), files = {}, bin = {}, gh = {},
   project = projectJson, config = {}} = {}) {
   const r = checkoutSetup(t, {
@@ -323,14 +328,9 @@ shift
 exec "$@"
 `, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
-  // session-sandbox creates files under the home directory and the directories these variables name, so the runner
-  // gets a home of its own (root/home, `home`) with a Codex directory, and none of them: no test writes the real home,
-  // which a session's write limit leaves read-only.
-  const {CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, XDG_DATA_HOME, NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH,
-    NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...base} = r.env;
   const home = join(r.root, 'home');
   mkdirSync(join(home, '.codex'), {recursive: true});
-  const env = {...base, HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
+  const env = {...withoutSandboxPaths(r.env), HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
     ...r, env, home, gh: fake, docker,
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
