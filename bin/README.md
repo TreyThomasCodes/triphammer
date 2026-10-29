@@ -581,15 +581,15 @@ and description each gets, for both `ticket-runner --labels` and the doctor.
 | `hold` | The owner's brake: the runner starts nothing on an issue or pull request that carries it and stops a run on it (Sessions), and `merge-when-ready` neither merges nor updates such a pull request. Added by anyone but the App, it holds until anyone but the App removes it, even after the App removed it (Sessions). A pull request three repair runs could not move gets it from the App, and then it holds while it is on. |
 | `needs-owner` | Waits for the owner: the runner starts no run on an issue that carries it, a session adds it when it stops for the owner, and a ticket that ends three runs without a pull request gets it. Added by anyone but the App, it stops a run on its issue and keeps the runner off the issue until anyone but the App removes it, even after the App removed it (Sessions). The `risk-tier` workflow adds it to a pull request that escalates. |
 | `stop-agents` | An open issue that carries it pauses the project and stops a run in progress, and `merge-when-ready` merges and updates nothing in any repository of the installation. Added by anyone but the App, it pauses until anyone but the App removes it or closes the issue, even after the App removed it or closed the issue (Sessions). |
+| `next` | Ready issues that carry it are taken first (What a tick decides). |
+| `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
+| `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
+| `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
 
 Closing an issue is a brake too: an issue that anyone but the App closed stops a run on it, and the runner neither
 starts nor closes it until anyone but the App reopens it, even after the App reopened it (Sessions). So each of the
 owner's brakes holds until someone other than the App lifts it, and a failed read of the events that say who lifted it
 brakes.
-| `next` | Ready issues that carry it are taken first (What a tick decides). |
-| `agent-working` | Set by the runner on the issue or pull request of the run in progress, telling the owner not to update or push to it; information, never a brake. |
-| `light` | The owner's opt-in: run 1 of the issue's ticket briefs the Sonnet builder, `triphammer:builder-light`, and later runs the Opus one (Sessions). |
-| `cleanup` | Set by the runner on each issue it files from a session's proposals (Cleanup proposals); ready issues that carry it are taken after the others (What a tick decides). |
 
 The runner and `merge-when-ready` read `hold`, `needs-owner`, `stop-agents`, `next` and `cleanup` in any case, as
 GitHub matches label names, so `Hold` brakes as `hold` does; `light` and `upkeep` they read as written. Their jq label
