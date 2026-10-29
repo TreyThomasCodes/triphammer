@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {fakeAnswers, fakeCommand, git, here, lines, projectJson, run, runnerSetup} from './fixture.mjs';
+import {fakeAnswers, fakeCommand, git, here, lines, projectJson, realCommand, run, runnerSetup} from './fixture.mjs';
 
 // What a credential file holds in these tests; it must never reach the doctor's output.
 const sentinel = 'SENTINEL-CREDENTIAL-CONTENT-4c1f';
@@ -98,7 +98,6 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
 }
 const allModules = {MODULES: 'demo,qwen-audit,codex', QWEN_BASE_URL: qwenUrl, QWEN_MODEL: 'qwen', DEMO_URL: 'http://gallery.example.invalid/',
   DEMO_GALLERY_DIR: '/nonexistent/gallery'};
-const realCommand = name => run('sh', ['-c', `command -v ${name}`]).trim();
 
 // Asserts that the doctor fails with exactly one problem, matching `pattern`.
 function assertOneProblem(result, pattern) {

@@ -12,6 +12,11 @@ export const here = import.meta.dirname;
 export {gitEnv, toolingEnv};
 export const run = (file, args, options) => execFileSync(file, args, {stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...options});
 export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim();
+// The absolute path of the real command `name` on the current PATH, as `command -v` finds it, or '' when it is missing.
+export function realCommand(name) {
+  const found = spawnSync('sh', ['-c', 'command -v "$1"', 'sh', name], {encoding: 'utf8'});
+  return found.status === 0 ? found.stdout.trim() : '';
+}
 // A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
 // `checkout`'s objects through an alternate.
 export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {exampleProject, git, here, lines, manyLabels, projectJson, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
+import {exampleProject, git, here, lines, manyLabels, projectJson, realCommand, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The issues' author, in the shape `gh issue list --json author` returns for the App.
@@ -1302,7 +1302,7 @@ test('the state directory, its runs, the transcripts and the run records are pri
 
 // The Triphammer config and the project file (bin/README.md, "Configuration").
 
-const realGit = run('sh', ['-c', 'command -v git']).trim();
+const realGit = realCommand('git');
 // Puts a `git` first on the machine's PATH that records each call's working directory and arguments before running the real
 // one; `calls` lists them as {dir, args}, where dir is the -C directory when the call names one.
 function recordGit(r) {

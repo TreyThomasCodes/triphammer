@@ -4,7 +4,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:net';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -441,7 +441,7 @@ test('without docker or dotnet, the home directory gets neither directory', {ski
   const bin = join(r.root, 'bin');
   mkdirSync(bin);
   for (const name of ['bash', 'env', 'sh', 'git', 'bwrap', 'readlink', 'dirname', 'mkdir']) {
-    symlinkSync(spawnSync('sh', ['-c', `command -v ${name}`], {encoding: 'utf8'}).stdout.trim(), join(bin, name));
+    symlinkSync(realCommand(name),join(bin, name));
   }
   const {status, output} = r.inside('true', {PATH: bin});
   assert.equal(status, 0, output);
@@ -578,7 +578,7 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
 // The user's own runtime directory, which the user manager and the session bus listen in, when this machine has one.
 const userRuntime = `/run/user/${process.getuid()}`;
 const noUserRuntime = skip || (existsSync(userRuntime) ? false : `${userRuntime} does not exist here`);
-const missing = name => noUserRuntime || (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0 ? false : `${name} is not installed`);
+const missing = name => noUserRuntime || (realCommand(name) ? false : `${name} is not installed`);
 
 for (const [name, command] of [
   ['systemd-run', 'systemd-run --user true'],

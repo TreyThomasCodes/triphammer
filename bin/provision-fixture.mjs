@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fakeCommand, git, here, lines, run, toolingEnv} from './fixture.mjs';
+import {fakeCommand, git, here, lines, realCommand, run, toolingEnv} from './fixture.mjs';
 
 // The commands provision changes or inspects the machine with, each a fake-machine.mjs acting on one state.
 const machineCommands = ['apt-get', 'dpkg-query', 'dpkg', 'useradd', 'usermod', 'getent', 'id', 'loginctl', 'systemctl',
@@ -131,7 +131,7 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
     downloads['https://api.github.com/app/installations/41/access_tokens'] = download('access-token.json',
       JSON.stringify({token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z')}));
   }
-  writeFileSync(join(state, 'machine.json'), JSON.stringify({bin, downloads, git: run('sh', ['-c', 'command -v git']).trim()}));
+  writeFileSync(join(state, 'machine.json'), JSON.stringify({bin, downloads, git: realCommand('git')}));
 
   const env = {...toolingEnv, PATH: `${bin}:${process.env.PATH}`, TRIPHAMMER_PROVISION_ROOT: sys,
     TRIPHAMMER_PROVISION_GIT_BASE: `file://${root}/origins/`};
