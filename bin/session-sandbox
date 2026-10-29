@@ -73,7 +73,10 @@
 #
 # The command also gets a /dev of its own, and a process namespace of its own with its /proc, so it cannot see or
 # signal the machine's other processes; the processes outside still see it, so ticket-runner's brake stops it. The
-# network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
+# network is shared. The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, are
+# each an empty tmpfs of mode 0700 that the command may write, mounted before everything above, so neither the user
+# manager, the session bus nor an agent's socket there is reachable; DBUS_SESSION_BUS_ADDRESS, SSH_AUTH_SOCK and
+# GPG_AGENT_INFO are unset. A rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
 # when the command exits.
 #
 # Not covered: a NuGet user config, or a part of Claude Code's or Codex's directory, that is a symlink into a writable
@@ -82,8 +85,9 @@
 # which a later session of the same project reads and runs (a package in nuget/packages whose MSBuild targets a later
 # build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a later docker build
 # uses); anything else a writable path above lets a later session read (a transcript, local-audit's run count); and
-# the Docker socket, or any other socket of a service outside, which the command can still reach: a container started
-# through Docker can write anywhere on the machine.
+# the Docker socket, which the command can still reach, so a container started through Docker can write anywhere on the
+# machine; and abstract Unix sockets, services listening on the machine's localhost, as the network is shared, and the
+# system bus, which the command can reach too.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
 # lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory,
@@ -203,6 +207,24 @@ cover() {
     fi
   done
 }
+# The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, each an empty tmpfs of
+# mode 0700 that the command may write, so neither the user manager, the session bus nor an agent's socket there is
+# reachable; the variables that name the bus and the agents go. A rootless Docker socket there that DOCKER_HOST names
+# is mounted back.
+runtime_dirs=()
+for path in "/run/user/$UID" "${XDG_RUNTIME_DIR:-}"; do
+  [ -n "$path" ] && [ -d "$path" ] || continue
+  path="$(readlink -f -- "$path")"
+  [ "${runtime_dirs[0]:-}" = "$path" ] || runtime_dirs+=("$path")
+done
+for path in "${runtime_dirs[@]}"; do args+=(--perms 0700 --tmpfs "$path"); done
+args+=(--unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv SSH_AUTH_SOCK --unsetenv GPG_AGENT_INFO)
+if [[ "${DOCKER_HOST:-}" == unix://* ]] && [ -S "${DOCKER_HOST#unix://}" ]; then
+  docker_socket="$(readlink -f -- "${DOCKER_HOST#unix://}")"
+  for path in "${runtime_dirs[@]}"; do
+    [[ "$docker_socket" != "$path"/* ]] || { args+=(--bind "$docker_socket" "$docker_socket"); break; }
+  done
+fi
 bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
   "$state/claude" "$humanizer" "$overrides" "$state/local-audit"
 bind --ro-bind "$state/local-audit/codex-settings"
