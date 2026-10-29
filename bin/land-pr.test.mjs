@@ -78,6 +78,22 @@ test("refuses a copy of the wrapper that differs from origin/main's and runs not
   assert.deepEqual(r.landed(), []);
 });
 
+test("from a run's clone of Triphammer's checkout it lands with main's land-pr.sh, and a refusal names the plain command", t => {
+  const r = landSetup(t);
+  // As ticket-runner's add_clone makes it: a repository of its own reading the checkout's objects through an alternate.
+  const clone = join(r.root, 'run-clone');
+  git(r.root, 'clone', '-q', '--no-local', '--reference', r.checkout, join(r.root, 'origin.git'), clone);
+  const result = r.landPr(r.wrapper, ['42'], {}, clone);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(r.landed(), ['main 42']);
+
+  writeFileSync(r.wrapper, wrapper.replace('set -euo pipefail', 'set -euo pipefail\n# branch edit'), {mode: 0o755});
+  const refused = r.landPr(r.wrapper, ['42'], {}, clone);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /run main's script directly: git fetch origin main && git show refs\/remotes\/origin\/main:scripts\/land-pr\.sh \| bash -s -- 42\n$/);
+  assert.deepEqual(r.landed(), ['main 42']);
+});
+
 test('refuses when origin/main has no wrapper and runs nothing', t => {
   const r = landSetup(t, {mainWrapper: null});
   const result = r.landPr(r.wrapper, ['42']);

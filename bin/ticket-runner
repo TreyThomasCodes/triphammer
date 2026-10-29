@@ -15,8 +15,8 @@
 # Each start first fast-forwards Triphammer's checkout (the one this script lives in) to origin/main
 # (bin/update-checkout), and the project's main checkout too when that is another repository, and runs the
 # updated copy of this script once if that changed it; an update that finds a checkout's files differ from its commit
-# creates the shared `stop` file and the tick ends there. It then sweeps: it removes the runner worktrees no run will use again
-# and the databases whose worktree is gone (prune_worktrees, prune_databases). Then it does at most one thing, in
+# creates the shared `stop` file and the tick ends there. It then sweeps: it removes the run directories no run will use
+# again and the databases whose run directory is gone (prune_runs, prune_databases). Then it does at most one thing, in
 # this order:
 #   1. closes a parent issue whose `Slice k of #N` issues are all closed;
 #   2. repairs an open agent pull request that has conflicts, failing checks, changes the owner requested after its
@@ -30,13 +30,13 @@
 #      `Upkeep: week of <UTC date>` and runs it like a ready issue; the session follows the triphammer:upkeep skill
 #      and closes the issue.
 # The session runs as the triphammer:orchestrator agent and follows the triphammer:ticket-run skill, both from the
-# Triphammer plugin in Triphammer's checkout (plugins/triphammer, which tracks origin/main, never the worktree's copy, so
-# a branch cannot change the skills, agents or hooks it runs under), in a worktree of the project's main checkout
-# branched from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
+# Triphammer plugin in Triphammer's checkout (plugins/triphammer, which tracks origin/main, never the run's copy, so
+# a branch cannot change the skills, agents or hooks it runs under), in a clone of the project's repository of its own
+# (add_clone) on a branch from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
 # its prompt names Triphammer
 # config's modules that are on. When it ends, unless a brake ended it, it failed or its issue is labelled `cleanup`, the runner files the cleanups the session
 # proposed in its proposals file ($TRIPHAMMER_PROPOSALS, file_proposals) as issues labelled `cleanup`. With the demo
-# module on, the runner publishes the demos it left in that worktree (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
+# module on, the runner publishes the demos it left in its clone (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
 # of the run (it comments only on escalated ones that touch Triphammer and records the heads whose review found
 # something, and its failures are logged and ignored). With the demo module on, each tick also refreshes the demo gallery (bin/demo-publish --reindex). A
 # module that is off gets none of its steps and no log line.
@@ -134,8 +134,8 @@ dry_run=""
 say() { if [ -n "$dry_run" ]; then printf '%s\n' "$*"; else log "$*"; fi; }
 
 # The project's data, from .triphammer/project.json in the main checkout (load_project, after the self-update): the
-# command that tears down a worktree's resources, and the compose project names the sweep may prune. Either may be
-# absent, and then its step is skipped without a word.
+# command that tears down a run directory's resources, and the compose project names the sweep may prune. Either may
+# be absent, and then its step is skipped without a word.
 teardown=() compose_pattern=""
 load_project() {
   check_project ticket-runner "$checkout" || exit 2
@@ -143,38 +143,51 @@ load_project() {
   compose_pattern="$(project_get "$checkout" composeProjectPattern)"
 }
 
-# Removes a worktree, first running the project's teardown command in it (when the project declares one and the
-# worktree has its first word as an executable file), so its resources do not outlive it.
-remove_worktree() {
-  local wt="$1" out
-  if [ "${#teardown[@]}" -gt 0 ] && [ -x "$wt/${teardown[0]}" ]; then
-    if out="$(cd "$wt" && "$wt/${teardown[0]}" "${teardown[@]:1}" 2>&1)"; then
-      [ -z "$out" ] || say "tore down $wt: $(tail -n 1 <<< "$out")"
+# Removes a run directory, <checkout>/.worktrees/issue-N or pr-N, first running the project's teardown command in it
+# (when the project declares one and the directory has its first word as an executable file), so its resources do not
+# outlive it. A run's clone is deleted with its .git, and no git command runs in it, since its config is the session's
+# to write; a git worktree there is removed with git worktree remove. It refuses any other path, and a symlink for the
+# directory or for .worktrees, so it never removes anything outside <checkout>/.worktrees.
+remove_run() {
+  local dir="$1" out
+  if [ "${dir%/*}" != "$checkout/.worktrees" ] || ! [[ "${dir##*/}" =~ ^(issue|pr)-[0-9]+$ ]] \
+      || [ -L "$checkout/.worktrees" ] || [ -L "$dir" ]; then
+    echo "ticket-runner: $dir is not a run directory in $checkout/.worktrees; not removing it" >&2
+    return 1
+  fi
+  if [ "${#teardown[@]}" -gt 0 ] && [ -x "$dir/${teardown[0]}" ]; then
+    if out="$(cd "$dir" && "$dir/${teardown[0]}" "${teardown[@]:1}" 2>&1)"; then
+      [ -z "$out" ] || say "tore down $dir: $(tail -n 1 <<< "$out")"
     else
-      say "teardown failed in $wt: $(tail -n 1 <<< "$out")"
+      say "teardown failed in $dir: $(tail -n 1 <<< "$out")"
     fi
   fi
-  git -C "$checkout" worktree remove --force "$wt"
+  if [ -f "$dir/.git" ]; then
+    git -C "$checkout" worktree remove --force "$dir"
+  else
+    rm -rf -- "$dir"
+  fi
 }
 
-# Removes the runner worktrees no run will use again: .worktrees/issue-N when issue N is closed, has an open pull
-# request, or used all 3 runs, and .worktrees/pr-N when pull request N is closed or merged. Never the worktree the
-# `current` file names, nor any other worktree (manual or harness ones). Reads the issue and pull request lists in $1.
-prune_worktrees() {
-  local lists="$1" current_wt="" kind number wt name n found reason attempts err in_flight
+# Removes the run directories no run will use again: .worktrees/issue-N when issue N is closed, has an open pull
+# request, or used all 3 runs, and .worktrees/pr-N when pull request N is closed or merged, whether a run's clone or a
+# git worktree. Never the one the `current` file names, nor any other directory (manual or harness ones), nor a
+# symlink. Then prunes git's records of worktrees that are gone. Reads the issue and pull request lists in $1.
+prune_runs() {
+  local lists="$1" current_dir="" kind number dir name n found reason attempts err in_flight
   if [ -f "$state/current" ]; then
     kind="$(sed -n 's/^kind //p' "$state/current")"
     number="$(sed -n 's/^number //p' "$state/current")"
     case "$kind" in
-      ticket) current_wt="$checkout/.worktrees/issue-$number" ;;
-      repair) current_wt="$checkout/.worktrees/pr-$number" ;;
+      ticket) current_dir="$checkout/.worktrees/issue-$number" ;;
+      repair) current_dir="$checkout/.worktrees/pr-$number" ;;
     esac
   fi
   in_flight="$(python3 -I "$bin/ticket-decide.py" --closed "$lists/prs.json" "$repo")" || in_flight=""
-  while IFS= read -r wt; do
-    name="${wt#"$checkout/.worktrees/"}"
+  [ -L "$checkout/.worktrees" ] || for dir in "$checkout/.worktrees"/*; do
+    name="${dir##*/}"
     [[ "$name" =~ ^(issue|pr)-([0-9]+)$ ]] || continue
-    if [ "$wt" = "$current_wt" ] || [ ! -d "$wt" ]; then continue; fi
+    if [ "$dir" = "$current_dir" ] || [ -L "$dir" ] || [ ! -d "$dir" ]; then continue; fi
     n="${BASH_REMATCH[2]}"
     reason=""
     if [ "${BASH_REMATCH[1]}" = issue ]; then
@@ -190,18 +203,18 @@ prune_worktrees() {
     fi
     [ -n "$reason" ] || continue
     if [ -n "$dry_run" ]; then
-      say "would remove worktree $wt ($reason)"
-    elif err="$(remove_worktree "$wt" 2>&1 >/dev/null)"; then  # its own lines are in the log already
-      say "removed worktree $wt ($reason)"
+      say "would remove run directory $dir ($reason)"
+    elif err="$(remove_run "$dir" 2>&1 >/dev/null)"; then  # its own lines are in the log already
+      say "removed run directory $dir ($reason)"
     else
-      say "could not remove worktree $wt ($reason): $(tail -n 1 <<< "$err")"
+      say "could not remove run directory $dir ($reason): $(tail -n 1 <<< "$err")"
     fi
-  done < <(git -C "$checkout" worktree list --porcelain | sed -n 's/^worktree //p')
+  done
   [ -n "$dry_run" ] || git -C "$checkout" worktree prune || say "git worktree prune failed"
 }
 
 # Removes every compose project whose name matches the project's composeProjectPattern and whose working directory,
-# <worktree>/database, and that worktree are gone. A project any of whose containers names a directory that exists, or
+# <run directory>/database, and that directory are gone. A project any of whose containers names a directory that exists, or
 # names none, is never touched. Without a pattern it does nothing, not even ask Docker.
 prune_databases() {
   local rows project dir out why
@@ -218,7 +231,7 @@ prune_databases() {
   done <<< "$rows"
   for project in $(printf '%s\n' "${!gone[@]}" | sort); do
     [ -z "${keep[$project]:-}" ] || continue
-    why="$project (worktree ${gone[$project]%/database} is gone)"
+    why="$project (run directory ${gone[$project]%/database} is gone)"
     if [ -n "$dry_run" ]; then
       say "would prune database $why"
     elif out="$(docker compose -p "$project" down --volumes --remove-orphans 2>&1)"; then
@@ -235,7 +248,7 @@ if [ -n "$dry_run" ]; then
   trap 'rm -rf "$lists"' EXIT
   gh issue list -R "$repo" --state all --limit 1000 --json number,state > "$lists/issues.json"
   gh pr list -R "$repo" --state open --limit 30 --json number,closingIssuesReferences > "$lists/prs.json"
-  prune_worktrees "$lists"
+  prune_runs "$lists"
   prune_databases
   exit 0
 fi
@@ -336,7 +349,7 @@ gh pr list -R "$repo" --state open --limit 30 \
   --json number,author,isDraft,labels,mergeStateStatus,statusCheckRollup,reviews,commits,closingIssuesReferences,headRefOid \
   > "$state/prs.json"
 if [ "$plan_only" != --plan ]; then
-  prune_worktrees "$state"
+  prune_runs "$state"
   prune_databases
 fi
 
@@ -497,15 +510,22 @@ elif [ -n "$cleanup_issues" ]; then
   no_proposals="issue $cleanup_issues is labelled cleanup"
 fi
 
-# A fresh worktree on <branch> from <start>, whose commits run Triphammer's hooks ($triphammer/scripts/git-hooks, which
-# tracks origin/main: the Co-Authored-By trailer), so a branch cut before a hook existed, or a project without hooks of
-# its own, still gets it and a branch cannot change its own hook. core.hooksPath is set in that worktree's own config,
-# so the main checkout is unaffected.
-add_worktree() {
-  remove_worktree "$worktree" 2>/dev/null || true
-  git -C "$checkout" worktree add -q -B "$1" "$worktree" "$2"
-  git -C "$checkout" config extensions.worktreeConfig true
-  git -C "$worktree" config --worktree core.hooksPath "$triphammer/scripts/git-hooks"
+# A fresh clone of the project's repository in $run_dir, on <branch> from <start>, made anew for each run. It is a
+# repository of its own, so the session writes no other .git (bin/session-sandbox). Its origin is the main checkout's
+# origin URL, so it fetches and pushes as the main checkout does, with git's credential helper from the user's global
+# config. git clone --reference reads the main checkout's objects through an alternate
+# (.git/objects/info/alternates), so the clone is quick and small and the main checkout's store stays the main
+# checkout's alone; --no-local keeps git from hardlinking the objects of an origin that is a local path. Its commits
+# run Triphammer's hooks ($triphammer/scripts/git-hooks, which tracks origin/main: the Co-Authored-By trailer), so a
+# branch cut before a hook existed, or a project without hooks of its own, still gets it and a branch cannot change its
+# own hook; core.hooksPath is set in the clone's own config, so the main checkout is unaffected.
+add_clone() {
+  local url
+  remove_run "$run_dir" 2>/dev/null || true
+  url="$(git -C "$checkout" remote get-url origin)"
+  git -C "$checkout" clone -q --no-local --no-checkout --reference "$checkout" -- "$url" "$run_dir"
+  git -C "$run_dir" config core.hooksPath "$triphammer/scripts/git-hooks"
+  git -C "$run_dir" checkout -q -B "$1" "$2"
 }
 
 run_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -524,17 +544,17 @@ else
   modules=" No module is on."
 fi
 if [ "$kind" = ticket ]; then
-  worktree="$checkout/.worktrees/issue-$number"
+  run_dir="$checkout/.worktrees/issue-$number"
   branch="ticket/$number"
-  add_worktree "$branch" origin/main
-  prompt="Run issue #$number of $repo unattended. You are in a fresh worktree on branch $branch from origin/main (an earlier run may have left origin/$branch without a pull request; build on it or replace it). This is run $attempts of 3.$builders$modules Follow the triphammer:ticket-run skill."
+  add_clone "$branch" origin/main
+  prompt="Run issue #$number of $repo unattended. You are in a fresh clone on branch $branch from origin/main (an earlier run may have left origin/$branch without a pull request; build on it or replace it). This is run $attempts of 3.$builders$modules Follow the triphammer:ticket-run skill."
   before=""
 else
   branch="$(gh pr view "$number" -R "$repo" --json headRefName --jq .headRefName)"
-  worktree="$checkout/.worktrees/pr-$number"
-  add_worktree "$branch" "origin/$branch"
-  prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a worktree on its branch $branch. This is run $attempts of 3.$builders$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
-  before="$(git -C "$worktree" rev-parse HEAD)"
+  run_dir="$checkout/.worktrees/pr-$number"
+  add_clone "$branch" "origin/$branch"
+  prompt="Repair pull request #$number of $repo (it closes #$issue) unattended: reason $reason. The owner is $owner. You are in a fresh clone on its branch $branch. This is run $attempts of 3.$builders$modules Follow the 'Repair a pull request' section of the triphammer:ticket-run skill."
+  before="$(git -C "$run_dir" rev-parse HEAD)"
 fi
 # A security-findings repair follows up the head ticket-decide.py found pending in the security-findings record, the
 # pull request's head in prs.json.
@@ -720,7 +740,7 @@ brake_watch() {
 }
 
 # The session's cleanup proposals (bin/README.md, Cleanup proposals): an empty file in a temporary directory of the
-# run's own, outside the worktree so nothing commits it, which the session appends to through $TRIPHAMMER_PROPOSALS
+# run's own, outside the run's clone so nothing commits it, which the session appends to through $TRIPHAMMER_PROPOSALS
 # and file_proposals reads when the session has ended. The EXIT trap removes the directory.
 proposals_dir="$(mktemp -d)"
 proposals="$proposals_dir/proposals.jsonl"
@@ -814,8 +834,9 @@ rm -f "$brake_file"
 # TRIPHAMMER_OWNER is the owner checked above, the login scripts/land-pr.sh requests an escalation's review from; the
 # App's token cannot read repository variables, so the session gets it here. TRIPHAMMER_PROPOSALS is the proposals
 # file, in a temporary directory, which the hook lets a session write. The session and everything it starts run under
-# the write limit, bin/session-sandbox, which lets them write the worktree, the temporary directories and little else.
-(cd "$worktree" && TRIPHAMMER_SESSION="$worktree" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$worktree" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# the write limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories and little
+# else.
+(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep
@@ -877,9 +898,9 @@ if [ -n "$followed_head" ] && [ "$status" -eq 0 ]; then
 fi
 
 # With the demo module on, publish the demos the session left (bin/publish-demos) before anything can remove the
-# worktree.
+# run's clone.
 if module_on demo; then
-  "$bin/publish-demos" "$worktree" 2>&1 | while IFS= read -r line; do log "$kind #$number: $line"; done \
+  "$bin/publish-demos" "$run_dir" 2>&1 | while IFS= read -r line; do log "$kind #$number: $line"; done \
     || log "$kind #$number: publishing demos failed"
 fi
 
@@ -930,7 +951,7 @@ fi
 
 if [ -n "$progressed" ]; then
   rm -f "$attempts_file" "$reset_file"
-  remove_worktree "$worktree" 2>/dev/null || true
+  remove_run "$run_dir" 2>/dev/null || true
   log "$kind #$number: run $attempts finished (exit $status)"
   exit 0
 fi

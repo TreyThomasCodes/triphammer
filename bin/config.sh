@@ -30,7 +30,8 @@
 # such as checks, is read with jq instead).
 #
 # same_repo <dir> <dir>: succeeds when both directories are in one git repository (one common git directory), as a
-# project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is.
+# project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is, or when one is a run's clone of the
+# other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
 
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
 # checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
@@ -259,10 +260,21 @@ project_get() {
 }
 
 same_repo() {
-  local a b
+  local a b from to line
   a="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
   b="$(git -C "$2" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  [ "$(readlink -f "$a")" = "$(readlink -f "$b")" ]
+  a="$(readlink -f "$a")" b="$(readlink -f "$b")"
+  [ "$a" != "$b" ] || return 0
+  for from in "$a" "$b"; do
+    to="$a"
+    [ "$from" != "$a" ] || to="$b"
+    [ -f "$from/objects/info/alternates" ] || continue
+    while IFS= read -r line; do
+      [[ "$line" == /* ]] || line="$from/objects/$line"
+      [ "$(readlink -f "$line")" != "$to/objects" ] || return 0
+    done < "$from/objects/info/alternates"
+  done
+  return 1
 }
 
 # The command mode (see the top of the file); sourcing the file only defines the functions.

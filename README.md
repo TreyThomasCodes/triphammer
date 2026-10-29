@@ -3,7 +3,7 @@
 <p align="center"><img src="logo.jpg" alt="Triphammer logo" width="240"></p>
 
 Triphammer works through a GitHub repository's issues with Claude Code, unattended. Every ten minutes it picks the
-next ready issue and starts a headless Claude Code session in a fresh worktree (a separate working copy of the
+next ready issue and starts a headless Claude Code session in a fresh clone (a separate working copy of the
 repository). The session writes the change, has other agents review it and opens a pull request. If the project's
 rules allow it, the pull request merges on its own. Otherwise it waits for your approval.
 
@@ -30,7 +30,7 @@ Triphammer merges code without a person watching, so several limits apply to eve
   tier.
 - A change no rule covers waits for you. A repository with no rules file sends every change to you.
 - Guard hooks in each session refuse commands that would install anything lasting on the machine. In sessions
-  Triphammer starts, they also allow writes only inside the session's worktree and temporary directories.
+  Triphammer starts, they also allow writes only inside the session's clone and temporary directories.
 - A session that goes through three review rounds, each with a blocking problem, stops. It labels its issue
   `needs-owner` and explains what it needs from you.
 
@@ -44,7 +44,7 @@ The three tiers:
 
 ## Requirements
 
-- An Ubuntu server that runs only Triphammer, such as a VM. A project with a full build, a database per worktree and
+- An Ubuntu server that runs only Triphammer, such as a VM. A project with a full build, a database per run and
   browser tests needs 4 to 8 vCPUs, 16 GB of memory and 100 GB of disk. A lighter project needs less.
 - A GitHub App for the agents, created in your GitHub account's developer settings. Give it read and write access to
   contents, issues and pull requests, and nothing else. Install it on each account that owns one of your repositories.

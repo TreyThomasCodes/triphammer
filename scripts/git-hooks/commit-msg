@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Appends the agents' Co-Authored-By trailer to a commit message that has none for noreply@anthropic.com (any name or
 # letter case counts), so agents never have to remember it. Merge commits and empty messages are left alone.
-# bin/ticket-runner points core.hooksPath of each worktree it creates at Triphammer's checkout's copy of this
+# bin/ticket-runner points core.hooksPath of each run's clone it creates at Triphammer's checkout's copy of this
 # directory.
 set -euo pipefail
 

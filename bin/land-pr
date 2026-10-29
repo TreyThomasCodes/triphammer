@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Lands a pull request with main's copy of scripts/land-pr.sh (the merge-policy skill), as one command a session
-# can run where piping fetched content into bash would be refused. Usage, from the worktree whose HEAD is the pull
-# request's pushed head:
+# can run where piping fetched content into bash would be refused. Usage, from the checkout (a run's clone) whose HEAD
+# is the pull request's pushed head:
 #   land-pr <pr>
 # The landing scripts come from the origin of Triphammer's checkout, the one this file lives in (through any symlink),
-# which may be a repository other than the project's worktree it runs in. It fetches that origin's main into a
+# which may be a repository other than the project's clone it runs in. It fetches that origin's main into a
 # temporary bare repository of its own (mktemp -d, under $TMPDIR), never into Triphammer's checkout, whose .git a
 # session cannot write, and removes it when it ends. It runs only when this file is byte for byte main's copy of
 # bin/land-pr there, so a branch's copy of the wrapper never lands anything. It never runs a working tree's
@@ -28,11 +28,10 @@ main() {
   { git init -q --bare "$main_git" && git -C "$main_git" fetch -q "$url" +refs/heads/main:refs/remotes/origin/main; } \
     || { echo "land-pr: cannot fetch main from $url; nothing ran" >&2; exit 1; }
   if ! git -C "$main_git" show refs/remotes/origin/main:bin/land-pr 2>/dev/null | cmp -s - "$self"; then
-    # The direct command for this worktree: plain when it is in Triphammer's own repository, with main fetched into a
-    # temporary repository when the project is another repository.
+    # The direct command for this directory: plain when its origin is Triphammer's, as in Triphammer's checkout or a
+    # run's clone of it, with main fetched into a temporary repository when the project is another repository.
     direct="git fetch origin main && git show refs/remotes/origin/main:scripts/land-pr.sh | bash -s -- $pr"
-    if [ "$(git -C "$triphammer" rev-parse --path-format=absolute --git-common-dir)" \
-      != "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)" ]; then
+    if [ "$url" != "$(git remote get-url origin 2>/dev/null || true)" ]; then
       direct="d=\"\$(mktemp -d)\" && git init -q --bare \"\$d\" && git -C \"\$d\" fetch -q $(printf %q "$url") +refs/heads/main:refs/remotes/origin/main && git -C \"\$d\" show refs/remotes/origin/main:scripts/land-pr.sh | TRIPHAMMER_CHECKOUT=\"\$d\" bash -s -- $pr; rm -rf \"\$d\""
     fi
     echo "land-pr: $self is not main's copy of bin/land-pr; nothing ran. Its checkout is behind origin/main; run main's script directly: $direct" >&2

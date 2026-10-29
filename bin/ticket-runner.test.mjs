@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {exampleProject, git, here, lines, manyLabels, projectJson, run, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
@@ -22,8 +22,8 @@ const issue = (number, {state = 'OPEN', labels = []} = {}) =>
 // no-proposals exists, copies the runner's `current` file and the lock file and start time of the process it names, opens the pull requests in opened.json, if any, leaves a demo for PR
 // #77 and a folder without demo.json,
 // copies session-db.json, if any, to the containers the fake `docker` lists (as `local-db.sh up` would),
-// removes the worktree's scripts/git-hooks (as on a branch cut before the hook existed), commits once, records its
-// arguments, the hooks path its worktree sees and the gh calls made before it, runs the program $DURING_SESSION names
+// removes the run clone's scripts/git-hooks (as on a branch cut before the hook existed), commits once, records its
+// arguments, the hooks path its clone sees and the gh calls made before it, runs the program $DURING_SESSION names
 // when that is set, and exits with $CLAUDE_EXIT (after printing $CLAUDE_SAYS) when that is set. `served` is the repository the gh routes answer for, and `options` go to
 // runnerSetup (the Triphammer config and the project file). The Triphammer config turns the demo and codex modules on unless `config`
 // says otherwise.
@@ -114,7 +114,7 @@ test('after a session the runner publishes the demo it left, with its pull reque
   assert.match(log, /ticket #7: run 1 ended without progress/);
 });
 
-test('the demo is published before a run that progressed removes its worktree', t => {
+test('the demo is published before a run that progressed removes its clone', t => {
   const r = ticketSetup(t);
   r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
   r.tick();
@@ -123,7 +123,7 @@ test('the demo is published before a run that progressed removes its worktree', 
   assert.equal(existsSync(r.worktree), false);
 });
 
-test('a run that progressed stops its database before it removes its worktree', t => {
+test('a run that progressed stops its database before it removes its clone', t => {
   const r = ticketSetup(t);
   const project = localDb(r.worktree);
   writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[project, join(r.worktree, 'database')]]));  // local-db.sh up
@@ -143,7 +143,48 @@ test('a failed publish is logged and the run carries on', t => {
   assert.match(log, /ticket #7: run 1 ended without progress/);
 });
 
-test("the runner's worktrees run the main checkout's hooks even without their own copy", t => {
+// What a run's clone is: a repository of its own on `branch` at `head`, whose objects come from the main checkout
+// through an alternate, with the main checkout's origin and Triphammer's hooks, and of which the main checkout's .git
+// knows nothing.
+function assertRunClone(r, dir, branch, head) {
+  assert.equal(statSync(join(dir, '.git')).isDirectory(), true, 'the run has a .git of its own');
+  assert.equal(readFileSync(join(dir, '.git/objects/info/alternates'), 'utf8').trim(), join(r.checkout, '.git/objects'));
+  assert.equal(git(dir, 'config', 'core.hooksPath'), join(r.checkout, 'scripts/git-hooks'));
+  assert.equal(git(dir, 'remote', 'get-url', 'origin'), git(r.checkout, 'remote', 'get-url', 'origin'));
+  assert.equal(git(dir, 'symbolic-ref', '--short', 'HEAD'), branch);
+  assert.equal(git(dir, 'rev-parse', 'HEAD^'), head, "the session's commit is on the branch from origin");
+  assert.throws(() => git(r.checkout, 'cat-file', '-e', git(dir, 'rev-parse', 'HEAD')),
+    "the session's commit is not in the main checkout's store");
+  assert.equal(existsSync(join(r.checkout, '.git/worktrees')), false, 'the main checkout has no worktree');
+}
+
+test("a ticket run works in a clone of its own on ticket/N from origin/main, reading the main checkout's objects through an alternate", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  assert.match(r.probe('claude-args'), /You are in a fresh clone on branch ticket\/7 from origin\/main/);
+  assertRunClone(r, r.worktree, 'ticket/7', git(r.checkout, 'rev-parse', 'origin/main'));
+});
+
+test("a repair run works in a clone of its own on the pull request's branch", t => {
+  const r = repairSetup(t);
+  const head = git(join(r.root, 'publisher'), 'rev-parse', 'ticket/30');
+  r.tick();
+  assertRunClone(r, join(r.checkout, '.worktrees/pr-40'), 'ticket/30', head);
+});
+
+test("a run's clone takes the place of the one an earlier run left", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  writeFileSync(join(r.worktree, 'left.txt'), 'left by run 1\n');
+  writeFileSync(join(r.worktree, '.git/planted'), 'left by run 1\n');
+  r.tick();
+  assert.match(r.log(), /ticket #7: run 2 of 3 starting/);
+  assert.equal(existsSync(join(r.worktree, 'left.txt')), false);
+  assert.equal(existsSync(join(r.worktree, '.git/planted')), false);
+  assertRunClone(r, r.worktree, 'ticket/7', git(r.checkout, 'rev-parse', 'origin/main'));
+});
+
+test("the runner's run clones run the main checkout's hooks even without their own copy", t => {
   const r = ticketSetup(t);
   r.tick();
   assert.equal(r.probe('hooks-path'), `${join(r.checkout, 'scripts/git-hooks')}\n`);
@@ -178,7 +219,7 @@ function proposalsTick(t, content, routes = {}) {
 }
 const openBodies = `issue list -R ${repo} --state open --limit 1000 --json body`;
 
-test('the session gets an empty proposals file outside its worktree, which the run removes when it ends', t => {
+test('the session gets an empty proposals file outside its clone, which the run removes when it ends', t => {
   const r = proposalsTick(t);
   assert.ok(r.path.startsWith('/'), r.path);
   assert.ok(!r.path.startsWith(`${r.checkout}/`), `the proposals file ${r.path} lies in the checkout`);
@@ -464,13 +505,13 @@ test("the session gets the token of the App's installation on the served reposit
   assert.equal(r.probe('app-owner'), 'Example-Owner');
 });
 
-test("the session is marked as Triphammer's, with its worktree as the place the agent guard lets it write", t => {
+test("the session is marked as Triphammer's, with its clone as the place the agent guard lets it write", t => {
   const r = ticketSetup(t);
   r.tick();
   assert.equal(r.probe('triphammer-session'), r.worktree);
 });
 
-test("the session loads the Triphammer plugin from the main checkout, never from the run's worktree", t => {
+test("the session loads the Triphammer plugin from the main checkout, never from the run's clone", t => {
   const r = ticketSetup(t);
   r.tick();
   const args = r.probe('claude-args').split('\n');
@@ -481,13 +522,13 @@ test("the session loads the Triphammer plugin from the main checkout, never from
   assert.equal(readFileSync(join(plugin, 'skills/ticket-run/SKILL.md'), 'utf8'), 'run the ticket\n');
 });
 
-test("a project that is another repository runs under Triphammer's plugin, and its worktree's commits run Triphammer's hooks", t => {
+test("a project that is another repository runs under Triphammer's plugin, and its clone's commits run Triphammer's hooks", t => {
   const r = ticketSetup(t);
   const project = r.separateProject();
   for (const path of ['plugins', 'scripts/git-hooks', 'scripts/land-pr.sh']) assert.equal(existsSync(join(project.checkout, path)), false, path);
   r.tick();
   const worktree = join(project.checkout, '.worktrees/issue-7');
-  assert.equal(r.probe('triphammer-session'), worktree, "the session runs in the project's worktree");
+  assert.equal(r.probe('triphammer-session'), worktree, "the session runs in the project's clone");
   const args = r.probe('claude-args').split('\n');
   assert.equal(args[args.indexOf('--plugin-dir') + 1], join(r.checkout, 'plugins/triphammer'));
   assert.equal(r.probe('hooks-path'), `${join(r.checkout, 'scripts/git-hooks')}\n`);
@@ -524,7 +565,9 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
     assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
     assert.ok(binds(session).includes(run), JSON.stringify(session));
-    assert.ok(binds(session).includes(join(r.checkout, '.git')), JSON.stringify(session));
+    const mainGit = join(r.checkout, '.git');
+    assert.ok(!binds(session).some(path => path === mainGit || path.startsWith(`${mainGit}/`)),
+      `the main checkout's .git is not writable: ${JSON.stringify(session)}`);
     assert.ok(!binds(session).includes(r.checkout), 'the main checkout is not writable');
     assert.deepEqual(session.slice(session.indexOf('--ro-bind'), session.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
   });
@@ -986,20 +1029,23 @@ test('failed agent-working calls are logged and stop neither the tick nor the ru
   assert.match(log, /issue #7: could not remove agent-working: gh: label not found/);
 });
 
-// The sweep each tick: runner worktrees no run will use again, and databases whose worktree is gone.
+// The sweep each tick: run directories no run will use again, and databases whose run directory is gone.
 
-// The example project's scripts/local-db.sh's project name for a worktree.
+// The example project's scripts/local-db.sh's project name for a run directory.
 const localDb = worktree =>
   `example-project-local-${run('sh', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', 'sh', worktree]).trim()}`;
 const recentUpkeep = upkeepIssue(1, 1, 'CLOSED');  // with it and no ready issue, a tick does nothing else
 const held = number => issue(number, {labels: ['hold']});
 const closed = number => issue(number, {state: 'CLOSED'});
 
-// A machine with worktrees issue-11 (closed), issue-12 (open, one run used), issue-13 (open, three runs used), issue-14
-// (open, with an open pull request), issue-15 (closed, but the `current` file names it), issue-16 (open, never run),
-// pr-20 (merged), pr-21 (open) and the manual demo-specs.
+// A machine with run clones in .worktrees, as ticket-runner makes them, issue-11 (closed), issue-12 (open, one run
+// used), issue-13 (open, three runs used), issue-14 (open, with an open pull request), issue-15 (closed, but the
+// `current` file names it), issue-16 (open, never run) and pr-21 (open), git worktrees there pr-20 (merged) and the
+// manual demo-specs, a symlink issue-17 (closed) to a directory outside, and a git worktree outside .worktrees named
+// issue-18 (closed).
 function sweepSetup(t) {
-  const r = ticketSetup(t, [recentUpkeep, closed(11), held(12), held(13), held(14), closed(15), held(16)]);
+  const r = ticketSetup(t, [recentUpkeep, closed(11), held(12), held(13), held(14), closed(15), held(16), closed(17),
+    closed(18)]);
   r.gh.json('pulls.json', [{...linked('Example-Owner', 'example-project', 14), author: {login: 'someone'}, isDraft: false,
     labels: [], mergeStateStatus: 'CLEAN', statusCheckRollup: [], reviews: [], commits: []}]);
   r.gh.respond({
@@ -1007,18 +1053,26 @@ function sweepSetup(t) {
     [`pr view 21 -R ${repo} --json state`]: {stdout: 'OPEN\n'},
   });
   const worktree = name => join(r.checkout, '.worktrees', name);
-  for (const name of ['issue-11', 'issue-12', 'issue-13', 'issue-14', 'issue-15', 'issue-16', 'pr-20', 'pr-21', 'demo-specs'])
+  for (const name of ['issue-11', 'issue-12', 'issue-13', 'issue-14', 'issue-15', 'issue-16', 'pr-21'])
+    git(r.checkout, 'clone', '-q', '--no-local', '--reference', r.checkout, join(r.root, 'origin.git'), worktree(name));
+  for (const name of ['pr-20', 'demo-specs'])
     git(r.checkout, 'worktree', 'add', '-q', '-b', `b/${name}`, worktree(name), 'origin/main');
+  const outside = join(r.root, 'outside-17');
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'kept.txt'), 'kept\n');
+  symlinkSync(outside, worktree('issue-17'));
+  git(r.checkout, 'worktree', 'add', '-q', '-b', 'b/issue-18', join(r.root, 'issue-18'), 'origin/main');
   const state = join(r.root, 'state/ticket-runner');
   mkdirSync(join(state, 'attempts'), {recursive: true});
   writeFileSync(join(state, 'attempts/ticket-12'), '1\n');
   writeFileSync(join(state, 'attempts/ticket-13'), '3\n');
   writeFileSync(join(state, 'current'), 'pid 1\nstarted 1\nkind ticket\nnumber 15\nbranch ticket/15\nprs \n');
-  return {...r, worktree, worktrees: () => git(r.checkout, 'worktree', 'list', '--porcelain')
-    .split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length))};
+  return {...r, worktree, outside, runs: () => readdirSync(join(r.checkout, '.worktrees')).sort(),
+    worktrees: () => git(r.checkout, 'worktree', 'list', '--porcelain')
+      .split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice('worktree '.length))};
 }
 
-test('a tick removes the runner worktrees no run will use again, stopping their databases first', t => {
+test('a tick removes the run directories no run will use again, stopping their databases first', t => {
   const r = sweepSetup(t);
   r.docker.containers([[localDb(r.worktree('issue-11')), join(r.worktree('issue-11'), 'database')]]);
   r.tick();
@@ -1026,28 +1080,57 @@ test('a tick removes the runner worktrees no run will use again, stopping their 
   for (const [name, reason] of [['issue-11', 'issue #11 is closed'], ['issue-13', 'issue #13 used all 3 runs'],
     ['issue-14', 'issue #14 has an open pull request'], ['pr-20', 'pull request #20 is merged']]) {
     assert.equal(existsSync(r.worktree(name)), false, name);
-    assert.ok(log.includes(`removed worktree ${r.worktree(name)} (${reason})\n`), name);
+    assert.ok(log.includes(`removed run directory ${r.worktree(name)} (${reason})\n`), name);
   }
   assert.match(log, new RegExp(`tore down ${r.worktree('issue-11')}: .*Removed\n`));
   assert.ok(!log.includes(`tore down ${r.worktree('issue-13')}`), 'a teardown that prints nothing is not logged');
-  assert.deepEqual(r.worktrees().sort(), [r.checkout, ...['demo-specs', 'issue-12', 'issue-15', 'issue-16', 'pr-21']
-    .map(r.worktree)].sort(), 'the current run, open issues under their runs, an open PR and a manual worktree stay');
+  assert.deepEqual(r.runs(), ['demo-specs', 'issue-12', 'issue-15', 'issue-16', 'issue-17', 'pr-21'],
+    'the current run, open issues under their runs, an open PR, a manual worktree and a symlink stay');
+  assert.deepEqual(r.worktrees().sort(), [r.checkout, r.worktree('demo-specs'), join(r.root, 'issue-18')].sort(),
+    "the merged pull request's worktree is gone from git's list too");
+  assert.equal(readFileSync(join(r.outside, 'kept.txt'), 'utf8'), 'kept\n', 'nothing outside .worktrees is touched');
+  assert.doesNotMatch(log, /issue-17|issue-18/);
   assert.equal(r.ran(), false);
 });
 
-test('a failed worktree removal is logged and the tick carries on', t => {
-  const r = sweepSetup(t);
-  git(r.checkout, 'worktree', 'lock', r.worktree('issue-11'));  // `worktree remove --force` refuses a locked one
-  r.docker.containers([['example-project-local-1', join(r.root, 'gone/database')]]);
+test('a run left behind, by a run without progress or a killed tick, is removed once its issue closes, its database first', t => {
+  const r = ticketSetup(t);
+  const db = localDb(r.worktree);
+  writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[db, join(r.worktree, 'database')]]));  // local-db.sh up
   r.tick();
+  assert.match(r.log(), /ticket #7: run 1 ended without progress/);
+  assert.equal(existsSync(join(r.worktree, '.git/objects/info/alternates')), true, "the run's clone is left");
+  r.gh.json('issues.json', [recentUpkeep, closed(7)]);
+  r.tick();
+  assert.ok(r.docker.calls().some(call => call.startsWith(`${db}|compose --file `) && call.endsWith(' down --volumes --remove-orphans')));
+  assert.match(r.log(), new RegExp(`tore down ${r.worktree}:  Container ${db}-db-1  Removed\n`));
+  assert.match(r.log(), new RegExp(`removed run directory ${r.worktree} \\(issue #7 is closed\\)\n`));
+  assert.equal(existsSync(r.worktree), false);
+});
+
+test('a failed removal is logged and the tick carries on', t => {
+  const r = sweepSetup(t);
+  const locked = join(r.worktree('issue-11'), 'locked');
+  mkdirSync(locked);
+  writeFileSync(join(locked, 'file'), '');
+  git(r.checkout, 'worktree', 'lock', r.worktree('pr-20'));  // `worktree remove --force` refuses a locked one
+  r.docker.containers([['example-project-local-1', join(r.root, 'gone/database')]]);
+  chmodSync(locked, 0o555);  // rm -rf cannot remove the file in it
+  try {
+    r.tick();
+  } finally {
+    chmodSync(locked, 0o755);  // so the test's directory can be removed
+  }
   const log = r.log();
-  assert.match(log, new RegExp(`could not remove worktree ${r.worktree('issue-11')} \\(issue #11 is closed\\): .*unlock`));
-  assert.equal(existsSync(r.worktree('issue-11')), true);
+  assert.match(log, new RegExp(`could not remove run directory ${r.worktree('issue-11')} \\(issue #11 is closed\\): .*Permission denied`));
+  assert.match(log, new RegExp(`could not remove run directory ${r.worktree('pr-20')} \\(pull request #20 is merged\\): .*unlock`));
+  assert.equal(existsSync(locked), true);
+  assert.equal(existsSync(r.worktree('pr-20')), true);
   assert.equal(existsSync(r.worktree('issue-13')), false);
   assert.match(log, /pruned database example-project-local-1 /);
 });
 
-test('a tick prunes the databases whose worktree is gone and never one whose worktree exists', t => {
+test('a tick prunes the databases whose run directory is gone and never one whose directory exists', t => {
   const r = ticketSetup(t, [recentUpkeep]);
   const kept = join(r.checkout, '.worktrees/demo-specs');
   mkdirSync(join(kept, 'database'), {recursive: true});
@@ -1065,8 +1148,8 @@ test('a tick prunes the databases whose worktree is gone and never one whose wor
   r.docker.failDown('example-project-it-2');
   r.tick();
   const log = r.log();
-  assert.ok(log.includes(`pruned database example-project-local-1 (worktree ${join(r.root, 'issue-561')} is gone)\n`));
-  assert.ok(log.includes(`could not prune database example-project-it-2 (worktree ${join(r.root, 'issue-525')} is gone): Error response`));
+  assert.ok(log.includes(`pruned database example-project-local-1 (run directory ${join(r.root, 'issue-561')} is gone)\n`));
+  assert.ok(log.includes(`could not prune database example-project-it-2 (run directory ${join(r.root, 'issue-525')} is gone): Error response`));
   const downs = r.docker.calls().filter(call => call.includes(' down '));
   assert.deepEqual(downs, ['example-project-it-2', 'example-project-local-1']
     .map(project => `|compose -p ${project} down --volumes --remove-orphans`));
@@ -1087,16 +1170,16 @@ test('--prune-dry-run prints what the sweep would remove, changes nothing and ru
   r.docker.containers([['example-project-local-1', join(r.root, 'issue-561/database')],
     ['example-project-local-3', join(r.worktree('demo-specs'), 'database')]]);
   mkdirSync(join(r.worktree('demo-specs'), 'database'));
-  const before = r.worktrees();
+  const before = [r.runs(), r.worktrees()];
   const out = r.tick({}, ['--prune-dry-run']);
   assert.deepEqual(out.split('\n').filter(Boolean), [
-    `would remove worktree ${r.worktree('issue-11')} (issue #11 is closed)`,
-    `would remove worktree ${r.worktree('issue-13')} (issue #13 used all 3 runs)`,
-    `would remove worktree ${r.worktree('issue-14')} (issue #14 has an open pull request)`,
-    `would remove worktree ${r.worktree('pr-20')} (pull request #20 is merged)`,
-    `would prune database example-project-local-1 (worktree ${join(r.root, 'issue-561')} is gone)`,
+    `would remove run directory ${r.worktree('issue-11')} (issue #11 is closed)`,
+    `would remove run directory ${r.worktree('issue-13')} (issue #13 used all 3 runs)`,
+    `would remove run directory ${r.worktree('issue-14')} (issue #14 has an open pull request)`,
+    `would remove run directory ${r.worktree('pr-20')} (pull request #20 is merged)`,
+    `would prune database example-project-local-1 (run directory ${join(r.root, 'issue-561')} is gone)`,
   ]);
-  assert.deepEqual(r.worktrees(), before);
+  assert.deepEqual([r.runs(), r.worktrees()], before);
   assert.deepEqual(r.docker.calls().filter(call => !call.includes('|ps ')), []);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/log')), false);
   assert.ok(!r.ghCalls().some(call => !['list', 'view'].includes(call[1])), 'gh only reads');
@@ -1164,12 +1247,15 @@ test('a ticket runs on the repository, checkout, App author and state directory 
   assert.ok(ghCalls.some(call => call.join(' ').startsWith(`api repos/${served}/issues/8/events`)),
     "the owner's needs-owner brake on #8 was looked up before it started");
   const calls = gitCalls();
-  assert.ok(calls.some(({args}) => args.includes('worktree') && args.includes('add')), 'the worktree was added through git');
+  const clones = calls.filter(({args}) => args.includes('clone'));
+  assert.equal(clones.length, 1, 'the run was cloned through git');
+  assert.equal(clones[0].dir, checkout);
+  assert.equal(clones[0].args[clones[0].args.indexOf('--reference') + 1], checkout, "the configured checkout's objects");
+  assert.equal(clones[0].args.at(-1), join(checkout, '.worktrees/issue-8'));
   // The script's own checkout is Triphammer's, which the tick keeps current and reads the plugin from, and the
   // configured one is another repository; every other git call is in the configured checkout.
   for (const {dir, args} of calls) assert.ok(inside(dir, checkout) || inside(dir, r.checkout), `git ${args.join(' ')} in ${dir}`);
-  for (const {dir, args} of calls.filter(({args}) => args.includes('worktree'))) assert.ok(inside(dir, checkout), `git ${args.join(' ')} in ${dir}`);
-  assert.equal(existsSync(join(checkout, '.worktrees/issue-8')), false, 'the run made progress and its worktree is gone');
+  assert.equal(existsSync(join(checkout, '.worktrees/issue-8')), false, "the run made progress and its clone is gone");
   assert.equal(existsSync(join(r.checkout, '.worktrees')), false, "the script's own checkout is untouched");
   assert.match(readFileSync(join(state, 'log'), 'utf8'), /ticket #8: run 1 finished/);
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/log')), false);
@@ -1270,7 +1356,7 @@ test('a project file whose shellEditRoots is not a list of relative paths inside
   }
 });
 
-test("a project's teardown command runs in the worktree, with its arguments, before the worktree is removed", t => {
+test("a project's teardown command runs in the run's clone, with its arguments, before the clone is removed", t => {
   const r = ticketSetup(t, [issue(7)], {project: project({worktreeTeardown: ['tools/stop.sh', 'now']}), files: {
     'tools/stop.sh': `#!/bin/sh\necho "$PWD $*" > "$PROBE/teardown"\necho first\necho stopped everything\n`,
   }});
@@ -1281,7 +1367,7 @@ test("a project's teardown command runs in the worktree, with its arguments, bef
   assert.equal(existsSync(r.worktree), false);
 });
 
-test('a project with no teardown command gets its worktree removed with no teardown run and nothing logged about it', t => {
+test('a project with no teardown command gets its clone removed with no teardown run and nothing logged about it', t => {
   const r = ticketSetup(t, [issue(7)], {project: without('worktreeTeardown')});
   const db = localDb(r.worktree);
   writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[db, join(r.worktree, 'database')]]));  // local-db.sh up
@@ -1309,7 +1395,7 @@ test("a compose pattern that does not match the example project's names prunes o
   ]);
   r.tick();
   assert.deepEqual(r.docker.calls().filter(call => call.includes(' down ')), ['|compose -p widgets-db-3 down --volumes --remove-orphans']);
-  assert.ok(r.log().includes(`pruned database widgets-db-3 (worktree ${join(r.root, 'issue-9')} is gone)\n`));
+  assert.ok(r.log().includes(`pruned database widgets-db-3 (run directory ${join(r.root, 'issue-9')} is gone)\n`));
   assert.doesNotMatch(r.log(), /example-project-/);
 });
 

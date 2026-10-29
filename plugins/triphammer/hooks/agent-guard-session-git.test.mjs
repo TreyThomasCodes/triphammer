@@ -169,8 +169,9 @@ test('in a Triphammer session env -C, sudo -D and git -C move the directory rela
   }
 });
 
-// A Triphammer session whose worktree is a real git worktree on ticket/7 of a checkout on main, with a src/ directory, and
-// another repository on main beside them.
+// A Triphammer session whose run directory .worktrees/issue-7 of a checkout on main is on ticket/7 and has a src/
+// directory, and another repository on main beside them. The run directory is a clone of the checkout reading its
+// objects through an alternate, as ticket-runner makes it.
 function gitTriphammerSession(t) {
   const s = triphammerSession(t);
   if (!s) return null;
@@ -182,7 +183,8 @@ function gitTriphammerSession(t) {
     runGit('-C', repo, '-c', 'user.name=x', '-c', 'user.email=x@example.com', 'commit', '-q', '--allow-empty', '-m',
       'x');
   }
-  runGit('-C', main, 'worktree', 'add', '-q', '-b', 'ticket/7', worktree);
+  runGit('clone', '-q', '--no-local', '--reference', main, main, worktree);
+  runGit('-C', worktree, 'checkout', '-q', '-b', 'ticket/7');
   mkdirSync(join(worktree, 'src'));
   return {...s, main, worktree, other, env: {...s.env, TRIPHAMMER_SESSION: worktree}};
 }
