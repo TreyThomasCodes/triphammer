@@ -76,8 +76,9 @@
 # network is shared. The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, are
 # each an empty tmpfs of mode 0700 that the command may write, mounted before everything above, so neither the user
 # manager, the session bus nor an agent's socket there is reachable; DBUS_SESSION_BUS_ADDRESS, SSH_AUTH_SOCK and
-# GPG_AGENT_INFO are unset. A rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
-# when the command exits.
+# GPG_AGENT_INFO are unset. A rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back.
+# bwrap ends the command when its parent dies (--die-with-parent), and every process left inside when the command
+# exits.
 #
 # Not covered: a NuGet user config, or a part of Claude Code's or Codex's directory, that is a symlink into a writable
 # path, which the command writes through; memory written under another project's directory in projects, which a Claude
@@ -207,10 +208,7 @@ cover() {
     fi
   done
 }
-# The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, each an empty tmpfs of
-# mode 0700 that the command may write, so neither the user manager, the session bus nor an agent's socket there is
-# reachable; the variables that name the bus and the agents go. A rootless Docker socket there that DOCKER_HOST names
-# is mounted back.
+# The user's runtime directories, each an empty tmpfs, with a rootless Docker socket there mounted back.
 runtime_dirs=()
 for path in "/run/user/$UID" "${XDG_RUNTIME_DIR:-}"; do
   [ -n "$path" ] && [ -d "$path" ] || continue
@@ -222,7 +220,7 @@ args+=(--unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv SSH_AUTH_SOCK --unsetenv G
 if [[ "${DOCKER_HOST:-}" == unix://* ]] && [ -S "${DOCKER_HOST#unix://}" ]; then
   docker_socket="$(readlink -f -- "${DOCKER_HOST#unix://}")"
   for path in "${runtime_dirs[@]}"; do
-    [[ "$docker_socket" != "$path"/* ]] || { args+=(--bind "$docker_socket" "$docker_socket"); break; }
+    [[ "$docker_socket" != "$path"/* ]] || { bind --bind "$docker_socket"; break; }
   done
 fi
 bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
