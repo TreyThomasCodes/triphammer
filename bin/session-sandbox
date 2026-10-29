@@ -196,7 +196,8 @@ fi
 if [ -d "$codex" ]; then
   private "$codex" "${codex_runtime[@]}" auth.json installation_id
   cover "$codex" "${codex_loaded[@]}"
-  args+=(--tmpfs "$(readlink -f -- "$codex")/sqlite" --setenv CODEX_SQLITE_HOME "$(readlink -f -- "$codex")/sqlite")
+  sqlite="$(readlink -f -- "$codex")/sqlite"
+  args+=(--tmpfs "$sqlite" --setenv CODEX_SQLITE_HOME "$sqlite")
 fi
 docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
 if [ -d "$docker_config" ] || command -v docker >/dev/null 2>&1; then
