@@ -11,7 +11,8 @@ Agents reach GitHub as the agents' GitHub App, never as the owner. `github-app-t
 token for git (as its credential helper) and `gh` (the `gh` wrapper here sets `GH_TOKEN` from it). Both live here and
 are linked into `~/.local/bin` (see Install); the App's id, owner and private key stay in files the owner fills in,
 outside any repository, and no script prints or copies the key. The units put `~/.local/bin` on `PATH`, so every
-script that runs `gh` gets the wrapper.
+script that runs `gh` gets the wrapper. A session mints nothing: `ticket-runner` mints its token outside the write limit
+and the session's `github-app-token` reads that file alone (Sessions, The session's GitHub token).
 
 The App has no Workflows permission, so GitHub refuses its push of a commit that creates, changes or deletes a file
 under `.github/workflows/`. A session therefore builds nothing for an issue whose work has to touch such a file: it
@@ -47,7 +48,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
-| `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory (the run's clone, with its own `.git`), the temporary directories and what Claude Code writes in the home directory; `ticket-runner` starts every session through it. See Sessions, The write limit. |
+| `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory (the run's clone, with its own `.git`), the temporary directories and what Claude Code writes in the home directory, and with the App's files, the token cache and every session's token hidden but the one `TRIPHAMMER_TOKEN_FILE` names; `ticket-runner` starts every session through it. See Sessions, The write limit. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
 | `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. When the updated checkout's files differ from its commit, it creates the shared `stop` file and restarts nothing. `ticket-runner` calls it; see below. |
 | `demo-gallery` | The `demo` module's web server: serves `DEMO_GALLERY_DIR` read-only at `http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/` until stopped. GET and HEAD only (anything else gets 405); a directory serves its `index.html` and is never listed; a path that leaves the gallery, by `..` or by a symlink whose target lies outside it, and anything but a regular file get 404. With the module off, `DEMO_GALLERY_DIR` missing or the config malformed it exits 2 naming why. `DEMO_URL` is the address the owner publishes, which may be this server itself or a proxy in front of it. |
@@ -57,8 +58,8 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `security-review` | The `codex` module. Security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session, and a head whose review found something gets a repair session that follows the findings up. `--full-area` audits the whole area for the monthly upkeep run. See below. |
 | `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the run's clone whose HEAD is its pushed head, fetches `main` from the origin of Triphammer's checkout (the one `land-pr` resolves to through its link) into a temporary bare repository under `$TMPDIR`, which it removes when it ends, never into the checkout itself, and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the temporary repository, so `land-pr.sh` runs Triphammer `main`'s classifier against the clone's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
 | `merge-when-ready` | A serial merge queue per repository, as the GitHub App (the `triphammer:merge-policy` skill), that merges armed pull requests and brings them up to date one at a time, stops for the owner's brakes and keeps off the branches a `ticket-runner` run works on. With a project (`TRIPHAMMER_PROJECT`) it serves only that project's repository, reads that project's runner and starts it after a merge. Its header lists the rules. |
-| `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. Its header lists the rules. |
-| `gh` | Runs the first other `gh` on `PATH` with `GH_TOKEN` from the `github-app-token` beside it (symlinks resolved), for the account of its `-R`/`--repo` argument when it has one; when no token can be had it runs nothing and exits 1. |
+| `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. `github-app-token session-file <file>` writes the account's token and expiry to a session's token file through a rename, for `ticket-runner`. Inside a session (`TRIPHAMMER_TOKEN_FILE` set) it never signs or mints: it prints the token of that file for its account alone and fails closed for any other account, a missing, malformed or expired file, `app-slug` and `session-file` (Sessions, The session's GitHub token). Its header lists the rules. |
+| `gh` | Runs the first other `gh` on `PATH` with `GH_TOKEN` from the `github-app-token` beside it (symlinks resolved), for the account of its `-R`/`--repo` argument when it has one, so inside a session the session's token file; when no token can be had it runs nothing and exits 1. |
 | `config.sh` | Sourced by the bash scripts, and run with `--print` by the others: reads the Triphammer config and checks the project file (see Configuration). |
 | `ticket-runner@.service`, `ticket-runner@.timer` | Run `ticket-runner` for the project named by the instance (`ticket-runner@<project>.timer`) every ten minutes, with `TRIPHAMMER_PROJECT=<project>`; `merge-when-ready@<project>` also starts the service after each merge. |
 | `merge-when-ready@.service`, `merge-when-ready@.timer` | Run `merge-when-ready` for the project named by the instance every two minutes. |
@@ -215,6 +216,7 @@ share the shared directory, `$TRIPHAMMER_SHARED_DIR` or else `${XDG_STATE_HOME:-
 | `stop` | The owner's shared brake: while it exists no project's runner or merge queue does anything. The `stop` file in a project's state directory stops only that project. |
 | `last` | The project whose run started last. |
 | `waiting/<project>` | The time a tick of that project last had a run to start; removed when it starts one or has nothing to do. |
+| `tokens/<project>/token.json` | The GitHub token of the project's running session, which the runner writes and removes (Sessions, The session's GitHub token). Every session's write limit hides `tokens`, so no other project's session reads it. |
 | `guard-overrides.log` | One JSON line per `# guard-override:` the plugin's `agent-guard.py` honors (`time`, `session`, `rule`, `reason`, `command`), from any session on the machine. The override lifts only the shell-edit rule; upkeep reads the log. The hook creates the directory and the file when missing; a session cannot write the log itself. |
 
 Projects take turns when the slots run out: a tick that took the last free slot yields when its project is the one in
@@ -281,6 +283,25 @@ writes `attempts/ticket-N.reset`, and run 1 of a restarted counter uses `tripham
 failed on the issue; the file goes with the counter when a run makes progress. A run a brake or a usage limit stops
 does not count, so the next run is the same run again with the same builder. Repairs always use `triphammer:builder`.
 
+### The session's GitHub token
+
+A session reaches GitHub with one token, for the App's installation on the account that owns the served repository
+(`GITHUB_APP_OWNER`), and never sees the App's key or any other token. Just before the session starts, `ticket-runner`
+mints it outside the write limit with `github-app-token session-file` into `tokens/<project>/token.json` in the shared
+directory (mode 600 in directories of mode 700), and starts the session with `TRIPHAMMER_TOKEN_FILE` naming that file.
+While the session runs, the runner rewrites the file through a rename every five minutes
+(`TICKET_RUNNER_TOKEN_SECONDS`, default 300); `github-app-token` mints again within ten minutes of expiry, so the file
+always holds a token with five minutes or more left, and a session longer than the token's hour keeps working. A
+rewrite that fails is logged and tried again on the next round. When the session ends, however it ends, the runner
+stops the rewriting and removes the directory. When the first mint fails, no session starts, the run is not counted,
+and the log says why.
+
+Inside the session, `gh` (through the wrapper) and git (through the credential helper) both run `github-app-token`,
+which, with `TRIPHAMMER_TOKEN_FILE` set, prints that file's token and nothing else: it answers only for the file's
+account, so a `gh -R` or a git URL of another account fails, and it fails closed on a file that is missing, malformed
+or expired. `github-app-token app-slug` and `session-file` are not available inside a session. The write limit hides
+the App's files, the token cache and every session's token directory but the session's own (The write limit).
+
 ### The write limit
 
 Every session runs under an OS-level write limit, below the guard hook: `ticket-runner` starts `claude -p` through
@@ -324,6 +345,13 @@ Every session runs under an OS-level write limit, below the guard hook: `ticket-
   and the sentinels, but for the CLI's state directories `toolResolverCache`, `TelemetryStorageService` and
   `sdk-advertising`, which start empty. Each session therefore restores its local tools' resolution from
   `~/.nuget/packages` and, after an SDK update nothing outside has run, goes through the CLI's first use again.
+
+The GitHub App's credentials are hidden, each under an empty tmpfs mounted over it after the paths above:
+`$GITHUB_APP_CONFIG_DIR` (by default `~/.config/github-app`, with `agents.pem`, `app-id` and `owner`), the token cache
+`${XDG_CACHE_HOME:-~/.cache}/github-app`, which `session-sandbox` creates first so a session cannot create it in the
+writable `~/.cache` and read the tokens minted into it outside, and `tokens` in the shared directory, every session's
+token directory. The directory of the file `TRIPHAMMER_TOKEN_FILE` names, which must lie directly in `tokens`, is
+mounted back read-only; the directory rather than the file, so the runner's rewrite through a rename shows inside.
 
 Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
 directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:

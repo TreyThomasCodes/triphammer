@@ -420,3 +420,111 @@ test("app-slug without the App's key names the missing file and calls nothing", 
   assert.match(result.stderr, /agents\.pem is missing/);
   assert.deepEqual(r.calls(), []);
 });
+
+test("session-file writes the account's token and expiry through a rename, mode 600, from the cache when it is fresh", t => {
+  const r = appSetup(t, twoAccounts);
+  const dir = join(r.root, 'session');
+  mkdirSync(dir, {mode: 0o700});
+  const file = join(dir, 'token.json');
+  const first = r.token(['session-file', file], '', {GITHUB_APP_OWNER: 'Other-Org'});
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(first.stdout, '');
+  const written = JSON.parse(readFileSync(file, 'utf8'));
+  assert.deepEqual({...written, expires_at: undefined}, {account: 'Other-Org', token: 'ghs_other_org', expires_at: undefined});
+  assert.equal(written.expires_at, JSON.parse(readFileSync(r.cacheOf('other-org'), 'utf8')).expires_at);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(r.token(['session-file', file], '', {GITHUB_APP_OWNER: 'Other-Org'}).status, 0);
+  assert.equal(r.calls().length, 2, 'the second write reused the cached token');
+  assert.deepEqual(readdirSync(dir), ['token.json'], 'no temporary file is left behind');
+  for (const args of [['session-file'], ['session-file', ''], ['session-file', file, 'more']]) {
+    assert.equal(r.token(args).status, 2, JSON.stringify(args));
+  }
+});
+
+test('session-file fails closed and leaves the file as it was when no token can be had', t => {
+  const r = appSetup(t, {[installationsUrl]: {stdout: JSON.stringify(installations)}, [tokensUrl]: {stderr: 'curl: (22) 403\n', exit: 22}});
+  const file = join(r.root, 'token.json');
+  writeFileSync(file, 'before\n');
+  const result = r.token(['session-file', file]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /minting an installation token failed/);
+  assert.equal(readFileSync(file, 'utf8'), 'before\n');
+});
+
+// Inside a session: its token file, as ticket-runner writes it (`record`, or none), with the App's files and the cache
+// gone, as the write limit hides them.
+function sessionSetup(t, record = {account: 'Test-Owner', token: 'ghs_session', expires_at: iso(600)}) {
+  const r = appSetup(t, twoAccounts);
+  const file = join(r.root, 'session/token.json');
+  mkdirSync(join(r.root, 'session'));
+  if (record !== null) writeFileSync(file, typeof record === 'string' ? record : JSON.stringify(record));
+  rmSync(r.config, {recursive: true});
+  return {...r, file, session: (args = [], input = '', more = {}) => r.token(args, input, {TRIPHAMMER_TOKEN_FILE: file, ...more})};
+}
+
+test("inside a session it prints the session file's token for the session's account, case aside, and never mints", t => {
+  const r = sessionSetup(t);
+  for (const [args, input, more, expected] of [
+    [[], '', {}, 'ghs_session\n'],
+    [[], '', {GITHUB_APP_OWNER: 'test-owner'}, 'ghs_session\n'],
+    [['git-credential', 'get'], credential('test-owner/repo.git'), {GITHUB_APP_OWNER: 'other-org'}, password('ghs_session')],
+    [['git-credential'], credential(), {}, password('ghs_session')],
+  ]) {
+    const result = r.session(args, input, more);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected, JSON.stringify([args, input, more]));
+  }
+  assert.equal(r.session(['git-credential', 'store'], credential('other-org/repo.git')).status, 0);
+  assert.deepEqual(r.calls(), []);
+  assert.equal(existsSync(join(r.cache, '..')), false, 'nothing was cached');
+});
+
+test("inside a session it refuses every other account, and app-slug and session-file, printing no token", t => {
+  const r = sessionSetup(t);
+  for (const [args, input, more, message] of [
+    [['git-credential', 'get'], credential('other-org/repo.git'), {}, /this session has a token for Test-Owner only, not for other-org; check the repository git asked about/],
+    [[], '', {GITHUB_APP_OWNER: 'Other-Org'}, /this session has a token for Test-Owner only, not for Other-Org; correct GITHUB_APP_OWNER/],
+    [['app-slug'], '', {}, /app-slug is not available inside a session/],
+    [['session-file', join(r.root, 'stolen.json')], '', {}, /session-file is not available inside a session/],
+  ]) {
+    const result = r.session(args, input, more);
+    assert.equal(result.status, 1, JSON.stringify(args));
+    assert.equal(result.stdout, '');
+    assert.doesNotMatch(result.stderr, /ghs_session/);
+    assert.match(result.stderr, message);
+  }
+  assert.equal(existsSync(join(r.root, 'stolen.json')), false);
+  assert.deepEqual(r.calls(), []);
+});
+
+test('inside a session it fails closed on a token file that is missing, malformed or expired', t => {
+  for (const [record, message] of [
+    [null, /holds no token and account for the session/],
+    ['not json', /holds no token and account for the session/],
+    [{token: 'ghs_session', expires_at: iso(600)}, /holds no token and account for the session/],
+    [{account: 'Test-Owner', token: '', expires_at: iso(600)}, /holds no token and account for the session/],
+    [{account: 'Test-Owner', token: 'ghs_session', expires_at: 'never'}, /the session's token in \S+ has expired/],
+    [{account: 'Test-Owner', token: 'ghs_session', expires_at: iso(-60)}, /the session's token in \S+ has expired/],
+  ]) {
+    const r = sessionSetup(t, record);
+    for (const [args, input] of [[[], ''], [['git-credential', 'get'], credential('test-owner/repo.git')]]) {
+      const result = r.session(args, input);
+      assert.equal(result.status, 1, JSON.stringify(record));
+      assert.equal(result.stdout, '');
+      assert.match(result.stderr, message, JSON.stringify(record));
+    }
+    assert.deepEqual(r.calls(), []);
+  }
+});
+
+test("inside a session the gh wrapper runs gh with the session's token, and nothing for another account", t => {
+  const r = ghSetup(t);
+  const file = join(r.root, 'token.json');
+  writeFileSync(file, JSON.stringify({account: 'test-owner', token: 'ghs_session', expires_at: iso(600)}));
+  rmSync(r.key);
+  const env = {TRIPHAMMER_TOKEN_FILE: file};
+  assert.equal(r.gh(['pr', 'create', '--fill'], env).status, 0);
+  assert.equal(r.gh(['pr', 'list', '-R', 'other-org/repo'], env).status, 1);
+  assert.deepEqual(r.ran(), ['ghs_session|pr create --fill']);
+  assert.deepEqual(r.calls(), []);
+});

@@ -5,10 +5,10 @@ import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 
 // The test process's environment without the variables a ticket-runner session exports for itself (the project it
-// runs, the Triphammer config, the shared directory, the account whose App installation its tokens come from, the runner's own
-// update mark and its brake check timings), so a script under test reads only what its test sets and gives the same
-// result in any shell. Tests that need one of them set it explicitly.
-const {TRIPHAMMER_PROJECT, TRIPHAMMER_CONFIG, TRIPHAMMER_SHARED_DIR, GITHUB_APP_OWNER, TICKET_RUNNER_UPDATED,
+// runs, the Triphammer config, the shared directory, the account whose App installation its tokens come from, the
+// session's token file, the runner's own update mark and its brake check timings), so a script under test reads only
+// what its test sets and gives the same result in any shell. Tests that need one of them set it explicitly.
+const {TRIPHAMMER_PROJECT, TRIPHAMMER_CONFIG, TRIPHAMMER_SHARED_DIR, GITHUB_APP_OWNER, TRIPHAMMER_TOKEN_FILE, TICKET_RUNNER_UPDATED,
   TICKET_RUNNER_BRAKE_SECONDS, TICKET_RUNNER_BRAKE_GRACE_SECONDS, ...toolingEnv} = process.env;
 export {toolingEnv};
 
