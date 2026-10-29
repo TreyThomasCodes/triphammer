@@ -33,6 +33,8 @@ that hold the rest.
   never values.
 - **Fail safe.** A tier that cannot be decided escalates. The guard hook fails open on its own errors, and its header
   says so and lists what it does not cover.
+- **Security is judged against the threat model** in `bin/security-review-brief.md`. The guard hooks are a
+  best-effort layer above the write limit, not a boundary.
 - **Docs describe now.** Issues, pull requests and Git hold history.
 
 ## How a run flows

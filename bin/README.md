@@ -633,6 +633,11 @@ as `n` runs, so it is skipped unless the cap and the floor leave room for all `n
 
 ## Security review
 
+Triphammer's threat model is the first section of `security-review-brief.md`, the review's prompt: who is trusted,
+who the attacker is, the five boundaries that must hold against a session the attacker controls, and what is not a
+finding. A repair session and upkeep's monthly audit judge findings against the same copy, and file only those that
+cross a boundary.
+
 `security-review` belongs to the `codex` module: with the module off, or without the config's `CODEX_SECURITY_MODEL`,
 it exits 2 naming which, and `ticket-runner` never calls it. Its comments are headed `Security review (<model>)`,
 the model's name without a trailing `-latest`.

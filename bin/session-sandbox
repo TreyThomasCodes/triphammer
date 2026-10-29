@@ -14,8 +14,7 @@
 #     directory whose git directory or git common directory lies outside it, as a git worktree's does, runs nothing.
 #     Triphammer's checkout's .git stays read-only too: land-pr fetches main into a temporary repository instead;
 #   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
-#   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude} and ~/.claude.json, its
-#     state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
+#   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude}, its state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
 #     ${XDG_DATA_HOME:-~/.local/share}/NuGet* (http-cache, v3-cache, plugins-cache), and $NUGET_PACKAGES*,
 #     $NUGET_HTTP_CACHE_PATH* and $NUGET_PLUGINS_CACHE_PATH* when they are set;
 #   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
@@ -48,7 +47,7 @@
 #
 # Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
 # session may create or replace it), such as a ~/.codex/AGENTS.md or ~/.nuget/NuGet/NuGet.Config the machine does not
-# have; anything a writable path above lets a later session read (a cache, ~/.claude.json, Codex's databases,
+# have; anything a writable path above lets a later session read (a cache, Codex's databases,
 # local-audit's run count, or buildx's builder state, which picks the builder a later docker build uses); and the
 # Docker socket, or any other socket of a service outside, which the command can still reach: a container started
 # through Docker can write anywhere on the machine.
