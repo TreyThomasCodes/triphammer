@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {exampleProject, git, here, lines, manyLabels, projectJson, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
@@ -570,6 +570,12 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
       `the main checkout's .git is not writable: ${JSON.stringify(session)}`);
     assert.ok(!binds(session).includes(r.checkout), 'the main checkout is not writable');
     assert.deepEqual(session.slice(session.indexOf('--ro-bind'), session.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
+    // What the sandbox makes writable, and so creates first, lies in the test's directory, not the machine's HOME.
+    const root = realpathSync(r.root);
+    const temporary = ['/tmp', realpathSync(tmpdir())];
+    for (const path of [...binds(dry), ...binds(session)]) {
+      assert.ok(path.startsWith(`${root}/`) || temporary.includes(path), `${path} lies outside the test's directory`);
+    }
   });
 }
 

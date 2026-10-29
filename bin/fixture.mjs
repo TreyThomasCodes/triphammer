@@ -299,7 +299,7 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
-// `bin` entry named bwrap replaces it.
+// `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory.
 export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'), 'utf8'), files = {}, bin = {}, gh = {},
   project = projectJson, config = {}} = {}) {
   const r = checkoutSetup(t, {
@@ -323,9 +323,15 @@ shift
 exec "$@"
 `, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
-  const env = {...r.env, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
+  // session-sandbox creates and binds what a session may write under HOME and the variables below, so HOME lies in the
+  // temporary directory and the variables are unset: a test never writes the machine's own ~/.codex or ~/.claude.
+  const {XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH,
+    NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...base} = r.env;
+  const home = join(r.root, 'home');
+  mkdirSync(home);
+  const env = {...base, HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
-    ...r, env, gh: fake, docker,
+    ...r, env, home, gh: fake, docker,
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
     runTicketRunner: (args = [], extraEnv = {}) =>
       run(join(r.checkout, 'bin/ticket-runner'), args, {env: {...env, ...extraEnv}}),
