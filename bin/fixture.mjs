@@ -12,6 +12,9 @@ export const here = import.meta.dirname;
 export {gitEnv, toolingEnv};
 export const run = (file, args, options) => execFileSync(file, args, {stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...options});
 export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim();
+// A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
+// `checkout`'s objects through an alternate.
+export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
 // `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.

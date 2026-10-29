@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -30,7 +30,7 @@ function sandboxRig(t) {
   git(main, 'commit', '-q', '-m', 'first');
   git(main, 'push', '-q', 'origin', 'HEAD:main');
   const worktree = join(main, '.worktrees/issue-1');
-  git(main, 'clone', '-q', '--no-local', '--reference', main, origin, worktree);
+  runClone(main, origin, worktree);
   git(worktree, 'checkout', '-q', '-b', 'ticket/1');
   mkdirSync(join(triphammer, 'bin'), {recursive: true});
   copyFileSync(join(here, 'session-sandbox'), join(triphammer, 'bin/session-sandbox'));

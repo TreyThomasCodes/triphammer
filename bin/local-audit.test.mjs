@@ -5,7 +5,7 @@ import {appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from
 import {createServer} from 'node:http';
 import {basename, join} from 'node:path';
 import {gitEnv, gitRepo} from '../scripts/test-git-repo.mjs';
-import {fakeCodex, fakeCommand, freePort, installTriphammerFiles, writeConfig} from './fixture.mjs';
+import {fakeCodex, fakeCommand, freePort, installTriphammerFiles, runClone, writeConfig} from './fixture.mjs';
 
 const model = 'org/qwen-test:q4_k';
 const key = 'example-test-key-3f9a1c';
@@ -253,9 +253,8 @@ test("run from a run's clone of Triphammer's checkout, as an upkeep session runs
   const server = await listen(t);
   const r = auditSetup(t);
   r.configure({QWEN_BASE_URL: server.url});
-  // As ticket-runner's add_clone makes it: a repository of its own reading the checkout's objects through an alternate.
   const clone = join(r.root, 'run-clone');
-  execFileSync('git', ['clone', '-q', '--no-local', '--reference', r.repo, r.repo, clone], {env: gitEnv});
+  runClone(r.repo, r.repo, clone);
   const script = installAudit(clone);
   const result = await r.run(['--repo', r.repo, '--commit', r.audited, '--area', area, '--output', r.output], {}, script);
   assert.equal(result.code, 0, result.stderr);

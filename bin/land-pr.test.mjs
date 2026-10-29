@@ -4,7 +4,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {fakeGh, git, here, lines, checkoutSetup} from './fixture.mjs';
+import {fakeGh, git, here, lines, checkoutSetup, runClone} from './fixture.mjs';
 
 const wrapper = readFileSync(join(here, 'land-pr'), 'utf8');
 
@@ -80,9 +80,8 @@ test("refuses a copy of the wrapper that differs from origin/main's and runs not
 
 test("from a run's clone of Triphammer's checkout it lands with main's land-pr.sh, and a refusal names the plain command", t => {
   const r = landSetup(t);
-  // As ticket-runner's add_clone makes it: a repository of its own reading the checkout's objects through an alternate.
   const clone = join(r.root, 'run-clone');
-  git(r.root, 'clone', '-q', '--no-local', '--reference', r.checkout, join(r.root, 'origin.git'), clone);
+  runClone(r.checkout, join(r.root, 'origin.git'), clone);
   const result = r.landPr(r.wrapper, ['42'], {}, clone);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(r.landed(), ['main 42']);

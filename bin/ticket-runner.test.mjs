@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {exampleProject, git, here, lines, manyLabels, projectJson, run, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
+import {exampleProject, git, here, lines, manyLabels, projectJson, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The issues' author, in the shape `gh issue list --json author` returns for the App.
@@ -1054,7 +1054,7 @@ function sweepSetup(t) {
   });
   const worktree = name => join(r.checkout, '.worktrees', name);
   for (const name of ['issue-11', 'issue-12', 'issue-13', 'issue-14', 'issue-15', 'issue-16', 'pr-21'])
-    git(r.checkout, 'clone', '-q', '--no-local', '--reference', r.checkout, join(r.root, 'origin.git'), worktree(name));
+    runClone(r.checkout, join(r.root, 'origin.git'), worktree(name));
   for (const name of ['pr-20', 'demo-specs'])
     git(r.checkout, 'worktree', 'add', '-q', '-b', `b/${name}`, worktree(name), 'origin/main');
   const outside = join(r.root, 'outside-17');
