@@ -182,7 +182,7 @@ project that leaves out a field gets none of its step, and the runner logs nothi
 | --- | --- | --- |
 | `name` | the Triphammer config's file name | `example-project` |
 | `demos` | the `triphammer:ticket-run` skill: `true` when the project has paced demo walkthroughs for the `demo` module to publish | `true` |
-| `worktreeTeardown` | `ticket-runner`: the command run in a run's clone before it is removed, a list of words whose first is a path relative to the clone | `["scripts/local-db.sh", "down"]` |
+| `worktreeTeardown` | `ticket-runner`: the command run in a run's clone, under the write limit, before it is removed, a list of words whose first is a path relative to the clone | `["scripts/local-db.sh", "down"]` |
 | `shellEditRoots` | the plugin's `agent-guard.py` hook, which reads it from the working tree of the repository a command runs in: the directories whose git-tracked files a shell command may not rewrite (they go through Edit or Write), a list of paths relative to the repository root and inside it; without it the hook has no shell-edit rule | `["src", "tests"]` |
 | `composeProjectPattern` | `ticket-runner`: the Docker Compose project names the sweep may prune, an extended regular expression | `^example-project-(local\|it)-[0-9]+$` |
 | `securityReviewPaths` | `security-review --pr`: the changed paths that trigger a review, an extended regular expression | `bin/`, `status/` and the other paths under Security review |
@@ -241,10 +241,11 @@ its own `.git`, where its commits and refs go, and reads the main checkout's obj
 (`.git/objects/info/alternates`), so it is quick to make and small; `--no-local` keeps git from hardlinking an object
 of an origin that is a local path, whose overwrite would change the origin's copy. It fetches and pushes as the main
 checkout does: the same origin URL, and git's GitHub credential helper from the service user's global config. No run
-uses a clone an earlier run left, and the runner runs no git command in a clone once its session has started and
-deletes it with `rm -rf`, so neither the main checkout's `git gc` pruning an object only a clone left behind still
-names, nor a config the session wrote into its clone, reaches a git command the runner runs. The project's
-`worktreeTeardown` is the one command the runner runs in a clone after its session, outside the limit.
+uses a clone an earlier run left, and once its session has started the runner runs no git command in a clone but
+`session-sandbox`'s `git rev-parse`, which runs no command a config names, and deletes it with `rm -rf`, so neither
+the main checkout's `git gc` pruning an object only a clone left behind still names, nor a config the session wrote
+into its clone, reaches a git command the runner runs. The project's `worktreeTeardown` is the one command the runner
+runs in a clone after its session, and it runs under the session's write limit (The write limit).
 
 The clone has `core.hooksPath` set to Triphammer's checkout's `scripts/git-hooks` (an absolute path) in its own config,
 so the main checkout keeps its hooks. Triphammer's checkout tracks `origin/main`, so a branch cut before a hook existed,
@@ -283,7 +284,7 @@ does not count, so the next run is the same run again with the same builder. Rep
 ### The write limit
 
 Every session runs under an OS-level write limit, below the guard hook: `ticket-runner` starts `claude -p` through
-`session-sandbox <run's clone>`, which runs it under bubblewrap (`bwrap`) with the whole file system mounted read-only
+`session-sandbox <run's clone>`, and the project's `worktreeTeardown` the same way, which runs each under bubblewrap (`bwrap`) with the whole file system mounted read-only
 and only these paths writable:
 
 - the run's clone, with its own `.git`, where its commits and refs go. The main checkout's `.git` is read-only to the
@@ -432,7 +433,9 @@ scripts start (in the example project, `example-project-local-<cksum of the dire
 tick or a killed gate run never stops them. So:
 
 - Before `ticket-runner` removes a run's clone, it runs the project's `worktreeTeardown` in it, when the clone has its
-  first word as an executable file, and logs `tore down <clone>: <its last line of output>` when it printed anything
+  first word as an executable file. Since that is the clone's copy, which the session could edit, it runs through
+  `session-sandbox <run's clone>`, under the write limit the session ran under; in a git worktree, which the limit
+  refuses, it runs nothing and fails. The runner logs `tore down <clone>: <its last line of output>` when it printed anything
   (`teardown failed in <clone>: ...` when it failed). It then deletes the directory, or removes it with `git worktree
   remove --force` when it is a git worktree. It removes only a directory `<checkout>/.worktrees/issue-N` or `pr-N`,
   never a symlink there or one for `.worktrees` itself, so nothing outside `<checkout>/.worktrees` goes.

@@ -1367,6 +1367,34 @@ test("a project's teardown command runs in the run's clone, with its arguments, 
   assert.equal(existsSync(r.worktree), false);
 });
 
+test("a project's teardown command runs under the write limit, with the run's clone as the one checkout it may write", t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({worktreeTeardown: ['tools/stop.sh', 'now']}), files: {
+    'tools/stop.sh': '#!/bin/sh\nexit 0\n',
+  }});
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  const calls = r.bwrapCalls();
+  const teardown = calls.filter(call => call[call.indexOf('--') + 1] === join(r.worktree, 'tools/stop.sh'));
+  assert.equal(teardown.length, 1, JSON.stringify(calls));
+  const [call] = teardown;
+  assert.deepEqual(call.slice(call.indexOf('--')), ['--', join(r.worktree, 'tools/stop.sh'), 'now']);
+  const binds = call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
+  assert.ok(binds.includes(r.worktree), JSON.stringify(call));
+  assert.ok(!binds.includes(r.checkout), 'the main checkout is not writable');
+  const mainGit = join(r.checkout, '.git');
+  assert.ok(!binds.some(path => path === mainGit || path.startsWith(`${mainGit}/`)), "the main checkout's .git is not writable");
+  assert.deepEqual(call.slice(call.indexOf('--ro-bind'), call.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
+});
+
+test('a run directory the write limit refuses, a git worktree, runs no teardown and is still removed', t => {
+  const r = sweepSetup(t);
+  r.tick();
+  const pr20 = r.worktree('pr-20');
+  assert.ok(!r.bwrapCalls().some(call => call[call.indexOf('--') + 1]?.startsWith(`${pr20}/`)), 'no teardown ran in it');
+  assert.match(r.log(), new RegExp(`teardown failed in ${pr20}: session-sandbox: the git directory .* lies outside it`));
+  assert.ok(r.log().includes(`removed run directory ${pr20} (pull request #20 is merged)\n`));
+});
+
 test('a project with no teardown command gets its clone removed with no teardown run and nothing logged about it', t => {
   const r = ticketSetup(t, [issue(7)], {project: without('worktreeTeardown')});
   const db = localDb(r.worktree);
