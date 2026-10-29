@@ -15,6 +15,10 @@ export const git = (cwd, ...args) => run('git', args, {cwd, env: gitEnv}).trim()
 // A run's clone of `origin` in `dir`, as ticket-runner's add_clone makes it: a repository of its own reading
 // `checkout`'s objects through an alternate.
 export const runClone = (checkout, origin, dir) => git(checkout, 'clone', '-q', '--no-local', '--reference', checkout, origin, dir);
+// `env` without the variables, besides HOME, TMPDIR and XDG_STATE_HOME, that name what session-sandbox makes writable,
+// so the sandbox derives each from HOME and a test never writes the machine's own ~/.codex or ~/.claude.
+export const withoutSandboxPaths = ({XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE,
+  NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH, NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...env}) => env;
 // The non-empty lines of a file a fake appends to, or none when it never ran.
 export const lines = path => existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean) : [];
 // `count` placeholder label names, for the tests of the labels past the first 100, which gh does not read.
@@ -323,13 +327,9 @@ shift
 exec "$@"
 `, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
-  // session-sandbox creates and binds what a session may write under HOME and the variables below, so HOME lies in the
-  // temporary directory and the variables are unset: a test never writes the machine's own ~/.codex or ~/.claude.
-  const {XDG_DATA_HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH,
-    NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...base} = r.env;
   const home = join(r.root, 'home');
   mkdirSync(home);
-  const env = {...base, HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
+  const env = {...withoutSandboxPaths(r.env), HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
     ...r, env, home, gh: fake, docker,
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
