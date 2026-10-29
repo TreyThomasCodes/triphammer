@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
-import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
 
@@ -169,7 +169,6 @@ ${pythonWrite(join(r.worktree, 'script.txt'))}
 git add work.txt script.txt && git commit -q -m work
 echo tmp > '${scratch}/file'
 mkdir -p '${r.home}/.claude/projects/p' && echo session > '${r.home}/.claude/projects/p/session.jsonl'
-echo cache > '${r.home}/.cache/file'
 echo ran > '${r.home}/.local/state/triphammer/humanizer/marker'
 echo override >> '${r.home}/.local/state/triphammer/guard-overrides.log'
 echo 1 > '${r.home}/.local/state/local-audit/codex-runs.new'
@@ -180,11 +179,8 @@ mkdir -p '${r.home}/.codex/tmp/arg0' && ln -s /bin/true '${r.home}/.codex/tmp/ar
 echo refreshed > '${r.home}/.codex/auth.json'
 echo refreshed > '${r.home}/.claude/.credentials.json'
 echo snapshot > '${r.home}/.claude/shell-snapshots/snapshot-bash.sh'
-mkdir -p '${r.home}/.claude/todos' && echo todo > '${r.home}/.claude/todos/t.json'
-mkdir -p '${r.home}/.nuget/packages/p' && echo package > '${r.home}/.nuget/packages/p/p.nupkg'
-mkdir -p '${r.home}/.local/share/NuGet/http-cache' && echo index > '${r.home}/.local/share/NuGet/http-cache/vuln_index.dat-new'`);
+mkdir -p '${r.home}/.claude/todos' && echo todo > '${r.home}/.claude/todos/t.json'`);
   assert.equal(status, 0, output);
-  assert.equal(readFileSync(join(r.home, '.local/share/NuGet/http-cache/vuln_index.dat-new'), 'utf8'), 'index\n');
   assert.equal(git(r.worktree, 'log', '-1', '--format=%s'), 'work');
   const commit = git(r.worktree, 'rev-parse', 'HEAD');
   assert.equal(readFileSync(join(r.worktree, '.git/refs/heads/ticket/1'), 'utf8').trim(), commit, "the commit is in the clone's own .git");
@@ -267,23 +263,111 @@ for (const existed of [true, false]) {
   });
 }
 
-test('under the limit, the NuGet caches that XDG_DATA_HOME and the NUGET_* variables name are created and writable', {skip}, t => {
+// The shared caches directory in the rig's home, and a project's cache directory in it, created as ticket-runner does.
+const cachesDir = r => join(r.home, '.local/state/triphammer/caches');
+function cacheDir(r, project) {
+  const dir = join(cachesDir(r), project);
+  mkdirSync(dir, {recursive: true});
+  return dir;
+}
+
+// Each variable the limit points a cache at, and its directory in the cache directory.
+const cacheVars = {XDG_CACHE_HOME: 'xdg', npm_config_cache: 'npm', NUGET_PACKAGES: 'nuget/packages',
+  NUGET_HTTP_CACHE_PATH: 'nuget/http-cache', NUGET_PLUGINS_CACHE_PATH: 'nuget/plugins-cache', BUILDX_CONFIG: 'buildx'};
+
+test("under the limit, the home directory's caches, NuGet's and buildx's among them, are read-only", {skip}, t => {
   const r = sandboxRig(t);
-  const paths = {
-    XDG_DATA_HOME: join(r.root, 'data'),
-    NUGET_PACKAGES: join(r.root, 'nuget/packages'),
-    NUGET_HTTP_CACHE_PATH: join(r.root, 'nuget/http-cache'),
-    NUGET_PLUGINS_CACHE_PATH: join(r.root, 'nuget/plugins-cache'),
-  };
-  const files = [join(paths.XDG_DATA_HOME, 'NuGet/v3-cache'), paths.NUGET_PACKAGES, paths.NUGET_HTTP_CACHE_PATH,
-    paths.NUGET_PLUGINS_CACHE_PATH].map(dir => join(dir, 'file'));
-  const {status, output} = r.inside(files.map(file => `mkdir -p '${dirname(file)}' && echo nuget > '${file}'`).join('\n'),
-    paths);
+  const docker = join(r.home, '.docker');
+  for (const dir of ['.cache', '.npm/_cacache', '.nuget/packages', '.local/share/NuGet/http-cache', '.docker/buildx',
+    '.docker/cli-plugins']) {
+    mkdirSync(join(r.home, dir), {recursive: true});
+  }
+  writeFileSync(join(docker, 'config.json'), '{}\n');
+  const paths = [join(r.home, '.cache/planted'), join(r.home, '.npm/_cacache/planted'),
+    join(r.home, '.nuget/packages/planted.nupkg'), join(r.home, '.local/share/NuGet/http-cache/planted.dat'),
+    join(docker, 'buildx/current'), join(docker, 'config.json'), join(docker, 'cli-plugins/docker-planted')];
+  assertReadOnly(r, paths, {TRIPHAMMER_CACHE_DIR: cacheDir(r, 'example')});
+  assertReadOnly(r, paths);
+});
+
+test("under the limit, the cache variables point into the project's cache directory, over their values outside", {skip}, t => {
+  const r = sandboxRig(t);
+  const own = cacheDir(r, 'example');
+  const outside = join(r.root, 'outside');
+  const extra = {TRIPHAMMER_CACHE_DIR: own, NPM_CONFIG_CACHE: join(outside, 'NPM'),
+    ...Object.fromEntries(Object.keys(cacheVars).map(name => [name, join(outside, name)]))};
+  const {status, output} = r.inside(`set -e
+${Object.keys(cacheVars).map(name => `mkdir -p "$${name}/p" && echo ${name} > "$${name}/p/file"`).join('\n')}
+echo "npm: \${NPM_CONFIG_CACHE-unset}"`, extra);
   assert.equal(status, 0, output);
-  for (const file of files) assert.equal(readFileSync(file, 'utf8'), 'nuget\n', file);
-  const {status: elsewhere, output: why} = r.inside(`echo planted > '${join(r.root, 'nuget/outside')}'`, paths);
-  assert.notEqual(elsewhere, 0, 'the directory around the NuGet caches was written');
-  assert.match(why, /Read-only file system/);
+  assert.equal(output, 'npm: unset\n');
+  for (const [name, dir] of Object.entries(cacheVars)) {
+    assert.equal(readFileSync(join(own, dir, 'p/file'), 'utf8'), `${name}\n`, name);
+    assert.ok(!existsSync(join(outside, name, 'p')), `${name} went to its value outside`);
+  }
+});
+
+test("a project's session can neither read nor write another project's caches, and a later session of its own reads them", {skip}, t => {
+  const r = sandboxRig(t);
+  const first = cacheDir(r, 'example');
+  const second = cacheDir(r, 'other-project');
+  const planted = join(first, 'nuget/packages/p/p.nupkg');
+  const wrote = r.inside('mkdir -p "$NUGET_PACKAGES/p" && echo package > "$NUGET_PACKAGES/p/p.nupkg"',
+    {TRIPHAMMER_CACHE_DIR: first});
+  assert.equal(wrote.status, 0, wrote.output);
+  assert.equal(readFileSync(planted, 'utf8'), 'package\n');
+  const other = r.inside(`ls -A '${cachesDir(r)}'; cat '${planted}' 2>/dev/null && echo read
+mkdir -p '${dirname(planted)}' && echo planted > '${planted}'`, {TRIPHAMMER_CACHE_DIR: second});
+  assert.equal(other.output, 'other-project\n', "another project's session sees the first's caches");
+  assert.equal(readFileSync(planted, 'utf8'), 'package\n', "another project's session changed the first's caches");
+  const later = r.inside('cat "$NUGET_PACKAGES/p/p.nupkg"', {TRIPHAMMER_CACHE_DIR: first});
+  assert.equal(later.output, 'package\n');
+});
+
+test('without a cache directory, the caches go to a tmpfs that is gone when the command ends', {skip}, t => {
+  const r = sandboxRig(t);
+  const existing = cacheDir(r, 'example');
+  writeFileSync(join(existing, 'file'), 'cached\n');
+  const browsers = join(r.home, '.cache/ms-playwright');
+  mkdirSync(browsers, {recursive: true});
+  const {status, output} = r.inside(`set -e
+${Object.keys(cacheVars).map(name => `echo ${name} > "$${name}/file" && cat "$${name}/file"`).join('\n')}
+ls -A '${cachesDir(r)}'
+echo "$PLAYWRIGHT_BROWSERS_PATH"`);
+  assert.equal(status, 0, output);
+  assert.equal(output, `${Object.keys(cacheVars).join('\n')}\nbuildx\nnpm\nnuget\nxdg\n${realpathSync(browsers)}\n`);
+  assert.deepEqual(readdirSync(cachesDir(r)), ['example']);
+  assert.deepEqual(readdirSync(existing), ['file']);
+});
+
+test('a cache directory elsewhere than directly in the shared caches directory runs nothing', {skip}, t => {
+  const r = sandboxRig(t);
+  const caches = cachesDir(r);
+  mkdirSync(join(caches, 'example/nested'), {recursive: true});
+  mkdirSync(join(r.home, '.cache'), {recursive: true});
+  symlinkSync(join(r.home, '.cache'), join(caches, 'linked'));
+  for (const dir of [join(r.home, '.cache'), caches, join(caches, 'example/nested'), join(caches, 'missing'),
+    join(caches, 'linked')]) {
+    const {status, output} = r.inside('echo ran', {TRIPHAMMER_CACHE_DIR: dir});
+    assert.equal(status, 1, `${dir}: ${output}`);
+    assert.doesNotMatch(output, /ran/);
+    assert.match(output, /must be a directory of/);
+  }
+});
+
+test("with dotnet installed and no NuGet user config, the session gets a read-only one with NuGet's default source, and none outside", {skip}, t => {
+  const r = sandboxRig(t);
+  const config = join(r.home, '.nuget/NuGet/NuGet.Config');
+  rmSync(config);
+  const bin = join(r.root, 'bin');
+  mkdirSync(bin);
+  fakeAnswers(bin, 'dotnet', join(r.root, 'dotnet'), {});
+  const extra = {PATH: `${bin}${delimiter}${gitEnv.PATH}`};
+  const {output} = r.inside(`cat '${config}'; echo planted > '${config}'`, extra);
+  assert.match(output, /<add key="nuget.org" value="https:\/\/api.nuget.org\/v3\/index.json" protocolVersion="3" \/>/);
+  assert.match(output, /Read-only file system/);
+  assert.ok(!existsSync(config), 'NuGet.Config was created outside');
+  assertReadOnly(r, [join(r.home, '.nuget/NuGet/nuget.config'), join(r.home, '.nuget/config')], extra);
 });
 
 test('a Codex directory without a config.toml gets an empty read-only one under the limit, and none outside', {skip}, t => {
@@ -296,32 +380,19 @@ test('a Codex directory without a config.toml gets an empty read-only one under 
   assert.ok(!existsSync(config), 'config.toml was created outside');
 });
 
-test("under the limit, buildx's state in Docker's config directory is writable and the rest of it read-only", {skip}, t => {
-  const r = sandboxRig(t);
-  const docker = join(r.home, '.docker');
-  mkdirSync(join(docker, 'cli-plugins'), {recursive: true});
-  writeFileSync(join(docker, 'config.json'), '{}\n');
-  const {status, output} = r.inside(`mkdir -p '${docker}/buildx/refs' && echo ref > '${docker}/buildx/refs/r' && : > '${docker}/buildx/.lock'`);
-  assert.equal(status, 0, output);
-  assert.equal(readFileSync(join(docker, 'buildx/refs/r'), 'utf8'), 'ref\n');
-  assertReadOnly(r, [join(docker, 'config.json'), join(docker, 'cli-plugins/docker-planted'), join(docker, 'contexts')]);
-  const config = join(r.root, 'docker-config');
-  mkdirSync(config);
-  const {status: elsewhere, output: why} = r.inside(`echo built > '${config}/buildx/current'`, {DOCKER_CONFIG: config});
-  assert.equal(elsewhere, 0, why);
-  assertReadOnly(r, [join(config, 'config.json')], {DOCKER_CONFIG: config});
-});
-
-test('with docker installed and no Docker config directory, it gets one with buildx writable and no config.json can be planted', {skip}, t => {
+test('with docker installed and no Docker config directory, it gets none and no config.json can be planted', {skip}, t => {
   const r = sandboxRig(t);
   const bin = join(r.root, 'bin');
   mkdirSync(bin);
   fakeDocker(join(r.root, 'docker'), bin);
   const path = {PATH: `${bin}${delimiter}${gitEnv.PATH}`};
-  const docker = join(r.home, '.docker');
-  const {status, output} = r.inside(`echo built > '${docker}/buildx/current'`, path);
+  const {status, output} = r.inside('true', path);
   assert.equal(status, 0, output);
-  assertReadOnly(r, [join(docker, 'config.json')], path);
+  const docker = join(r.home, '.docker');
+  assert.ok(!existsSync(docker), '.docker was created');
+  const planted = r.inside(`mkdir -p '${docker}' && echo '{}' > '${docker}/config.json'`, path);
+  assert.notEqual(planted.status, 0, planted.output);
+  assert.match(planted.output, /Read-only file system/);
 });
 
 test("under the limit, the dotnet CLI's state is writable for the session alone and the SDK beside it read-only", {skip}, t => {

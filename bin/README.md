@@ -217,6 +217,7 @@ share the shared directory, `$TRIPHAMMER_SHARED_DIR` or else `${XDG_STATE_HOME:-
 | `last` | The project whose run started last. |
 | `waiting/<project>` | The time a tick of that project last had a run to start; removed when it starts one or has nothing to do. |
 | `tokens/<project>/token.json` | The GitHub token of the project's running session, which the runner writes and removes (Sessions, The session's GitHub token). Every session's write limit hides `tokens`, so no other project's session reads it. |
+| `caches/<project>` | The project's caches, which its sessions, dry runs and teardowns fill and later ones read: XDG, npm, NuGet and buildx (The write limit). The runner creates it; nothing removes it. Every session's write limit hides `caches` but for its own project's directory. |
 | `guard-overrides.log` | One JSON line per `# guard-override:` the plugin's `agent-guard.py` honors (`time`, `session`, `rule`, `reason`, `command`), from any session on the machine. The override lifts only the shell-edit rule; upkeep reads the log. The hook creates the directory and the file when missing; a session cannot write the log itself. |
 
 Projects take turns when the slots run out: a tick that took the last free slot yields when its project is the one in
@@ -320,11 +321,21 @@ Every session runs under an OS-level write limit, below the guard hook: `ticket-
   `tasks`, `file-history`, `statsig`, `plans`, `paste-cache`, `image-cache`, `telemetry`, `plugins/data` (where plugin
   hooks keep their data) and the login `.credentials.json`, which Claude Code refreshes in place. The rest of
   `~/.claude` is read-only (Claude Code's and Codex's directories, below);
-- the caches commands fill: `~/.cache`, `~/.npm`, `~/.nuget` and NuGet's `~/.local/share/NuGet` (or
-  `$XDG_DATA_HOME/NuGet`), where `dotnet restore` keeps its HTTP, v3 and plugins caches, and `$NUGET_PACKAGES`,
-  `$NUGET_HTTP_CACHE_PATH` and `$NUGET_PLUGINS_CACHE_PATH` when they are set; `session-sandbox` creates each of these
-  NuGet directories when it is missing. NuGet's user configs in `~/.nuget`, `NuGet/NuGet.Config` and `config`, stay
-  read-only, as they can point later restores at other package sources;
+- the project's cache directory, `caches/<project>` in the shared directory, which `ticket-runner` creates and names
+  in `TRIPHAMMER_CACHE_DIR` for the dry run, the session and the teardown alike. Inside, the caches commands fill go
+  there, over any value these variables had outside: `XDG_CACHE_HOME` names its `xdg` (Claude Code's, pip's and most
+  other tools' caches), `npm_config_cache` its `npm` (`NPM_CONFIG_CACHE` is unset), `NUGET_PACKAGES`,
+  `NUGET_HTTP_CACHE_PATH` and `NUGET_PLUGINS_CACHE_PATH` its `nuget/packages`, `nuget/http-cache` and
+  `nuget/plugins-cache`, and `BUILDX_CONFIG` its `buildx`, where `docker build` and `docker compose build` keep their
+  builder state. `PLAYWRIGHT_BROWSERS_PATH` names the browsers `provision-project` installed,
+  `${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-~/.cache}/ms-playwright}`, when that directory exists, read-only.
+  `session-sandbox` runs nothing when `TRIPHAMMER_CACHE_DIR` is not a directory directly in `caches`, and without it
+  the caches go to an empty tmpfs that is gone when the command ends. The home directory's own caches, `~/.cache`,
+  `~/.npm`, `~/.nuget`, NuGet's `~/.local/share/NuGet` and `~/.docker/buildx` (or `$DOCKER_CONFIG/buildx`), stay
+  read-only, and so do the rest of the Docker config directory and NuGet's user configs, `NuGet/NuGet.Config` and
+  `config` in `~/.nuget`. NuGet creates its `NuGet.Config` on first use and fails when it cannot, so when dotnet is
+  installed and none exists, `~/.nuget/NuGet` becomes a read-only tmpfs inside holding what it holds and a
+  `NuGet.Config` of NuGet's default content, the nuget.org source alone;
 - the plugin hooks' own files: `text-lint.py`'s humanizer records and `agent-guard.py`'s `guard-overrides.log`;
 - what the upkeep audits write through `local-audit --model codex` (and `security-review --full-area`, which runs
   it): `~/.local/state/local-audit`, where it counts Codex runs, but not its `codex-settings`, which `session-sandbox`
@@ -334,10 +345,6 @@ Every session runs under an OS-level write limit, below the guard hook: `ticket-
   `~/.codex/sqlite`, which `CODEX_SQLITE_HOME` names inside and which is gone when the session ends. Under the limit
   Codex can neither save a project's trust level in `config.toml` nor refresh its models or plugin caches; it carries
   on without them;
-- when docker is installed, buildx's builder state in `~/.docker/buildx` (or `$DOCKER_CONFIG/buildx`), which
-  `docker build` and `docker compose build` write; `session-sandbox` creates it when it is missing. The rest of the
-  Docker config directory, `config.json`, `cli-plugins` and `contexts` among it, configures the `docker` the runner
-  also runs outside the limit, and stays read-only;
 - when dotnet is installed, the dotnet CLI's per-user state for the session alone: `~/.dotnet` (or
   `$DOTNET_CLI_HOME/.dotnet`) and `~/.templateengine` beside it each become a tmpfs that is gone when the session
   ends. The CLI writes its first-use sentinels per SDK version, `toolResolverCache` (for `dotnet tool restore`) and
@@ -345,8 +352,8 @@ Every session runs under an OS-level write limit, below the guard hook: `ticket-
   SDK when it is installed there and is on `PATH`, so what it holds when the session starts stays there read-only
   on top of the tmpfs: the `dotnet` host, `sdk`, `shared`, `host`, `packs`, `templates`, the global tools in `tools`
   and the sentinels, but for the CLI's state directories `toolResolverCache`, `TelemetryStorageService` and
-  `sdk-advertising`, which start empty. Each session therefore restores its local tools' resolution from
-  `~/.nuget/packages` and, after an SDK update nothing outside has run, goes through the CLI's first use again.
+  `sdk-advertising`, which start empty. Each session therefore restores its local tools' resolution from its
+  project's `nuget/packages` and, after an SDK update nothing outside has run, goes through the CLI's first use again.
 
 Claude Code's and Codex's directories each become a tmpfs inside, so nothing a session adds there outlives it. What
 each holds when the session starts is mounted back onto it, read-only but for the runtime parts above, which
@@ -361,10 +368,12 @@ any project's memory.
 
 The GitHub App's credentials are hidden, each under an empty tmpfs mounted over it after the paths above:
 `$GITHUB_APP_CONFIG_DIR` (by default `~/.config/github-app`, with `agents.pem`, `app-id` and `owner`), the token cache
-`${XDG_CACHE_HOME:-~/.cache}/github-app`, which `session-sandbox` creates first so a session cannot create it in the
-writable `~/.cache` and read the tokens minted into it outside, and `tokens` in the shared directory, every session's
-token directory. The directory of the file `TRIPHAMMER_TOKEN_FILE` names, which must lie directly in `tokens`, is
-mounted back read-only; the directory rather than the file, so the runner's rewrite through a rename shows inside.
+`${XDG_CACHE_HOME:-~/.cache}/github-app`, which `session-sandbox` creates first so a session cannot create it and read the
+tokens minted into it outside, and `tokens` in the shared directory, every session's token directory. The directory of
+the file `TRIPHAMMER_TOKEN_FILE` names, which must lie directly in `tokens`, is mounted back read-only; the directory
+rather than the file, so the runner's rewrite through a rename shows inside. Every project's caches, `caches` in the
+shared directory, are hidden the same way, and the session's project's own cache directory is mounted back writable,
+so no session reads or fills another project's caches.
 
 Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
 directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:
@@ -376,12 +385,12 @@ while the runner still sees the session's and its brake stops them. The network 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
 covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
-the machine; a NuGet user config that does not exist when the session starts or is a symlink, which the session can
-create or replace in the writable `~/.nuget`; a part of `~/.claude` or `~/.codex` that is a symlink into a writable
-path, which the session writes through; memory a session writes in another project's directory under
-`~/.claude/projects`, which a Claude Code run outside the limit would load for that project; and what a writable path
-above lets a later session read, such as a cache, a transcript or buildx's builder state, which picks the builder a
-later `docker build` uses.
+the machine; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
+which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
+which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache
+directory, which a later session of the same project reads and runs, such as a package in `nuget/packages` whose
+MSBuild targets a later build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a
+later `docker build` uses; and what another writable path above lets a later session read, such as a transcript.
 
 Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without
 `bwrap` or where `bwrap` cannot create a user namespace, the runner logs why, starts no session and exits 1; `ticket-runner

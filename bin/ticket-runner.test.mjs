@@ -628,8 +628,21 @@ function assertWriteLimit(r, call, run) {
   assert.deepEqual(call.slice(call.indexOf('--ro-bind'), call.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
 }
 
+// Asserts a recorded bwrap call hides every project's caches but makes the fixture project's own cache directory, in
+// the shared directory's caches, writable and points the caches inside at it.
+function assertProjectCaches(r, call) {
+  const caches = realpathSync(join(r.root, 'state/triphammer/caches'));
+  const own = join(caches, 'triphammer');
+  const mounts = call.slice(0, call.indexOf('--')).join(' ');
+  assert.ok(mounts.includes(`--tmpfs ${caches} --bind ${own} ${own}`), mounts);
+  for (const [name, dir] of [['XDG_CACHE_HOME', 'xdg'], ['npm_config_cache', 'npm'], ['NUGET_PACKAGES', 'nuget/packages'],
+    ['BUILDX_CONFIG', 'buildx']]) {
+    assert.ok(mounts.includes(`--setenv ${name} ${join(own, dir)}`), `${name}: ${mounts}`);
+  }
+}
+
 for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['repair', repairSetup, 'pr-40']]) {
-  test(`a ${kind} run's session runs under the write limit, after a dry run of it`, t => {
+  test(`a ${kind} run's session runs under the write limit with the project's caches, after a dry run of it`, t => {
     const r = setup(t);
     r.tick();
     assert.equal(r.ran(), true);
@@ -641,6 +654,7 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     assert.deepEqual(session.slice(session.indexOf('--'), session.indexOf('--') + 3), ['--', 'claude', '-p']);
     assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
     assertWriteLimit(r, session, run);
+    for (const call of [dry, session]) assertProjectCaches(r, call);
     // What the sandbox makes writable, and so creates first, lies in the test's directory, not the machine's HOME.
     const root = realpathSync(r.root);
     const temporary = ['/tmp', realpathSync(tmpdir())];
@@ -1451,7 +1465,7 @@ test("a project's teardown command runs in the run's clone, with its arguments, 
   assert.equal(existsSync(r.worktree), false);
 });
 
-test("a project's teardown command runs under the write limit, with the run's clone as the one checkout it may write", t => {
+test("a project's teardown command runs under the write limit, with the run's clone as the one checkout it may write and the project's caches", t => {
   const r = ticketSetup(t, [issue(7)], {project: project({worktreeTeardown: ['tools/stop.sh', 'now']}), files: {
     'tools/stop.sh': '#!/bin/sh\nexit 0\n',
   }});
@@ -1463,6 +1477,7 @@ test("a project's teardown command runs under the write limit, with the run's cl
   const [call] = teardown;
   assert.deepEqual(call.slice(call.indexOf('--')), ['--', join(r.worktree, 'tools/stop.sh'), 'now']);
   assertWriteLimit(r, call, r.worktree);
+  assertProjectCaches(r, call);
 });
 
 test('a run directory the write limit refuses, a git worktree, runs no teardown and is still removed', t => {

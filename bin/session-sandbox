@@ -14,28 +14,36 @@
 #     directory whose git directory or git common directory lies outside it, as a git worktree's does, runs nothing.
 #     Triphammer's checkout's .git stays read-only too: land-pr fetches main into a temporary repository instead;
 #   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
-#   - what Claude Code writes under the home directory: its runtime parts in ${CLAUDE_CONFIG_DIR:-~/.claude} (below),
-#     its state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
-#     ${XDG_DATA_HOME:-~/.local/share}/NuGet* (http-cache, v3-cache, plugins-cache), and $NUGET_PACKAGES*,
-#     $NUGET_HTTP_CACHE_PATH* and $NUGET_PLUGINS_CACHE_PATH* when they are set;
+#   - what Claude Code writes under the home directory: its runtime parts in ${CLAUDE_CONFIG_DIR:-~/.claude} (below)
+#     and its state in ~/.local/state/claude;
+#   - the project's cache directory, $TRIPHAMMER_CACHE_DIR, which must lie directly in caches in the shared directory
+#     or the command does not run, and which ticket-runner gives each project its own of. Inside, these variables
+#     point the commands' caches at directories in it, over any value they had outside: XDG_CACHE_HOME at xdg*
+#     (Claude Code's, pip's and most other tools' caches), npm_config_cache at npm* (NPM_CONFIG_CACHE is unset),
+#     NUGET_PACKAGES at nuget/packages*, NUGET_HTTP_CACHE_PATH at nuget/http-cache*, NUGET_PLUGINS_CACHE_PATH at
+#     nuget/plugins-cache*, and BUILDX_CONFIG at buildx*, where docker build and docker compose build keep their
+#     builder state. Without TRIPHAMMER_CACHE_DIR the directories are in an empty tmpfs that is gone when the command
+#     ends. PLAYWRIGHT_BROWSERS_PATH names Playwright's browsers in the cache directory outside,
+#     ${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-~/.cache}/ms-playwright}, when it exists, read-only. The home
+#     directory's caches, ~/.cache, ~/.npm, ~/.nuget, NuGet's ${XDG_DATA_HOME:-~/.local/share}/NuGet and buildx's
+#     ${DOCKER_CONFIG:-~/.docker}/buildx, stay read-only;
 #   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
 #     ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer*) and agent-guard.py's guard-overrides.log* in the shared
 #     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone;
 #   - what the upkeep audits write through local-audit --model codex: its run count in
 #     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and Codex's runtime parts in ${CODEX_HOME:-~/.codex} (below);
-#   - when docker is installed or ${DOCKER_CONFIG:-~/.docker} exists, its buildx* directory, where docker build and
-#     docker compose build keep their builder state; the rest of the directory (config.json, cli-plugins, contexts)
-#     configures docker, which the runner also runs outside the limit, and stays read-only, created or not;
 #   - when dotnet is installed or ${DOTNET_CLI_HOME:-~}/.dotnet exists, that .dotnet* and .templateengine* beside it,
 #     each as a tmpfs that the session's writes go to and that is gone when it ends: the CLI writes its per-user state
 #     (first-use sentinels per SDK version, toolResolverCache, telemetry) into .dotnet, which also holds the SDK when
 #     it is installed there and is on PATH, and dotnet new its template cache into .templateengine. In .dotnet the
 #     entries that exist when the command starts stay there read-only (the dotnet host, sdk, shared, host, packs,
 #     templates, the global tools in tools, the sentinels), but for the CLI's state directories toolResolverCache,
-#     TelemetryStorageService and sdk-advertising, which start empty; .templateengine starts empty.
+#     TelemetryStorageService and sdk-advertising, which start empty; .templateengine starts empty. NuGet creates its
+#     user config, ~/.nuget/NuGet/NuGet.Config, on first use and fails when it cannot, so when none exists (in any case
+#     NuGet reads), ~/.nuget/NuGet* becomes a read-only tmpfs holding what it holds and a NuGet.Config of NuGet's
+#     default content, the nuget.org source alone.
 # Inside these directories, the parts that would change later sessions stay read-only: local-audit's codex-settings*,
-# created empty; and NuGet's user configs in ~/.nuget that exist when the command starts, NuGet/NuGet.Config (in any
-# case NuGet reads) and config, which can point later restores at other package sources.
+# created empty.
 #
 # Claude Code's and Codex's directories, each when it exists, are a tmpfs inside, so what the command adds there is
 # gone when it ends. What each holds when the command starts is mounted back onto it, read-only but for the runtime
@@ -54,8 +62,9 @@
 #
 # Hidden inside, each under an empty tmpfs mounted after everything above: the GitHub App's files,
 # ${GITHUB_APP_CONFIG_DIR:-~/.config/github-app} (agents.pem, app-id, owner); its token cache,
-# ${XDG_CACHE_HOME:-~/.cache}/github-app*, created first so the command cannot create it in the writable ~/.cache and
-# read the tokens minted into it outside; and tokens* in the shared directory, every session's token directory. A
+# ${XDG_CACHE_HOME:-~/.cache}/github-app*, created first so the command cannot create it and read the tokens minted into
+# it outside; tokens* in the shared directory, every session's token directory; and caches* in the shared directory,
+# every project's cache directory, of which the project's own is mounted back writable after it. A
 # session's GitHub token comes from the file $TRIPHAMMER_TOKEN_FILE names, which ticket-runner writes and rewrites
 # outside the limit (bin/README.md, The session's GitHub token): its directory, which must lie directly in that tokens
 # directory or the command does not run, is mounted back read-only, the directory rather than the file so a rewrite
@@ -67,16 +76,18 @@
 # network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
 # when the command exits.
 #
-# Not covered: a NuGet user config that does not exist when the command starts or is a symlink (the session may create
-# or replace it in the writable ~/.nuget); a part of Claude Code's or Codex's directory that is a symlink into a
-# writable path, which the command writes through; memory written under another project's directory in projects, which
-# a Claude Code run outside the limit would load for that project; anything a writable path above lets a later session
-# read (a cache, a transcript, local-audit's run count, or buildx's builder state, which picks the builder a later
-# docker build uses); and the Docker socket, or any other socket of a service outside, which the command can still
-# reach: a container started through Docker can write anywhere on the machine.
+# Not covered: a NuGet user config, or a part of Claude Code's or Codex's directory, that is a symlink into a writable
+# path, which the command writes through; memory written under another project's directory in projects, which a Claude
+# Code run outside the limit would load for that project; what the command writes to its project's cache directory,
+# which a later session of the same project reads and runs (a package in nuget/packages whose MSBuild targets a later
+# build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a later docker build
+# uses); anything else a writable path above lets a later session read (a transcript, local-audit's run count); and
+# the Docker socket, or any other socket of a service outside, which the command can still reach: a container started
+# through Docker can write anywhere on the machine.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
-# lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory, or bwrap fails.
+# lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory,
+# TRIPHAMMER_CACHE_DIR is no directory of the caches directory, or bwrap fails.
 set -euo pipefail
 
 fail() { echo "session-sandbox: $1" >&2; exit "${2:-1}"; }
@@ -109,9 +120,19 @@ if [ -n "${TRIPHAMMER_TOKEN_FILE:-}" ]; then
     && [ "$(dirname -- "$(readlink -f -- "$token_dir")")" = "$(readlink -f -- "$tokens")" ]; } \
     || fail "TRIPHAMMER_TOKEN_FILE ($TRIPHAMMER_TOKEN_FILE) must lie in a directory of $tokens"
 fi
+# The project's cache directory, which ticket-runner owns: a directory directly in the shared caches directory.
+caches="$shared/caches"
+cache_dir=''
+if [ -n "${TRIPHAMMER_CACHE_DIR:-}" ]; then
+  { [ -d "$TRIPHAMMER_CACHE_DIR" ] && [ -d "$caches" ] \
+    && [ "$(dirname -- "$(readlink -f -- "$TRIPHAMMER_CACHE_DIR")")" = "$(readlink -f -- "$caches")" ]; } \
+    || fail "TRIPHAMMER_CACHE_DIR ($TRIPHAMMER_CACHE_DIR) must be a directory of $caches"
+  cache_dir="$(readlink -f -- "$TRIPHAMMER_CACHE_DIR")"
+fi
+# Each variable that points a command's cache into the cache directory inside, and its directory there.
+cache_vars=(XDG_CACHE_HOME npm_config_cache NUGET_PACKAGES NUGET_HTTP_CACHE_PATH NUGET_PLUGINS_CACHE_PATH BUILDX_CONFIG)
+cache_subdirs=(xdg npm nuget/packages nuget/http-cache nuget/plugins-cache buildx)
 codex="${CODEX_HOME:-$HOME/.codex}"
-nuget=("${XDG_DATA_HOME:-$HOME/.local/share}/NuGet" ${NUGET_PACKAGES:+"$NUGET_PACKAGES"}
-  ${NUGET_HTTP_CACHE_PATH:+"$NUGET_HTTP_CACHE_PATH"} ${NUGET_PLUGINS_CACHE_PATH:+"$NUGET_PLUGINS_CACHE_PATH"})
 # Claude Code's and Codex's runtime directories, created first and writable inside, and what the next session loads
 # from their directories, covered when missing (a name ending in / is a directory).
 claude_runtime=(projects sessions session-env shell-snapshots debug todos tasks file-history statsig plans paste-cache
@@ -122,11 +143,11 @@ claude_loaded=(CLAUDE.md settings.json settings.local.json agents/ commands/ ski
 codex_loaded=(config.toml AGENTS.md AGENTS.override.md .env hooks.json agents/ rules/ prompts/ skills/ plugins/ themes/)
 # Claude Code's auto memory for the run directory, kept empty and read-only.
 memory="$claude/projects/${run_dir//[^a-zA-Z0-9]/-}/memory"
-mkdir -p -- "$HOME/.cache" "${nuget[@]}"
+[ -z "$cache_dir" ] || (umask 077 && mkdir -p -- "${cache_subdirs[@]/#/$cache_dir/}")
 [ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
 [ ! -d "$claude" ] || (umask 077 && mkdir -p -- "${claude_runtime[@]/#/$claude/}" "$memory")
 [ ! -d "$codex" ] || (umask 077 && mkdir -p -- "${codex_runtime[@]/#/$codex/}")
-(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" "$token_cache" "$tokens" && : >> "$overrides" \
+(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" "$token_cache" "$tokens" "$caches" && : >> "$overrides" \
   && : >> "$state/local-audit/codex-settings")
 
 args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc
@@ -181,10 +202,8 @@ cover() {
   done
 }
 bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
-  "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "${nuget[@]}" "$humanizer" "$overrides" \
-  "$state/local-audit"
-bind --ro-bind "$state/local-audit/codex-settings" \
-  "$HOME/.nuget/NuGet"/[Nn]u[Gg]et.[Cc]onfig "$HOME/.nuget/config"
+  "$state/claude" "$humanizer" "$overrides" "$state/local-audit"
+bind --ro-bind "$state/local-audit/codex-settings"
 if [ -d "$claude" ]; then
   private "$claude" "${claude_runtime[@]}" .credentials.json
   cover "$claude" "${claude_loaded[@]}"
@@ -199,11 +218,6 @@ if [ -d "$codex" ]; then
   sqlite="$(readlink -f -- "$codex")/sqlite"
   args+=(--tmpfs "$sqlite" --setenv CODEX_SQLITE_HOME "$sqlite")
 fi
-docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
-if [ -d "$docker_config" ] || command -v docker >/dev/null 2>&1; then
-  (umask 077 && mkdir -p -- "$docker_config/buildx")
-  bind --bind "$docker_config/buildx"
-fi
 # .dotnet and .templateengine as tmpfs, what .dotnet holds read-only on top of it but for the CLI's state directories.
 dotnet_home="${DOTNET_CLI_HOME:-$HOME}/.dotnet"
 if [ -d "$dotnet_home" ] || command -v dotnet >/dev/null 2>&1; then
@@ -216,13 +230,39 @@ if [ -d "$dotnet_home" ] || command -v dotnet >/dev/null 2>&1; then
     case "${path##*/}" in toolResolverCache | TelemetryStorageService | sdk-advertising) continue ;; esac
     args+=(--ro-bind "$path" "$path")
   done
+  # NuGet creates its user config on first use and fails when it cannot, so a missing one gets a read-only stand-in
+  # with NuGet's default content, in a read-only tmpfs over ~/.nuget/NuGet holding what the directory holds.
+  nuget_user="$HOME/.nuget/NuGet"
+  if ! compgen -G "$nuget_user/[Nn]u[Gg]et.[Cc]onfig" >/dev/null; then
+    (umask 077 && mkdir -p -- "$nuget_user")
+    private "$nuget_user"
+    exec {fd}< <(printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<configuration>' '  <packageSources>' \
+      '    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />' \
+      '  </packageSources>' '</configuration>')
+    nuget_user="$(readlink -f -- "$nuget_user")"
+    args+=(--ro-bind-data "$fd" "$nuget_user/NuGet.Config" --remount-ro "$nuget_user")
+  fi
 fi
-# Last, so they win over every mount above: an empty tmpfs over the App's files and its token cache, and over every
-# session's token directory, then this session's own back, read-only. The directory, not the file, so the rename that
-# rewrites the file outside shows inside.
-for path in "$app_files" "$token_cache" "$tokens"; do
+# The cache variables win over any value they had outside, and npm reads its setting in either case, so
+# NPM_CONFIG_CACHE goes. Playwright's browsers, in the cache directory outside, are read there still.
+browsers="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/ms-playwright}"
+[ ! -d "$browsers" ] || args+=(--setenv PLAYWRIGHT_BROWSERS_PATH "$(readlink -f -- "$browsers")")
+[ -n "$cache_dir" ] || cache_dir="$(readlink -f -- "$caches")"
+for i in "${!cache_vars[@]}"; do args+=(--setenv "${cache_vars[$i]}" "$cache_dir/${cache_subdirs[$i]}"); done
+args+=(--unsetenv NPM_CONFIG_CACHE)
+# Last, so they win over every mount above: an empty tmpfs over the App's files and its token cache, over every
+# session's token directory and over every project's caches; then the project's cache directory back, writable, or
+# without one the caches' directories in that empty tmpfs, gone when the command ends; and last this session's own
+# token directory back, read-only (the directory, not the file, so the rename that rewrites the file outside shows
+# inside).
+for path in "$app_files" "$token_cache" "$tokens" "$caches"; do
   if [ -e "$path" ]; then args+=(--tmpfs "$(readlink -f -- "$path")"); fi
 done
+if [ -n "${TRIPHAMMER_CACHE_DIR:-}" ]; then
+  bind --bind "$cache_dir"
+else
+  for name in "${cache_subdirs[@]}"; do args+=(--dir "$cache_dir/$name"); done
+fi
 [ -z "$token_dir" ] || bind --ro-bind "$token_dir"
 
 exec bwrap "${args[@]}" -- "$@"
