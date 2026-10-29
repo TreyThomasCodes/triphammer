@@ -30,8 +30,8 @@ When they differ:
 | --- | --- |
 | Triphammer's scripts in `bin/`, `systemd/` and `status/`, kept on its `origin/main` every tick | `.triphammer/project.json`, read from `CHECKOUT` (and by `local-audit` from the audited commit) |
 | the plugin `plugins/triphammer`, which every session and the Qwen audit load, and the Codex audit's reviewer brief | `.triphammer/risk-tier.json` at the pull request's base ref, the rules the classifier applies |
-| the git hooks `scripts/git-hooks`, which every worktree's commits run | its own checks, the commands its project file names |
-| `land-pr`, `scripts/land-pr.sh` and the classifier (`scripts/risk-tier-base.sh`, `scripts/risk-tier.mjs`), always its `origin/main` copies | the worktrees, branches and pull requests the sessions work on |
+| the git hooks `scripts/git-hooks`, which every run clone's commits run | its own checks, the commands its project file names |
+| `land-pr`, `scripts/land-pr.sh` and the classifier (`scripts/risk-tier-base.sh`, `scripts/risk-tier.mjs`), always its `origin/main` copies | the run clones, branches and pull requests the sessions work on |
 
 So a project needs only `.triphammer/` and its own checks: no `plugins/`, `scripts/git-hooks/`, `scripts/land-pr.sh`
 or classifier of its own. This repository's CI is the exception: its workflows run this repository's
@@ -41,21 +41,21 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 
 | File | What it does |
 | --- | --- |
-| `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the worktrees and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share the session slots (`max-sessions`, by default one), a backoff and a stop file, and take turns when the slots run out (see Several projects). |
+| `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the run clones and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share the session slots (`max-sessions`, by default one), a backoff and a stop file, and take turns when the slots run out (see Several projects). |
 | `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers, `update` runs a fresh clone's `provision` and each project's `provision-project` again for what the runner does not update by itself; see On a machine of its own below. |
 | `provision` | Run as root (by `install.sh`, through sudo) on a fresh Ubuntu server, turns it into a machine of Triphammer's own with no project yet: the shared toolchain, the service user, Triphammer's checkout, the links, the plugin, the machine file and the `triphammer` command; see On a machine of its own below. |
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
-| `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory, its git common directory, the temporary directories and what Claude Code writes in the home directory; `ticket-runner` starts every session through it. See Sessions, The write limit. |
+| `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory (the run's clone, with its own `.git`), the temporary directories and what Claude Code writes in the home directory; `ticket-runner` starts every session through it. See Sessions, The write limit. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
 | `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. When the updated checkout's files differ from its commit, it creates the shared `stop` file and restarts nothing. `ticket-runner` calls it; see below. |
 | `demo-gallery` | The `demo` module's web server: serves `DEMO_GALLERY_DIR` read-only at `http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/` until stopped. GET and HEAD only (anything else gets 405); a directory serves its `index.html` and is never listed; a path that leaves the gallery, by `..` or by a symlink whose target lies outside it, and anything but a regular file get 404. With the module off, `DEMO_GALLERY_DIR` missing or the config malformed it exits 2 naming why. `DEMO_URL` is the address the owner publishes, which may be this server itself or a proxy in front of it. |
 | `demo-publish` | The `demo` module. `demo-publish <pr> --summary <line> <folder>` publishes the screenshots and videos under one folder to the gallery in the config's `DEMO_GALLERY_DIR` and prints its `DEMO_URL`, and `demo-publish --reindex` refreshes pull request states, which `ticket-runner` does every tick; with the module off, or either setting missing, it exits 2 naming it. Any other form prints the usage and exits nonzero. It never follows a symlink inside the folder and refuses a folder argument that is itself a symlink (a symlinked parent directory in the argument's path is followed), never copies a file with more than one hard link (another name may lie outside the folder) and never copies a file whose real path is outside the folder; it names each one it skips. When no media survives these checks, or a file cannot be copied or converted, it exits nonzero with one line on stderr and leaves the pull request's earlier demo in place: it builds the new entry in a hidden folder in the gallery and swaps it in only once every file and `meta.json` are written. |
-| `publish-demos` | The `demo` module. Runs `demo-publish` for each demo a session left in its worktree; `ticket-runner` calls it when a session ends. See below. |
+| `publish-demos` | The `demo` module. Runs `demo-publish` for each demo a session left in its clone; `ticket-runner` calls it when a session ends. See below. |
 | `local-audit` | The `qwen-audit` and `codex` modules. Audits one area with Triphammer's local Qwen model or with Codex, the second and third models of the weekly upkeep audit; see below. |
 | `security-review` | The `codex` module. Security review by the config's `CODEX_SECURITY_MODEL` (through `local-audit`) of an open pull request that touches Triphammer's safety machinery, posted as one pull request comment; `ticket-runner` calls it after each session, and a head whose review found something gets a repair session that follows the findings up. `--full-area` audits the whole area for the monthly upkeep run. See below. |
-| `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the worktree whose HEAD is its pushed head, fetches `main` from the origin of Triphammer's checkout (the one `land-pr` resolves to through its link) into a temporary bare repository under `$TMPDIR`, which it removes when it ends, never into the checkout itself, and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the temporary repository, so `land-pr.sh` runs Triphammer `main`'s classifier against the worktree's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
+| `land-pr` | Lands a pull request (the `triphammer:merge-policy` skill): `land-pr <n>`, from the run's clone whose HEAD is its pushed head, fetches `main` from the origin of Triphammer's checkout (the one `land-pr` resolves to through its link) into a temporary bare repository under `$TMPDIR`, which it removes when it ends, never into the checkout itself, and runs that `main`'s `scripts/land-pr.sh`, never a working tree's, with `TRIPHAMMER_CHECKOUT` naming the temporary repository, so `land-pr.sh` runs Triphammer `main`'s classifier against the clone's branch and its base ref's `.triphammer/risk-tier.json`. It refuses, running nothing, unless it is itself byte for byte that `main`'s `bin/land-pr`, so a branch's copy cannot land anything; until Triphammer's checkout is fast-forwarded after a change to it, the linked copy refuses too. Exits with `land-pr.sh`'s code, or 1 when it refuses. |
 | `merge-when-ready` | A serial merge queue per repository, as the GitHub App (the `triphammer:merge-policy` skill), that merges armed pull requests and brings them up to date one at a time, stops for the owner's brakes and keeps off the branches a `ticket-runner` run works on. With a project (`TRIPHAMMER_PROJECT`) it serves only that project's repository, reads that project's runner and starts it after a merge. Its header lists the rules. |
 | `github-app-token` | Prints a token of the agents' GitHub App's installation on the account that owns the repository being worked on, cached per account in `${XDG_CACHE_HOME:-~/.cache}/github-app/token-<account>.json` (mode 600) and minted again within ten minutes of expiry; `github-app-token git-credential get` answers git's credential-helper protocol, and `store`, `erase` and any other action do nothing. It reads `app-id`, `owner` and `agents.pem` from `$GITHUB_APP_CONFIG_DIR`, by default `~/.config/github-app`. The account is the first segment of the path git asks about for github.com (sent with `credential.https://github.com.useHttpPath`), else `$GITHUB_APP_OWNER`, which `ticket-runner` and `merge-when-ready` set to the owner of their config's `REPO`, else the `owner` file; an account with no installation stops it naming the account. A missing or unreadable file, a failed request or a response without a token stops it with exit 1, a message naming the fix, no token printed and the cache unchanged; a cache it cannot parse counts as expired. `github-app-token app-slug` prints the App's slug (`GET /app`, from `app-id` and `agents.pem` alone), which `provision-project` uses for `APP_AUTHOR`. Its header lists the rules. |
 | `gh` | Runs the first other `gh` on `PATH` with `GH_TOKEN` from the `github-app-token` beside it (symlinks resolved), for the account of its `-R`/`--repo` argument when it has one; when no token can be had it runs nothing and exits 1. |
@@ -169,7 +169,7 @@ MODULES in <file>`, `<file>: the qwen-audit module needs QWEN_MODEL`); for a `co
 `triphammer update writes its default`.
 
 **The project file** `.triphammer/project.json` holds the project's own data. Each script reads it from the project's
-main checkout (`CHECKOUT`, or the `--repo` given to `security-review`), never from a run's worktree, except `local-audit`,
+main checkout (`CHECKOUT`, or the `--repo` given to `security-review`), never from a run's clone, except `local-audit`,
 which reads `checks`, `reviewChecklist` and `reviewSkills` from the commit it audits, where the reviewer reads them too.
 It is also the project contract of the Triphammer plugin's skills, agents and hooks (`plugins/triphammer`: the skills
 `triphammer:ticket-run`, `triphammer:review-loop`, `triphammer:merge-policy`, `triphammer:plan-work`,
@@ -182,7 +182,7 @@ project that leaves out a field gets none of its step, and the runner logs nothi
 | --- | --- | --- |
 | `name` | the Triphammer config's file name | `example-project` |
 | `demos` | the `triphammer:ticket-run` skill: `true` when the project has paced demo walkthroughs for the `demo` module to publish | `true` |
-| `worktreeTeardown` | `ticket-runner`: the command run in a worktree before it is removed, a list of words whose first is a path relative to the worktree | `["scripts/local-db.sh", "down"]` |
+| `worktreeTeardown` | `ticket-runner`: the command run in a run's clone before it is removed, a list of words whose first is a path relative to the clone | `["scripts/local-db.sh", "down"]` |
 | `shellEditRoots` | the plugin's `agent-guard.py` hook, which reads it from the working tree of the repository a command runs in: the directories whose git-tracked files a shell command may not rewrite (they go through Edit or Write), a list of paths relative to the repository root and inside it; without it the hook has no shell-edit rule | `["src", "tests"]` |
 | `composeProjectPattern` | `ticket-runner`: the Docker Compose project names the sweep may prune, an extended regular expression | `^example-project-(local\|it)-[0-9]+$` |
 | `securityReviewPaths` | `security-review --pr`: the changed paths that trigger a review, an extended regular expression | `bin/`, `status/` and the other paths under Security review |
@@ -224,7 +224,7 @@ project can take that one, so no project yields. An older mark, from a project t
 so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes nothing.
 
 Sessions of several projects running at once share the machine's Docker. Each tick's database sweep prunes the Compose
-projects its `composeProjectPattern` matches whose worktree is gone, so when two projects' patterns can match the same
+projects its `composeProjectPattern` matches whose run directory is gone, so when two projects' patterns can match the same
 Compose project name, one project's sweep could prune the other's containers while both run; `triphammer doctor`
 warns about such a pair.
 
@@ -234,23 +234,34 @@ branches its own runner's `current` file names, and after a merge starts `ticket
 
 ## Sessions
 
-Each worktree `ticket-runner` creates has `core.hooksPath` set to Triphammer's checkout's `scripts/git-hooks` (an
-absolute path) in that worktree's own config (`extensions.worktreeConfig`), so the main checkout and other worktrees
-keep their hooks. Triphammer's checkout tracks `origin/main`, so a branch cut before a hook existed, or a project with
-no hooks of its own, still runs it and a branch cannot change its own hook. Its `commit-msg` hook adds
-the agents' `Co-Authored-By` trailer to a commit that lacks one.
+Each run works in a clone of its own, `<checkout>/.worktrees/issue-N` for a ticket and `<checkout>/.worktrees/pr-N`
+for a repair, which `ticket-runner` makes anew for every run: `git clone --no-local --reference <checkout>` of the main
+checkout's origin URL, then `ticket/N` reset to `origin/main`, or the pull request's branch from `origin`. The clone has
+its own `.git`, where its commits and refs go, and reads the main checkout's objects through an alternate
+(`.git/objects/info/alternates`), so it is quick to make and small; `--no-local` keeps git from hardlinking an object
+of an origin that is a local path, whose overwrite would change the origin's copy. It fetches and pushes as the main
+checkout does: the same origin URL, and git's GitHub credential helper from the service user's global config. No run
+uses a clone an earlier run left, and the runner runs no git command in a clone once its session has started and
+deletes it with `rm -rf`, so neither the main checkout's `git gc` pruning an object only a clone left behind still
+names, nor a config the session wrote into its clone, reaches a git command the runner runs. The project's
+`worktreeTeardown` is the one command the runner runs in a clone after its session, outside the limit.
 
-Sessions run under the Triphammer plugin of Triphammer's checkout, never the worktree's copy, so a branch cannot change
+The clone has `core.hooksPath` set to Triphammer's checkout's `scripts/git-hooks` (an absolute path) in its own config,
+so the main checkout keeps its hooks. Triphammer's checkout tracks `origin/main`, so a branch cut before a hook existed,
+or a project with no hooks of its own, still runs it and a branch cannot change its own hook. Its `commit-msg` hook
+adds the agents' `Co-Authored-By` trailer to a commit that lacks one.
+
+Sessions run under the Triphammer plugin of Triphammer's checkout, never the run clone's copy, so a branch cannot change
 the skills, agents or hooks its own session runs under: `ticket-runner` starts `claude -p` with `--plugin-dir
 <Triphammer's checkout>/plugins/triphammer --agent triphammer:orchestrator --model opus`, the plugin's `orchestrator` agent
 (`plugins/triphammer/agents/orchestrator.md`, without Edit, Write or NotebookEdit) on Opus. Claude Code names the
 plugin's agents and skills with its prefix, and the orchestrator starts subagents by those names
 (`triphammer:builder`); a bare `--agent orchestrator` would pick a project's own `.claude/agents/orchestrator.md` over
 the plugin's. The plugin's hooks run in the session and its subagents. The runner starts the session with
-`TRIPHAMMER_SESSION` set to the run's worktree (`local-audit` sets it to its clone for the Qwen audit), which tells
-the plugin's `agent-guard.py` that Triphammer started it: such a session writes only inside that worktree (not its `.git`)
+`TRIPHAMMER_SESSION` set to the run's clone (`local-audit` sets it to its own clone for the Qwen audit), which tells
+the plugin's `agent-guard.py` that Triphammer started it: such a session writes only inside that clone (not its `.git`)
 and the temporary directories, writes no git configuration (`git config` and `git remote` only read, and an upstream is
-set only for its own branch in its worktree), sets no one-command `git -c` key that makes git run a command or changes
+set only for its own branch in its clone), sets no one-command `git -c` key that makes git run a command or changes
 what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`. A `# guard-override:`
 token lifts none of these, only the shell-edit rule, and the hook logs each override it honors to `guard-overrides.log`
 in the shared directory; the hook's header lists what it checks and what it does not cover. Below the hook, the
@@ -272,15 +283,15 @@ does not count, so the next run is the same run again with the same builder. Rep
 ### The write limit
 
 Every session runs under an OS-level write limit, below the guard hook: `ticket-runner` starts `claude -p` through
-`session-sandbox <worktree>`, which runs it under bubblewrap (`bwrap`) with the whole file system mounted read-only
+`session-sandbox <run's clone>`, which runs it under bubblewrap (`bwrap`) with the whole file system mounted read-only
 and only these paths writable:
 
-- the run's worktree;
-- the main checkout's `.git` (the worktree's git common directory), where a worktree writes its commits, refs and
-  `worktrees/<name>`. It stays writable until each run gets a clone of its own (#93), and until then a session can
-  still reach the next tick's git commands through it: a config there (`core.fsmonitor`, `core.hooksPath`) or a hook
-  runs when the runner, outside the limit, next runs git in the main checkout. Triphammer's checkout's `.git`, unless it
-  is the main checkout's, stays read-only: `land-pr` fetches `main` into a temporary repository instead;
+- the run's clone, with its own `.git`, where its commits and refs go. The main checkout's `.git` is read-only to the
+  session, the objects the clone reads through its alternate included, so no config (`core.fsmonitor`,
+  `core.hooksPath`), hook or object a session writes reaches the git commands the runner, outside the limit, runs in
+  the main checkout. `session-sandbox` runs nothing in a directory whose git directory lies outside it, as a git
+  worktree's does. Triphammer's checkout's `.git` stays read-only too: `land-pr` fetches `main` into a temporary
+  repository instead;
 - `/tmp`, and `$TMPDIR` when it is set, where the proposals file lives;
 - what Claude Code writes in the home directory: `~/.claude` (or `$CLAUDE_CONFIG_DIR`) and `~/.local/state/claude`, but
   not the parts that would change later sessions, `settings*.json`, `CLAUDE.md`, `agents`, `commands`, `skills`,
@@ -354,7 +365,7 @@ The status page does not read the records yet.
 ### Cleanup proposals
 
 A session does not open issues itself. Before it starts, `ticket-runner` creates a directory of the run's own with
-`mktemp -d` (under `$TMPDIR`, outside the worktree, so nothing commits it) and an empty `proposals.jsonl` in it, and
+`mktemp -d` (under `$TMPDIR`, outside the run's clone, so nothing commits it) and an empty `proposals.jsonl` in it, and
 gives the session its path as `TRIPHAMMER_PROPOSALS`. `agent-guard.py` works out a write target that starts with
 `$TRIPHAMMER_PROPOSALS` and lets a session append to it, since it lies in a temporary directory. The simplifier
 appends one proposal for a mechanism it finds a third copy of, and the review loop one for a harness gap; the
@@ -381,7 +392,7 @@ issues. A missing file, or one holding only blank lines, files nothing. A file t
 made one line), a failed listing (then nothing is filed) and a failed filing are logged and never change how the run
 ends. The EXIT trap removes the directory on every ending.
 
-With the `demo` module on, when a session ends, on every path but a brake (below), before the worktree can be removed,
+With the `demo` module on, when a session ends, on every path but a brake (below), before the run's clone can be removed,
 `ticket-runner` runs `publish-demos` on it.
 The `demo` agent leaves a `demo.json` in each demo folder under `artifacts/web-demo/results/` (ignored by git), in the
 format of `.agents/agents/demo.md` step 3.
@@ -409,35 +420,38 @@ command in a session of its own, so the runner finds the session's processes by 
 and walks them again each second, which also catches the ones a dying parent leaves behind; a process forked by a parent
 that exits between two walks, outside every process group it knows (a double fork), escapes it. It logs
 `ended by the owner's brake: <brake>; not counted`, does not count the run toward the three, publishes no demo, starts
-no security review, keeps the worktree, and removes `agent-working` and `current` as on every other ending. A brake
+no security review, keeps the run's clone, and removes `agent-working` and `current` as on every other ending. A brake
 lookup that fails (`gh` exits non-zero), or a `needs-owner` label with no event for it or a closer GitHub does not
 report yet, is logged and the session goes on.
 
-## Worktrees and databases nothing uses
+## Run clones and databases nothing uses
 
-A worktree's sessions can leave resources behind, such as a database compose project per worktree that the project's
-scripts start (in the example project, `example-project-local-<cksum of the worktree path>`, which lives until
-`scripts/local-db.sh down`, and a gate's `example-project-it-<cksum>`). A session killed by the 6-hour limit, or a
-killed gate run, never stops them. So:
+A run's sessions can leave resources behind, such as a database compose project per run directory that the project's
+scripts start (in the example project, `example-project-local-<cksum of the directory's path>`, which lives until
+`scripts/local-db.sh down`, and a gate's `example-project-it-<cksum>`). A session killed by the 6-hour limit, a killed
+tick or a killed gate run never stops them. So:
 
-- Before `ticket-runner` removes a worktree with `git worktree remove`, it runs the project's `worktreeTeardown` in that
-  worktree, when the worktree has its first word as an executable file, and logs `tore down <worktree>: <its last line
-  of output>` when it printed anything (`teardown failed in <worktree>: ...` when it failed).
-- Each tick, after the self-update and before it decides anything, it removes the runner worktrees no run will use
-  again: `.worktrees/issue-N` when issue N is closed, has an open pull request, or used all 3 runs (its
-  `attempts/ticket-N` file says 3), and `.worktrees/pr-N` when `gh pr view` says pull request N is closed or merged.
-  It never removes the worktree the `current` file names, nor any worktree not named `issue-N` or `pr-N` (manual and
-  harness worktrees), and an issue missing from the issue list keeps its worktree. It logs each removal with its
-  reason, then runs `git worktree prune`.
+- Before `ticket-runner` removes a run's clone, it runs the project's `worktreeTeardown` in it, when the clone has its
+  first word as an executable file, and logs `tore down <clone>: <its last line of output>` when it printed anything
+  (`teardown failed in <clone>: ...` when it failed). It then deletes the directory, or removes it with `git worktree
+  remove --force` when it is a git worktree. It removes only a directory `<checkout>/.worktrees/issue-N` or `pr-N`,
+  never a symlink there or one for `.worktrees` itself, so nothing outside `<checkout>/.worktrees` goes.
+- Each tick, after the self-update and before it decides anything, it removes the run directories in
+  `<checkout>/.worktrees` no run will use again: `issue-N` when issue N is closed, has an open pull request, or used
+  all 3 runs (its `attempts/ticket-N` file says 3), and `pr-N` when `gh pr view` says pull request N is closed or
+  merged, whether it is a run's clone, one a killed tick left included, or a git worktree. It never removes the one
+  the `current` file names, nor any directory not named `issue-N` or `pr-N` (manual and harness checkouts), and an
+  issue missing from the issue list keeps its clone. It logs each removal with its reason, then runs `git worktree
+  prune`.
 - Then, when the project declares a `composeProjectPattern`, it lists the compose containers (`docker ps -a`) and
   removes every project whose name matches it and whose `com.docker.compose.project.working_dir` label names a
-  directory that no longer exists, in a worktree that no longer exists either, with `docker compose -p <project> down --volumes --remove-orphans`, logging `pruned database <project>
-  (worktree <path> is gone)`. A project with any container whose working directory exists, or that has none, is never
+  directory that no longer exists, in a run directory that no longer exists either, with `docker compose -p <project> down --volumes --remove-orphans`, logging `pruned database <project>
+  (run directory <path> is gone)`. A project with any container whose working directory exists, or that has none, is never
   touched, running or stopped. When Docker is unavailable the tick logs `database sweep skipped: docker is
   unavailable` and carries on.
-- A failed removal is logged (`could not remove worktree ...`, `could not prune database ...`) and the tick carries on.
+- A failed removal is logged (`could not remove run directory ...`, `could not prune database ...`) and the tick carries on.
 
-`ticket-runner --prune-dry-run` prints `would remove worktree ...` and `would prune database ...` lines for what the
+`ticket-runner --prune-dry-run` prints `would remove run directory ...` and `would prune database ...` lines for what the
 sweep would remove and exits. It takes no lock, ignores the brakes, writes no state or log, and only reads from `gh`,
 `git` and Docker.
 
@@ -909,12 +923,12 @@ and the GitHub CLI come from their vendors' apt repositories, or from Ubuntu's o
 `docker-compose-v2`, `gh`) when a vendor's repository does not serve the release; it prints which one it used.
 
 **Size.** It depends on the projects' checks. For a project whose ticket run builds and tests .NET, runs a full gate
-with a database container per worktree and web end-to-end tests in Chromium, one session at a time, 4 vCPUs and 16 GB of memory are a working minimum (8 vCPUs make
-the gate noticeably quicker), and 100 GB of disk holds the Docker images and gate databases, the worktrees, the .NET
+with a database container per run and web end-to-end tests in Chromium, one session at a time, 4 vCPUs and 16 GB of memory are a working minimum (8 vCPUs make
+the gate noticeably quicker), and 100 GB of disk holds the Docker images and gate databases, the run clones, the .NET
 SDK and NuGet cache, the npm cache, Playwright's browsers (about 1 GB per version) and the session transcripts. Those
 figures are for one session. With `max-sessions` at N (Several projects), up to N sessions run their builds, gates and
 databases at once, so the vCPUs and memory scale with N, and the disk grows by each further project's checkout,
-worktrees and caches.
+run clones and caches.
 
 **Set the machine up.** The owner runs `install.sh` as an ordinary user who may use sudo, or as root. It asks sudo for
 the password once, clones Triphammer into a temporary directory, runs that clone's `provision` as root with the
@@ -1075,5 +1089,5 @@ ends with the list, which only reads.
 timers (`systemctl --user disable --now 'ticket-runner@*.timer' 'merge-when-ready@*.timer'`, or the non-template
 `ticket-runner.timer` and `merge-when-ready.timer`, and the gallery and status units) and let a run in progress end, or
 stop it with `systemctl --user stop 'ticket-runner@*.service'`. Then start the new machine's timers as above. Leave the
-old checkout, its worktrees and its state alone: nothing on the new machine reads them, and they stay as a record and a
+old checkout, its run clones and its state alone: nothing on the new machine reads them, and they stay as a record and a
 way back.

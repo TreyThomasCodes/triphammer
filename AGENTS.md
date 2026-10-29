@@ -43,7 +43,7 @@ Each step points to its section of `bin/README.md`, which holds the details.
    checkout (What each piece does, Self-update).
 2. `bin/ticket-decide.py` picks the work: close a parent, repair a pull request, a ticket or upkeep (What a tick
    decides).
-3. A Claude Code session works in a worktree of the project's checkout as `triphammer:orchestrator`, following
+3. A Claude Code session works in a clone of the project's checkout as `triphammer:orchestrator`, following
    `triphammer:ticket-run` and, before its pull request, `triphammer:review-loop` (Sessions).
 4. The pull request's checks run the `risk-tier` workflow (`.github/workflows/risk-tier.yml`), which classifies the
    change with `scripts/risk-tier-base.sh` (Which checkout each file comes from).

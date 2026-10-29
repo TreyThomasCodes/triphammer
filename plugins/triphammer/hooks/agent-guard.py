@@ -43,7 +43,7 @@
 #               a Triphammer config sets (a `CHECKOUT=/absolute/path` line, read like STATE_DIR) that holds
 #               bin/config.sh, and the <checkout> of each such symlink whose real path is <checkout>/bin/<file>,
 #               <checkout>/systemd/<unit> or <checkout>/status/<file>, when it holds bin/config.sh. The same files
-#               in a worktree (<checkout>/.worktrees/<run>) are other paths and stay allowed. Shell-edit and self-kill
+#               in a run's clone (<checkout>/.worktrees/<run>) are other paths and stay allowed. Shell-edit and self-kill
 #               judge Bash only.
 #   shell-edit  a shell rewrite of a git-tracked file under a shell-edit root of the repository the command runs in
 #               (sed -i, perl -i, > or >> redirects, tee, cp, mv, install, ln -f/-b or rsync onto it, dd of=, truncate,
@@ -57,8 +57,9 @@
 #               a Triphammer session, xargs running kill, pkill, pgrep or killall, whose targets its input gives.
 #               killall written out, and kill by a PID read at run time other than $$ and $PPID, are not covered.
 #
-# A session Triphammer started is one whose environment holds $TRIPHAMMER_SESSION, the path of the run's worktree
-# (bin/ticket-runner sets it for ticket and repair runs, local-audit for the Qwen audit; subagents inherit it).
+# A session Triphammer started is one whose environment holds $TRIPHAMMER_SESSION, the path of the run's clone, the
+# session's worktree below (bin/ticket-runner sets it for ticket and repair runs, local-audit to its clone for the Qwen
+# audit; subagents inherit it).
 # The hook reads it from its own environment and from the environment each of its parent processes started with
 # (/proc/<pid>/environ), and a write must fit every value it finds, so nothing a session does later (a settings
 # file's env, an exported variable) widens what it may write. An interactive session has no such variable and keeps
@@ -107,16 +108,18 @@
 #               nohup, coproc and the like; a cd as the last command of a pipeline; a list holding a cd sent to the
 #               background with &; and anything after a source or ., a function definition, an alias or a trap,
 #               which may cd when they run. A $TRIPHAMMER_SESSION that names no directory leaves only the
-#               temporary directories. The main checkout, its .git (where the worktree's git directory lives) and
-#               everything under ~ are outside. A command the hook has not finished judging after PARSE_SECONDS
+#               temporary directories. The main checkout, its .git (whose objects the run's clone reads through
+#               an alternate) and everything under ~ are outside. A command the hook has not finished judging after PARSE_SECONDS
 #               (4 seconds, well inside the hook's 10-second timeout, after which Claude Code would run it) is
 #               refused: tokens, brace and glob expansion and the path checks all stop there, and a watchdog
 #               process stops whatever else is still running a second later.
 #   git-command  every git config write, whatever the key and scope (a set, --add, --replace-all, --unset,
 #               --unset-all, --rename-section, --remove-section, --edit, a --file, and the set, unset, rename-section,
 #               remove-section and edit subcommands, and xargs running git config or -I's string as git's
-#               subcommand, a git -c value or an assignment before git), since a worktree's configuration
-#               is its repository's (or ~/.gitconfig) and the main checkout's fetch reads it; git remote add, rename,
+#               subcommand, a git -c value or an assignment before git), since a write can reach ~/.gitconfig,
+#               which every later git command reads, or a worktree's repository, whose main checkout's fetch reads
+#               it, and changes the hooks, remotes and credential helpers the run's own commits and pushes use;
+#               git remote add, rename,
 #               remove, rm, set-head, set-branches and set-url (and xargs running git remote, or git with no
 #               subcommand); git -c, git --config-env, GIT_CONFIG_KEY_<n> or GIT_CONFIG_PARAMETERS
 #               setting, for one command, a key whose value git runs as a command or reads as more settings:
@@ -200,13 +203,12 @@
 # which keeps git branch --merged | xargs git branch -d allowed), and outside a Triphammer session the operands
 # xargs adds from its input. Every round of review has found another shell feature this parser misses, so behind this
 # hook a session ticket-runner starts runs under an OS-level write limit (bin/session-sandbox; bin/README.md, The write
-# limit): the file system is read-only to it and to everything it starts but for its worktree, the main checkout's .git
-# (writable until each run gets a clone of its own, #93), the temporary directories, the caches and what Claude Code
-# and these hooks write in the home directory. Triphammer's checkout's .git, unless it is the main checkout's, is not
-# among them: land-pr fetches main into a temporary repository. The limit does not cover what the session reaches
-# through a socket, such as Docker's, nor the next tick's git commands in the main checkout, which run outside the
-# limit and so run a config (core.fsmonitor, core.hooksPath) or hook the session writes into that .git, until #93
-# gives each run a clone of its own; a session started any other way has no such limit: this hook is its only line.
+# limit): the file system is read-only to it and to everything it starts but for the run's clone, with the clone's own
+# .git, the temporary directories, the caches and what Claude Code and these hooks write in the home directory. The
+# main checkout's .git, the objects the clone reads through its alternate included, is read-only to it, and so is
+# Triphammer's checkout's: land-pr fetches main into a temporary repository. The limit does not cover what the session
+# reaches through a socket, such as Docker's; a session started any other way has no such limit: this hook is its
+# only line.
 #
 # `# guard-override: <reason>` anywhere in a Bash command lifts only the shell-edit rule, the false positives it exists
 # for: a git-tracked file under a shellEditRoots path rewritten through the shell. It does not lift the persistence
@@ -1746,8 +1748,8 @@ GIT_BANG_COMMANDS = {("alias", None), ("submodule", "update")}
 # Sections every key of which counts: protocol.allow and protocol.<name>.allow let git use ext::, whose URL is a
 # command, and the hook does not tell the other protocol.* keys apart.
 GIT_ANY_KEY_SECTIONS = {"protocol"}
-# git remote's subcommands that write configuration (a remote's URL, the branches it fetches, its section), which the
-# repository's worktrees share: the main checkout's next fetch would use them.
+# git remote's subcommands that write configuration (a remote's URL, the branches it fetches, its section), which a
+# repository's worktrees share, so the main checkout's next fetch would use them, and which move the run's own pushes.
 GIT_REMOTE_WRITES = {"add", "rename", "remove", "rm", "set-head", "set-branches", "set-url"}
 # git's options before the subcommand that take the next word as their value.
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
@@ -2394,7 +2396,7 @@ def checkout_trees(targets):
     """The real paths of the bin, systemd, status, scripts and plugins/triphammer of each main checkout of Triphammer
     the ticket runner runs from: each CHECKOUT a Triphammer config sets that is Triphammer's checkout, and the
     <checkout> of each symlink target <checkout>/bin/<file>, <checkout>/systemd/<unit> or <checkout>/status/<file>.
-    The ticket runner sources, runs or loads those files from there on every tick (its worktrees under .worktrees
+    The ticket runner sources, runs or loads those files from there on every tick (its runs' clones under .worktrees
     are other paths)."""
     checkouts = configured_paths(os.path.expanduser("~"), "CHECKOUT")
     checkouts += [os.path.dirname(os.path.dirname(target)) for target in targets

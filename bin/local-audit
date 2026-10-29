@@ -13,9 +13,10 @@
 # a fresh `mktemp -d` directory with no remote, runs the reviewer there, writes the commit, area, model, exit status,
 # elapsed seconds and the reviewer's result to <file>, and removes the clone.
 #
-# The Triphammer plugin is the audited commit's own, in the clone, when <repo> is Triphammer's checkout (the one this
-# script lives in) or a worktree of it, and Triphammer's checkout's plugins/triphammer when <repo> is another
-# repository, a project with no plugin of its own; the project file is the audited commit's either way.
+# The Triphammer plugin is the audited commit's own, in the clone, when <repo> and Triphammer's checkout (the one this
+# script lives in) are one repository, a worktree of the other or a run's clone of it (bin/config.sh, same_repo), and
+# Triphammer's checkout's plugins/triphammer when <repo> is another repository, a project with no plugin of its own;
+# the project file is the audited commit's either way.
 #
 # Qwen: `claude -p --plugin-dir <plugin> --agent triphammer:reviewer --model <QWEN_MODEL>`, the reviewer of that
 # Triphammer plugin, with read-only tools, against the config's QWEN_BASE_URL. The

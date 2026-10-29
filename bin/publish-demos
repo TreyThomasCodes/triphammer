@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I
-"""Publishes the demos a ticket-runner session left in its worktree, so the demo agent never runs demo-publish itself.
+"""Publishes the demos a ticket-runner session left in its clone, so the demo agent never runs demo-publish itself.
 
   publish-demos <worktree>
 

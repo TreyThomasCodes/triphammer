@@ -5,7 +5,7 @@ import {appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from
 import {createServer} from 'node:http';
 import {basename, join} from 'node:path';
 import {gitEnv, gitRepo} from '../scripts/test-git-repo.mjs';
-import {fakeCodex, fakeCommand, freePort, installTriphammerFiles, writeConfig} from './fixture.mjs';
+import {fakeCodex, fakeCommand, freePort, installTriphammerFiles, runClone, writeConfig} from './fixture.mjs';
 
 const model = 'org/qwen-test:q4_k';
 const key = 'example-test-key-3f9a1c';
@@ -82,8 +82,8 @@ function auditSetup(t, {project, separate = false} = {}) {
   configure();
   return {
     root, repo, commit, script, first, audited, later, keyFile, output, configFile, configure, ...codex,
-    run: (args, env = {}) => new Promise(resolve => {
-      execFile(script, args, {
+    run: (args, env = {}, file = script) => new Promise(resolve => {
+      execFile(file, args, {
         cwd: root,
         env: {
           ...gitEnv, PATH: `${bin}:${process.env.PATH}`, TRIPHAMMER_CONFIG: configFile, FAKE_CLAUDE_LATER: later,
@@ -247,6 +247,19 @@ test('argument errors exit 2 with the usage, and --help exits 0', async t => {
   assert.match(help.stdout, /local-audit --commit <rev> --area <text> --output <file>/);
   assert.match(help.stdout, /3 the model is unavailable/);
   assert.match(help.stdout, /4 Codex was skipped/);
+});
+
+test("run from a run's clone of Triphammer's checkout, as an upkeep session runs it, it reviews under the audited commit's plugin", async t => {
+  const server = await listen(t);
+  const r = auditSetup(t);
+  r.configure({QWEN_BASE_URL: server.url});
+  const clone = join(r.root, 'run-clone');
+  runClone(r.repo, r.repo, clone);
+  const script = installAudit(clone);
+  const result = await r.run(['--repo', r.repo, '--commit', r.audited, '--area', area, '--output', r.output], {}, script);
+  assert.equal(result.code, 0, result.stderr);
+  const {args, cwd} = r.claude();
+  assert.equal(args[args.indexOf('--plugin-dir') + 1], join(cwd, 'plugins/triphammer'), 'the plugin of the audited commit, in the clone');
 });
 
 test("a project that is another repository is reviewed under Triphammer's plugin, with its own project file", async t => {

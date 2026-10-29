@@ -4,7 +4,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
-import {fakeGh, git, here, lines, checkoutSetup} from './fixture.mjs';
+import {fakeGh, git, here, lines, checkoutSetup, runClone} from './fixture.mjs';
 
 const wrapper = readFileSync(join(here, 'land-pr'), 'utf8');
 
@@ -76,6 +76,21 @@ test("refuses a copy of the wrapper that differs from origin/main's and runs not
   assert.equal(result.status, 1);
   assert.match(result.stderr, /is not main's copy of bin\/land-pr; nothing ran\. Its checkout is behind origin\/main; run main's script directly: git fetch origin main && git show refs\/remotes\/origin\/main:scripts\/land-pr\.sh \| bash -s -- 42/);
   assert.deepEqual(r.landed(), []);
+});
+
+test("from a run's clone of Triphammer's checkout it lands with main's land-pr.sh, and a refusal names the plain command", t => {
+  const r = landSetup(t);
+  const clone = join(r.root, 'run-clone');
+  runClone(r.checkout, join(r.root, 'origin.git'), clone);
+  const result = r.landPr(r.wrapper, ['42'], {}, clone);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(r.landed(), ['main 42']);
+
+  writeFileSync(r.wrapper, wrapper.replace('set -euo pipefail', 'set -euo pipefail\n# branch edit'), {mode: 0o755});
+  const refused = r.landPr(r.wrapper, ['42'], {}, clone);
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /run main's script directly: git fetch origin main && git show refs\/remotes\/origin\/main:scripts\/land-pr\.sh \| bash -s -- 42\n$/);
+  assert.deepEqual(r.landed(), ['main 42']);
 });
 
 test('refuses when origin/main has no wrapper and runs nothing', t => {

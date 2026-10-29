@@ -3,17 +3,18 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
 const skip = userns ? false : 'bwrap is missing or cannot create a user namespace here';
 
 // A rig outside /tmp, which the limit leaves writable: in the repository, which this test may write in a session too.
-// It holds a bare origin, a main checkout cloned from it with a worktree `.worktrees/issue-1` on ticket/1, a separate
-// Triphammer checkout holding this branch's session-sandbox, and a home directory with a Claude Code directory whose
+// It holds a bare origin, a main checkout cloned from it, a run's clone `.worktrees/issue-1` of that origin on ticket/1
+// that reads the main checkout's objects through an alternate, as ticket-runner makes it, a separate Triphammer
+// checkout holding this branch's session-sandbox, and a home directory with a Claude Code directory whose
 // settings.json and skills are there, a Codex directory with its config.toml and rules, local-audit's
-// codex-settings, and NuGet's NuGet.Config. `inside` runs a shell command under the limit in the worktree, as the
+// codex-settings, and NuGet's NuGet.Config. `inside` runs a shell command under the limit in the run's clone, as the
 // runner does, with `env` added to its environment, and returns its exit status and output.
 function sandboxRig(t) {
   const root = mkdtempSync(join(here, '..', '.session-sandbox-test-'));
@@ -29,7 +30,8 @@ function sandboxRig(t) {
   git(main, 'commit', '-q', '-m', 'first');
   git(main, 'push', '-q', 'origin', 'HEAD:main');
   const worktree = join(main, '.worktrees/issue-1');
-  git(main, 'worktree', 'add', '-q', '-b', 'ticket/1', worktree);
+  runClone(main, origin, worktree);
+  git(worktree, 'checkout', '-q', '-b', 'ticket/1');
   mkdirSync(join(triphammer, 'bin'), {recursive: true});
   copyFileSync(join(here, 'session-sandbox'), join(triphammer, 'bin/session-sandbox'));
   git(triphammer, 'init', '-q', '-b', 'main');
@@ -104,7 +106,59 @@ test("under the limit, Triphammer's checkout's .git is read-only, so no config o
   assertReadOnly(r, [config, join(r.triphammer, '.git/hooks/post-merge')]);
 });
 
-test('under the limit, the worktree, its commits, /tmp and what Claude Code, Codex, local-audit and the hooks write are writable', {skip}, t => {
+// A loose object of the main checkout's store, which the run's clone reads through its alternate: its path and the
+// content git reads for it.
+function looseObject(r) {
+  const id = git(r.main, 'rev-parse', 'HEAD:tracked.txt');
+  return {id, path: join(r.main, '.git/objects', id.slice(0, 2), id.slice(2)), content: git(r.main, 'cat-file', '-p', id)};
+}
+
+test("under the limit, the main checkout's .git is read-only, the objects the run's clone reads through its alternate included", {skip}, t => {
+  const r = sandboxRig(t);
+  const objects = join(r.main, '.git/objects');
+  assert.equal(readFileSync(join(r.worktree, '.git/objects/info/alternates'), 'utf8').trim(), objects);
+  const {path} = looseObject(r);
+  const config = join(r.main, '.git/config');
+  const before = readFileSync(config, 'utf8');
+  const fsmonitor = r.inside(`git -C '${r.main}' config core.fsmonitor 'echo planted > tracked; false'`);
+  assert.notEqual(fsmonitor.status, 0, 'core.fsmonitor was set');
+  assert.match(fsmonitor.output, /Read-only file system|could not lock config file/, fsmonitor.output);
+  assert.equal(readFileSync(config, 'utf8'), before);
+  assertReadOnly(r, [config, join(r.main, '.git/hooks/post-merge'), join(r.main, '.git/refs/heads/planted'), path,
+    join(objects, 'info/alternates'), join(objects, 'planted')]);
+});
+
+test("a session cannot plant other content under a loose object's name in the main checkout's store", {skip}, t => {
+  const r = sandboxRig(t);
+  const {id, path, content} = looseObject(r);
+  writeFileSync(join(r.root, 'planted.txt'), 'planted\n');
+  const other = git(r.worktree, 'hash-object', '-w', join(r.root, 'planted.txt'));
+  const planted = join(r.worktree, '.git/objects', other.slice(0, 2), other.slice(2));
+  const through = `$(cat .git/objects/info/alternates)/${id.slice(0, 2)}/${id.slice(2)}`;
+  for (const target of [path, through]) {
+    for (const command of [`chmod u+w "${target}"; cp '${planted}' "${target}"`, `cp '${planted}' "${target}.new" && mv -f "${target}.new" "${target}"`,
+      `rm -f "${target}" && cp '${planted}' "${target}"`]) {
+      const {status, output} = r.inside(command);
+      assert.notEqual(status, 0, `${command} succeeded: ${output}`);
+      assert.match(output, /Read-only file system/, command);
+    }
+  }
+  assert.equal(git(r.main, 'cat-file', '-p', id), content);
+  assert.equal(git(r.worktree, 'cat-file', '-p', id), content, "the run's clone still reads the original object");
+});
+
+test('a run directory whose git directory lies outside it, as a git worktree\'s does, runs nothing', {skip}, t => {
+  const r = sandboxRig(t);
+  const worktree = join(r.main, '.worktrees/issue-2');
+  git(r.main, 'worktree', 'add', '-q', '-b', 'ticket/2', worktree);
+  const result = spawnSync(join(r.triphammer, 'bin/session-sandbox'), [worktree, 'sh', '-c', 'echo ran'],
+    {cwd: worktree, env: {...gitEnv, HOME: r.home}, encoding: 'utf8'});
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /lies outside it; a session runs only in a clone of its own/);
+});
+
+test('under the limit, the run\'s clone, its commits, /tmp and what Claude Code, Codex, local-audit and the hooks write are writable', {skip}, t => {
   const r = sandboxRig(t);
   const scratch = mkdtempSync('/tmp/session-sandbox-test-');
   t.after(() => rmSync(scratch, {recursive: true, force: true}));
@@ -126,7 +180,9 @@ mkdir -p '${r.home}/.local/share/NuGet/http-cache' && echo index > '${r.home}/.l
   assert.equal(status, 0, output);
   assert.equal(readFileSync(join(r.home, '.local/share/NuGet/http-cache/vuln_index.dat-new'), 'utf8'), 'index\n');
   assert.equal(git(r.worktree, 'log', '-1', '--format=%s'), 'work');
-  assert.equal(git(r.main, 'rev-parse', 'ticket/1'), git(r.worktree, 'rev-parse', 'HEAD'), "the commit is in the main checkout's .git");
+  const commit = git(r.worktree, 'rev-parse', 'HEAD');
+  assert.equal(readFileSync(join(r.worktree, '.git/refs/heads/ticket/1'), 'utf8').trim(), commit, "the commit is in the clone's own .git");
+  assert.throws(() => git(r.main, 'cat-file', '-e', commit), "the main checkout's store did not get it");
   assert.equal(readFileSync(join(scratch, 'file'), 'utf8'), 'tmp\n');
   assert.equal(readFileSync(join(r.home, '.claude/projects/p/session.jsonl'), 'utf8'), 'session\n');
   assert.equal(readFileSync(join(r.home, '.local/state/triphammer/guard-overrides.log'), 'utf8'), 'override\n');

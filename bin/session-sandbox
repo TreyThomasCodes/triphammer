@@ -7,12 +7,12 @@
 #   session-sandbox <run directory> <command> [argument...]
 #
 # Writable inside, each only when it exists (the ones marked * are created first):
-#   - the run directory, the session's worktree;
-#   - the git common directory of the run directory (git rev-parse --git-common-dir): the main checkout's .git, where
-#     a worktree writes its commits, refs and worktrees/<name>. It stays writable only until each run gets a clone of
-#     its own (#93). Until then a session can write a config (core.fsmonitor, core.hooksPath) or a hook there that the
-#     next tick's git commands in the main checkout, outside the limit, run. Triphammer's checkout's .git, unless it
-#     is the main checkout's, stays read-only: land-pr fetches main into a temporary repository instead;
+#   - the run directory, the run's clone of the main checkout (<checkout>/.worktrees/<run>), with its own .git inside
+#     it, where its commits and refs go. The main checkout's .git stays read-only, the objects the clone reads through
+#     its alternate (git clone --reference) included, so no config (core.fsmonitor, core.hooksPath), hook or object
+#     the command writes reaches the git commands the next tick runs in the main checkout, outside the limit. A run
+#     directory whose git directory or git common directory lies outside it, as a git worktree's does, runs nothing.
+#     Triphammer's checkout's .git stays read-only too: land-pr fetches main into a temporary repository instead;
 #   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
 #   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude} and ~/.claude.json, its
 #     state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
@@ -53,15 +53,23 @@
 # Docker socket, or any other socket of a service outside, which the command can still reach: a container started
 # through Docker can write anywhere on the machine.
 #
-# Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout or bwrap fails.
+# Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
+# lies outside it, or bwrap fails.
 set -euo pipefail
 
 fail() { echo "session-sandbox: $1" >&2; exit "${2:-1}"; }
 [ $# -ge 2 ] || fail "usage: session-sandbox <run directory> <command> [argument...]" 2
 run_dir="$(readlink -f -- "$1")" && [ -d "$run_dir" ] || fail "$1 is not a directory" 2
 shift
-common="$(git -C "$run_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
-  || fail "$run_dir is not in a git checkout"
+# The run directory's .git is the one git directory the command may write, so it must lie inside the run directory: a
+# worktree's lies in its main checkout's .git, which its commits would need writable.
+for kind in --absolute-git-dir --git-common-dir; do
+  git_dir="$(git -C "$run_dir" rev-parse --path-format=absolute "$kind" 2>/dev/null)" \
+    || fail "$run_dir is not in a git checkout"
+  git_dir="$(readlink -f -- "$git_dir")"
+  [[ "$git_dir" == "$run_dir"/* ]] \
+    || fail "the git directory $git_dir of $run_dir lies outside it; a session runs only in a clone of its own"
+done
 
 state="${XDG_STATE_HOME:-$HOME/.local/state}"
 claude="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -89,7 +97,7 @@ bind() {
     args+=("$option" "$path" "$path")
   done
 }
-bind --bind "$common" "$run_dir" /tmp "${TMPDIR:-}" \
+bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
   "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "${nuget[@]}" "$humanizer" "$overrides" \
   "$state/local-audit" "$codex"
 bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$claude/commands" "$claude/skills" \
