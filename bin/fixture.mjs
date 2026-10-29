@@ -303,7 +303,8 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
 // no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
-// `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory.
+// `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory, with a ~/.codex, so the
+// sandbox's Codex config (~/.codex/config.toml) lands there as it does on a machine with Codex.
 export function runnerSetup(t, {runner = readFileSync(join(here, 'ticket-runner'), 'utf8'), files = {}, bin = {}, gh = {},
   project = projectJson, config = {}} = {}) {
   const r = checkoutSetup(t, {
@@ -328,7 +329,7 @@ exec "$@"
 `, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
   const home = join(r.root, 'home');
-  mkdirSync(home);
+  mkdirSync(join(home, '.codex'), {recursive: true});
   const env = {...withoutSandboxPaths(r.env), HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
     ...r, env, home, gh: fake, docker,

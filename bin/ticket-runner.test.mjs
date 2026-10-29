@@ -551,6 +551,7 @@ test('a main without the plugin\'s ticket-run skill starts no session', t => {
 });
 
 // The sessions' write limit (bin/session-sandbox; bin/README.md, The write limit), through the fixture's bwrap.
+// The paths a bwrap call's `--bind` arguments make writable.
 const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
 
 // Asserts a recorded bwrap call mounts / read-only and makes run writable, but not the main checkout or its .git.
@@ -584,6 +585,13 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     }
   });
 }
+
+test("the write limit's Codex config lands in the fixture's home", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  assert.equal(r.ran(), true);
+  assert.equal(existsSync(join(r.home, '.codex/config.toml')), true);
+});
 
 test('a machine where the write limit does not work starts no session and counts no run', t => {
   const r = ticketSetup(t, [issue(7)], {bin: {bwrap: '#!/bin/sh\necho "bwrap: setting up uid map: Permission denied" >&2\nexit 1\n'}});
