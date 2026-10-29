@@ -14,15 +14,15 @@
 #     directory whose git directory or git common directory lies outside it, as a git worktree's does, runs nothing.
 #     Triphammer's checkout's .git stays read-only too: land-pr fetches main into a temporary repository instead;
 #   - /tmp, and $TMPDIR when it is set (the proposals file ticket-runner reads after the session is there);
-#   - what Claude Code writes under the home directory: ${CLAUDE_CONFIG_DIR:-~/.claude}, its state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
+#   - what Claude Code writes under the home directory: its runtime parts in ${CLAUDE_CONFIG_DIR:-~/.claude} (below),
+#     its state in ~/.local/state/claude, and the caches commands fill: ~/.cache*, ~/.npm, ~/.nuget, NuGet's
 #     ${XDG_DATA_HOME:-~/.local/share}/NuGet* (http-cache, v3-cache, plugins-cache), and $NUGET_PACKAGES*,
 #     $NUGET_HTTP_CACHE_PATH* and $NUGET_PLUGINS_CACHE_PATH* when they are set;
 #   - the plugin hooks' own files: text-lint.py's humanizer records ($TRIPHAMMER_HUMANIZER_STATE, else
 #     ${XDG_STATE_HOME:-~/.local/state}/triphammer/humanizer*) and agent-guard.py's guard-overrides.log* in the shared
 #     directory ($TRIPHAMMER_SHARED_DIR, else ${XDG_STATE_HOME:-~/.local/state}/triphammer), the file alone;
 #   - what the upkeep audits write through local-audit --model codex: its run count in
-#     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and ${CODEX_HOME:-~/.codex}, where Codex writes its databases,
-#     logs, sessions, caches and refreshed login in the directory itself;
+#     ${XDG_STATE_HOME:-~/.local/state}/local-audit*, and Codex's runtime parts in ${CODEX_HOME:-~/.codex} (below);
 #   - when docker is installed or ${DOCKER_CONFIG:-~/.docker} exists, its buildx* directory, where docker build and
 #     docker compose build keep their builder state; the rest of the directory (config.json, cli-plugins, contexts)
 #     configures docker, which the runner also runs outside the limit, and stays read-only, created or not;
@@ -33,12 +33,24 @@
 #     entries that exist when the command starts stay there read-only (the dotnet host, sdk, shared, host, packs,
 #     templates, the global tools in tools, the sentinels), but for the CLI's state directories toolResolverCache,
 #     TelemetryStorageService and sdk-advertising, which start empty; .templateengine starts empty.
-# Inside these directories, the parts that would change later sessions stay read-only, the ones that exist when the
-# command starts: in Claude Code's, settings*.json, CLAUDE.md, agents, commands, skills, hooks and plugins; in Codex's,
-# *.toml (config.toml*, created empty when the directory exists, as Codex itself adds to it), .env, AGENTS*.md,
-# hooks.json, agents, rules, prompts, skills, plugins and themes; local-audit's codex-settings; and NuGet's user configs
-# in ~/.nuget, NuGet/NuGet.Config (in any case NuGet reads) and config, which can point later restores at other
-# package sources.
+# Inside these directories, the parts that would change later sessions stay read-only: local-audit's codex-settings*,
+# created empty; and NuGet's user configs in ~/.nuget that exist when the command starts, NuGet/NuGet.Config (in any
+# case NuGet reads) and config, which can point later restores at other package sources.
+#
+# Claude Code's and Codex's directories, each when it exists, are a tmpfs inside, so what the command adds there is
+# gone when it ends. What each holds when the command starts is mounted back onto it, read-only but for the runtime
+# parts: in Claude Code's, projects*, sessions*, session-env*, shell-snapshots*, debug*, todos*, tasks*,
+# file-history*, statsig*, plans*, paste-cache*, image-cache* and telemetry*, plugins/data* inside the read-only
+# plugins, and its login, .credentials.json, which Claude Code rewrites in place when the rename onto it fails; in
+# Codex's, sessions*, archived_sessions*, log*, shell_snapshots* and tmp*, auth.json and installation_id. A symlink
+# there is made again as it is. Codex keeps its SQLite databases, and the journals SQLite creates beside them, in a
+# tmpfs of their own inside, <Codex's directory>/sqlite, which CODEX_SQLITE_HOME names there. What the next session
+# loads from these directories cannot be created either: each one missing gets an empty read-only stand-in, in Claude
+# Code's CLAUDE.md, settings.json, settings.local.json, agents, commands, skills, hooks, rules, output-styles and
+# plugins, and in Codex's config.toml, AGENTS.md, AGENTS.override.md, .env, hooks.json, agents, rules, prompts, skills,
+# plugins and themes. Claude Code's auto memory for the run directory,
+# projects/<the run directory with each character but a letter or digit made a dash>/memory*, is empty and read-only,
+# and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 inside keeps Claude Code from loading any project's memory.
 #
 # Hidden inside, each under an empty tmpfs mounted after everything above: the GitHub App's files,
 # ${GITHUB_APP_CONFIG_DIR:-~/.config/github-app} (agents.pem, app-id, owner); its token cache,
@@ -55,12 +67,13 @@
 # network is shared. bwrap ends the command when its parent dies (--die-with-parent), and every process left inside
 # when the command exits.
 #
-# Not covered: a read-only part named above that does not exist when the command starts, or that is a symlink (the
-# session may create or replace it), such as a ~/.codex/AGENTS.md or ~/.nuget/NuGet/NuGet.Config the machine does not
-# have; anything a writable path above lets a later session read (a cache, Codex's databases,
-# local-audit's run count, or buildx's builder state, which picks the builder a later docker build uses); and the
-# Docker socket, or any other socket of a service outside, which the command can still reach: a container started
-# through Docker can write anywhere on the machine.
+# Not covered: a NuGet user config that does not exist when the command starts or is a symlink (the session may create
+# or replace it in the writable ~/.nuget); a part of Claude Code's or Codex's directory that is a symlink into a
+# writable path, which the command writes through; memory written under another project's directory in projects, which
+# a Claude Code run outside the limit would load for that project; anything a writable path above lets a later session
+# read (a cache, a transcript, local-audit's run count, or buildx's builder state, which picks the builder a later
+# docker build uses); and the Docker socket, or any other socket of a service outside, which the command can still
+# reach: a container started through Docker can write anywhere on the machine.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
 # lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory, or bwrap fails.
@@ -99,14 +112,25 @@ fi
 codex="${CODEX_HOME:-$HOME/.codex}"
 nuget=("${XDG_DATA_HOME:-$HOME/.local/share}/NuGet" ${NUGET_PACKAGES:+"$NUGET_PACKAGES"}
   ${NUGET_HTTP_CACHE_PATH:+"$NUGET_HTTP_CACHE_PATH"} ${NUGET_PLUGINS_CACHE_PATH:+"$NUGET_PLUGINS_CACHE_PATH"})
+# Claude Code's and Codex's runtime directories, created first and writable inside, and what the next session loads
+# from their directories, covered when missing (a name ending in / is a directory).
+claude_runtime=(projects sessions session-env shell-snapshots debug todos tasks file-history statsig plans paste-cache
+  image-cache telemetry)
+codex_runtime=(sessions archived_sessions log shell_snapshots tmp)
+claude_loaded=(CLAUDE.md settings.json settings.local.json agents/ commands/ skills/ hooks/ rules/ output-styles/
+  plugins/)
+codex_loaded=(config.toml AGENTS.md AGENTS.override.md .env hooks.json agents/ rules/ prompts/ skills/ plugins/ themes/)
+# Claude Code's auto memory for the run directory, kept empty and read-only.
+memory="$claude/projects/${run_dir//[^a-zA-Z0-9]/-}/memory"
 mkdir -p -- "$HOME/.cache" "${nuget[@]}"
 [ ! -d "$claude/plugins" ] || mkdir -p -- "$claude/plugins/data"
-(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" "$token_cache" "$tokens" && : >> "$overrides")
-# Codex adds a project's trust level to its config.toml itself, so a missing one would be created inside; an empty one
-# reads as none and is kept read-only below.
-[ ! -d "$codex" ] || (umask 077 && : >> "$codex/config.toml")
+[ ! -d "$claude" ] || (umask 077 && mkdir -p -- "${claude_runtime[@]/#/$claude/}" "$memory")
+[ ! -d "$codex" ] || (umask 077 && mkdir -p -- "${codex_runtime[@]/#/$codex/}")
+(umask 077 && mkdir -p -- "$humanizer" "$state/local-audit" "$token_cache" "$tokens" && : >> "$overrides" \
+  && : >> "$state/local-audit/codex-settings")
 
-args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc)
+args=(--unshare-user --unshare-pid --die-with-parent --ro-bind / / --dev /dev --proc /proc
+  --setenv CLAUDE_CODE_DISABLE_AUTO_MEMORY 1)
 # bind <option> <path...>: mounts each path that exists onto itself, symlinks resolved, after what came before, so a
 # later mount wins inside an earlier one.
 bind() {
@@ -118,15 +142,62 @@ bind() {
     args+=("$option" "$path" "$path")
   done
 }
+# private <dir> <writable name...>: an empty tmpfs over <dir>, so what the command adds there is gone when it ends,
+# with each entry <dir> holds mounted back onto itself, writable when its name is listed and read-only otherwise. A
+# symlink is made again as it is, and its target mounted writable when its name is listed.
+private() {
+  local dir path name listed writable
+  dir="$(readlink -f -- "$1")"
+  shift
+  args+=(--tmpfs "$dir")
+  for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    name="${path##*/}" writable=''
+    for listed; do [ "$name" != "$listed" ] || writable=1; done
+    if [ -L "$path" ]; then
+      args+=(--symlink "$(readlink -- "$path")" "$path")
+      [ -z "$writable" ] || bind --bind "$path"
+    elif [ -n "$writable" ]; then
+      args+=(--bind "$path" "$path")
+    else
+      args+=(--ro-bind "$path" "$path")
+    fi
+  done
+}
+# cover <dir> <name...>: each name that <dir> lacks becomes an empty read-only file there, or an empty read-only
+# directory for a name ending in /, so the command can neither create nor change it.
+cover() {
+  local dir name fd
+  dir="$(readlink -f -- "$1")"
+  shift
+  for name; do
+    [ ! -e "$dir/${name%/}" ] && [ ! -L "$dir/${name%/}" ] || continue
+    if [[ "$name" == */ ]]; then
+      args+=(--tmpfs "$dir/${name%/}" --remount-ro "$dir/${name%/}")
+    else
+      exec {fd}< /dev/null
+      args+=(--ro-bind-data "$fd" "$dir/$name")
+    fi
+  done
+}
 bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
-  "$claude" "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "${nuget[@]}" "$humanizer" "$overrides" \
-  "$state/local-audit" "$codex"
-bind --ro-bind "$claude"/settings*.json "$claude/CLAUDE.md" "$claude/agents" "$claude/commands" "$claude/skills" \
-  "$claude/hooks" "$claude/plugins" "$state/local-audit/codex-settings" \
-  "$codex"/*.toml "$codex/.env" "$codex"/AGENTS*.md "$codex/hooks.json" "$codex/agents" "$codex/rules" \
-  "$codex/prompts" "$codex/skills" "$codex/plugins" "$codex/themes" \
+  "$state/claude" "$HOME/.cache" "$HOME/.npm" "$HOME/.nuget" "${nuget[@]}" "$humanizer" "$overrides" \
+  "$state/local-audit"
+bind --ro-bind "$state/local-audit/codex-settings" \
   "$HOME/.nuget/NuGet"/[Nn]u[Gg]et.[Cc]onfig "$HOME/.nuget/config"
-bind --bind "$claude/plugins/data"
+if [ -d "$claude" ]; then
+  private "$claude" "${claude_runtime[@]}" .credentials.json
+  cover "$claude" "${claude_loaded[@]}"
+  bind --ro-bind "$memory"
+  bind --bind "$claude/plugins/data"
+fi
+# Codex keeps its SQLite databases in its directory itself, beside the journals SQLite creates and deletes next to
+# them, so inside they go to a tmpfs of their own and are gone when the command ends.
+if [ -d "$codex" ]; then
+  private "$codex" "${codex_runtime[@]}" auth.json installation_id
+  cover "$codex" "${codex_loaded[@]}"
+  args+=(--tmpfs "$(readlink -f -- "$codex")/sqlite" --setenv CODEX_SQLITE_HOME "$(readlink -f -- "$codex")/sqlite")
+fi
 docker_config="${DOCKER_CONFIG:-$HOME/.docker}"
 if [ -d "$docker_config" ] || command -v docker >/dev/null 2>&1; then
   (umask 077 && mkdir -p -- "$docker_config/buildx")

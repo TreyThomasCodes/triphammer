@@ -650,11 +650,11 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
   });
 }
 
-test("the write limit's Codex config lands in the fixture's home", t => {
+test("the runtime directories the write limit creates in Codex's directory land in the fixture's home", t => {
   const r = ticketSetup(t);
   r.tick();
   assert.equal(r.ran(), true);
-  assert.equal(existsSync(join(r.home, '.codex/config.toml')), true);
+  assert.equal(existsSync(join(r.home, '.codex/sessions')), true);
 });
 
 test('a machine where the write limit does not work starts no session and counts no run', t => {
