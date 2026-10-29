@@ -112,20 +112,22 @@ overrides="$shared/guard-overrides.log"
 app_files="${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}"
 token_cache="${XDG_CACHE_HOME:-$HOME/.cache}/github-app"
 tokens="$shared/tokens"
-# The session's token directory, which ticket-runner owns: a directory directly in the shared tokens directory.
+caches="$shared/caches"
+# in_parent <directory> <parent>: whether both are directories and the first lies directly in the second.
+in_parent() {
+  [ -d "$1" ] && [ -d "$2" ] && [ "$(dirname -- "$(readlink -f -- "$1")")" = "$(readlink -f -- "$2")" ]
+}
+# The session's token directory and the project's cache directory, which ticket-runner owns: a directory directly in
+# the shared tokens directory and one directly in the shared caches directory.
 token_dir=''
 if [ -n "${TRIPHAMMER_TOKEN_FILE:-}" ]; then
   token_dir="$(dirname -- "$TRIPHAMMER_TOKEN_FILE")"
-  { [ -d "$token_dir" ] && [ -d "$tokens" ] \
-    && [ "$(dirname -- "$(readlink -f -- "$token_dir")")" = "$(readlink -f -- "$tokens")" ]; } \
+  in_parent "$token_dir" "$tokens" \
     || fail "TRIPHAMMER_TOKEN_FILE ($TRIPHAMMER_TOKEN_FILE) must lie in a directory of $tokens"
 fi
-# The project's cache directory, which ticket-runner owns: a directory directly in the shared caches directory.
-caches="$shared/caches"
 cache_dir=''
 if [ -n "${TRIPHAMMER_CACHE_DIR:-}" ]; then
-  { [ -d "$TRIPHAMMER_CACHE_DIR" ] && [ -d "$caches" ] \
-    && [ "$(dirname -- "$(readlink -f -- "$TRIPHAMMER_CACHE_DIR")")" = "$(readlink -f -- "$caches")" ]; } \
+  in_parent "$TRIPHAMMER_CACHE_DIR" "$caches" \
     || fail "TRIPHAMMER_CACHE_DIR ($TRIPHAMMER_CACHE_DIR) must be a directory of $caches"
   cache_dir="$(readlink -f -- "$TRIPHAMMER_CACHE_DIR")"
 fi
