@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {createServer} from 'node:net';
 import {delimiter, dirname, join} from 'node:path';
 import {fakeAnswers, fakeDocker, git, gitEnv, here, runClone, withoutSandboxPaths} from './fixture.mjs';
 
@@ -541,3 +542,56 @@ test('a token file outside the shared tokens directory runs nothing', {skip}, t 
     assert.match(output, /must lie in a directory of/);
   }
 });
+
+// A shell command that connects to the Unix socket at `path` and prints `connected <path>`, or why it could not.
+const connect = path => `python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print('connected', sys.argv[1])" '${path}'`;
+
+test("under the limit, the runtime directory's bus and agent sockets cannot be reached and their variables are gone; a rootless Docker socket there can", {skip}, async t => {
+  const r = sandboxRig(t);
+  const runtime = join(r.root, 'runtime');
+  mkdirSync(join(runtime, 'gnupg'), {recursive: true, mode: 0o700});
+  const sockets = {bus: join(runtime, 'bus'), agent: join(runtime, 'openssh_agent'),
+    gpg: join(runtime, 'gnupg/S.gpg-agent'), docker: join(runtime, 'docker.sock')};
+  for (const path of Object.values(sockets)) {
+    const server = createServer(socket => socket.destroy());
+    await new Promise((resolve, reject) => server.once('error', reject).listen(path, resolve));
+    t.after(() => server.close());
+  }
+  const env = {XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sockets.bus}`,
+    SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`};
+  for (const what of ['bus', 'agent', 'gpg']) {
+    const {status, output} = r.inside(connect(sockets[what]), env);
+    assert.notEqual(status, 0, `the ${what} socket was reached: ${output}`);
+    assert.match(output, /FileNotFoundError/, output);
+  }
+  const docker = r.inside(connect(sockets.docker), env);
+  assert.equal(docker.status, 0, docker.output);
+  assert.match(docker.output, /^connected /);
+  const {status, output} = r.inside('echo "dbus=${DBUS_SESSION_BUS_ADDRESS-unset} ssh=${SSH_AUTH_SOCK-unset}' +
+    ' gpg=${GPG_AGENT_INFO-unset} runtime=$XDG_RUNTIME_DIR"; ls -A "$XDG_RUNTIME_DIR"; stat -c %a "$XDG_RUNTIME_DIR";' +
+    ' echo made > "$XDG_RUNTIME_DIR/made" && cat "$XDG_RUNTIME_DIR/made"', env);
+  assert.equal(status, 0, output);
+  assert.equal(output, `dbus=unset ssh=unset gpg=unset runtime=${runtime}\ndocker.sock\n700\nmade\n`);
+  assert.ok(!existsSync(join(runtime, 'made')), "the runtime directory's tmpfs reached outside");
+});
+
+// The user's own runtime directory, which the user manager and the session bus listen in, when this machine has one.
+const userRuntime = `/run/user/${process.getuid()}`;
+const noUserRuntime = skip || (existsSync(userRuntime) ? false : `${userRuntime} does not exist here`);
+const missing = name => noUserRuntime || (spawnSync('sh', ['-c', `command -v ${name}`]).status === 0 ? false : `${name} is not installed`);
+
+for (const [name, command] of [
+  ['systemd-run', 'systemd-run --user true'],
+  ['systemctl', 'systemctl --user start triphammer-sandbox-probe.service'],
+  ['busctl', 'busctl --user list'],
+]) {
+  test(`under the limit, \`${command}\` cannot reach the user manager, even with the variables naming it`, {skip: missing(name)}, t => {
+    const r = sandboxRig(t);
+    const {status, output} = r.inside(`${command} 2>&1; echo "exit $?"; ls -A "$XDG_RUNTIME_DIR"`,
+      {XDG_RUNTIME_DIR: userRuntime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${userRuntime}/bus`});
+    t.diagnostic(`${command}: ${output.trim()}`);
+    assert.equal(status, 0, output);
+    assert.doesNotMatch(output, /not found|Running as unit|NAME/, output);
+    assert.match(output, /\nexit [1-9][0-9]*\n$/, `${command} succeeded, or ${userRuntime} is not empty inside: ${output}`);
+  });
+}
