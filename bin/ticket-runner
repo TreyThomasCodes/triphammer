@@ -145,8 +145,11 @@ load_project() {
 
 # Removes a run directory, <checkout>/.worktrees/issue-N or pr-N, first running the project's teardown command in it
 # (when the project declares one and the directory has its first word as an executable file), so its resources do not
-# outlive it. A run's clone is deleted with its .git, and no git command runs in it, since its config is the session's
-# to write; a git worktree there is removed with git worktree remove. It refuses any other path, and a symlink for the
+# outlive it. That command is the clone's copy, which the session could edit, so it runs under the write limit the
+# session ran under, bin/session-sandbox with the clone as its run directory; a directory the limit refuses, such as a
+# git worktree, runs none. A run's clone is deleted with its .git, and since its config is the session's to write, no
+# git command runs in it but session-sandbox's git rev-parse, which runs no command the config names; a git worktree
+# there is removed with git worktree remove. It refuses any other path, and a symlink for the
 # directory or for .worktrees, so it never removes anything outside <checkout>/.worktrees.
 remove_run() {
   local dir="$1" out
@@ -156,7 +159,7 @@ remove_run() {
     return 1
   fi
   if [ "${#teardown[@]}" -gt 0 ] && [ -x "$dir/${teardown[0]}" ]; then
-    if out="$(cd "$dir" && "$dir/${teardown[0]}" "${teardown[@]:1}" 2>&1)"; then
+    if out="$(cd "$dir" && "$bin/session-sandbox" "$dir" "$dir/${teardown[0]}" "${teardown[@]:1}" 2>&1)"; then
       [ -z "$out" ] || say "tore down $dir: $(tail -n 1 <<< "$out")"
     else
       say "teardown failed in $dir: $(tail -n 1 <<< "$out")"

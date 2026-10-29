@@ -551,6 +551,18 @@ test('a main without the plugin\'s ticket-run skill starts no session', t => {
 });
 
 // The sessions' write limit (bin/session-sandbox; bin/README.md, The write limit), through the fixture's bwrap.
+const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
+
+// Asserts a recorded bwrap call mounts / read-only and makes run writable, but not the main checkout or its .git.
+function assertWriteLimit(r, call, run) {
+  assert.ok(binds(call).includes(run), JSON.stringify(call));
+  const mainGit = join(r.checkout, '.git');
+  assert.ok(!binds(call).some(path => path === mainGit || path.startsWith(`${mainGit}/`)),
+    `the main checkout's .git is not writable: ${JSON.stringify(call)}`);
+  assert.ok(!binds(call).includes(r.checkout), 'the main checkout is not writable');
+  assert.deepEqual(call.slice(call.indexOf('--ro-bind'), call.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
+}
+
 for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['repair', repairSetup, 'pr-40']]) {
   test(`a ${kind} run's session runs under the write limit, after a dry run of it`, t => {
     const r = setup(t);
@@ -562,14 +574,8 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     const run = join(r.checkout, '.worktrees', worktree);
     assert.deepEqual(dry.slice(dry.indexOf('--')), ['--', 'true']);
     assert.deepEqual(session.slice(session.indexOf('--'), session.indexOf('--') + 3), ['--', 'claude', '-p']);
-    const binds = call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []);
     assert.ok(binds(dry).includes(r.checkout), JSON.stringify(dry));
-    assert.ok(binds(session).includes(run), JSON.stringify(session));
-    const mainGit = join(r.checkout, '.git');
-    assert.ok(!binds(session).some(path => path === mainGit || path.startsWith(`${mainGit}/`)),
-      `the main checkout's .git is not writable: ${JSON.stringify(session)}`);
-    assert.ok(!binds(session).includes(r.checkout), 'the main checkout is not writable');
-    assert.deepEqual(session.slice(session.indexOf('--ro-bind'), session.indexOf('--ro-bind') + 3), ['--ro-bind', '/', '/']);
+    assertWriteLimit(r, session, run);
     // What the sandbox makes writable, and so creates first, lies in the test's directory, not the machine's HOME.
     const root = realpathSync(r.root);
     const temporary = ['/tmp', realpathSync(tmpdir())];
@@ -1371,6 +1377,29 @@ test("a project's teardown command runs in the run's clone, with its arguments, 
   assert.equal(r.probe('teardown'), `${r.worktree} now\n`);
   assert.match(r.log(), new RegExp(`tore down ${r.worktree}: stopped everything\n`));
   assert.equal(existsSync(r.worktree), false);
+});
+
+test("a project's teardown command runs under the write limit, with the run's clone as the one checkout it may write", t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({worktreeTeardown: ['tools/stop.sh', 'now']}), files: {
+    'tools/stop.sh': '#!/bin/sh\nexit 0\n',
+  }});
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick();
+  const calls = r.bwrapCalls();
+  const teardown = calls.filter(call => call[call.indexOf('--') + 1] === join(r.worktree, 'tools/stop.sh'));
+  assert.equal(teardown.length, 1, JSON.stringify(calls));
+  const [call] = teardown;
+  assert.deepEqual(call.slice(call.indexOf('--')), ['--', join(r.worktree, 'tools/stop.sh'), 'now']);
+  assertWriteLimit(r, call, r.worktree);
+});
+
+test('a run directory the write limit refuses, a git worktree, runs no teardown and is still removed', t => {
+  const r = sweepSetup(t);
+  r.tick();
+  const pr20 = r.worktree('pr-20');
+  assert.ok(!r.bwrapCalls().some(call => call[call.indexOf('--') + 1]?.startsWith(`${pr20}/`)), 'no teardown ran in it');
+  assert.match(r.log(), new RegExp(`teardown failed in ${pr20}: session-sandbox: the git directory .* lies outside it`));
+  assert.ok(r.log().includes(`removed run directory ${pr20} (pull request #20 is merged)\n`));
 });
 
 test('a project with no teardown command gets its clone removed with no teardown run and nothing logged about it', t => {
