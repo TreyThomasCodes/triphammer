@@ -573,6 +573,15 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
   });
 }
 
+test("the write limit's Codex config lands in the fixture's home, never the real one", t => {
+  const r = ticketSetup(t);
+  r.tick();
+  assert.equal(r.ran(), true);
+  assert.equal(existsSync(join(r.home, '.codex/config.toml')), true);
+  const binds = r.bwrapCalls().flatMap(call => call.flatMap((arg, i) => arg === '--bind' ? [call[i + 1]] : []));
+  assert.ok(binds.includes(join(r.home, '.codex')), JSON.stringify(binds));
+});
+
 test('a machine where the write limit does not work starts no session and counts no run', t => {
   const r = ticketSetup(t, [issue(7)], {bin: {bwrap: '#!/bin/sh\necho "bwrap: setting up uid map: Permission denied" >&2\nexit 1\n'}});
   assert.throws(() => r.tick(), error => error.status === 1);

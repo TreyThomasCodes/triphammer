@@ -323,9 +323,16 @@ shift
 exec "$@"
 `, {mode: 0o755});
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
-  const env = {...r.env, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
+  // session-sandbox creates files under the home directory and the directories these variables name, so the runner
+  // gets a home of its own (root/home, `home`) with a Codex directory, and none of them: no test writes the real home,
+  // which a session's write limit leaves read-only.
+  const {CLAUDE_CONFIG_DIR, CODEX_HOME, TRIPHAMMER_HUMANIZER_STATE, XDG_DATA_HOME, NUGET_PACKAGES, NUGET_HTTP_CACHE_PATH,
+    NUGET_PLUGINS_CACHE_PATH, DOCKER_CONFIG, DOTNET_CLI_HOME, ...base} = r.env;
+  const home = join(r.root, 'home');
+  mkdirSync(join(home, '.codex'), {recursive: true});
+  const env = {...base, HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
   return {
-    ...r, env, gh: fake, docker,
+    ...r, env, home, gh: fake, docker,
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
     runTicketRunner: (args = [], extraEnv = {}) =>
       run(join(r.checkout, 'bin/ticket-runner'), args, {env: {...env, ...extraEnv}}),
