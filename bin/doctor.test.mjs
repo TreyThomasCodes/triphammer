@@ -36,7 +36,9 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     },
   });
   const bin = r.gh.bin;
-  r.gh.respond({'label list': {stdout: `${repoLabels.join('\n')}\n`}});
+  // gh's --jq is built in, so the setting's answer is canned as it prints and needs no jq; tests that serve
+  // repo.json instead run it through jq as gh would.
+  r.gh.respond({'label list': {stdout: `${repoLabels.join('\n')}\n`}, 'api repos/': {stdout: 'true\n'}});
   const home = join(r.root, 'home');
   for (const dir of ['.dotnet', '.local']) mkdirSync(join(home, dir), {recursive: true});
   symlinkSync(bin, join(home, '.local/bin'));
@@ -113,7 +115,8 @@ test('a healthy machine passes, and the doctor starts no tick', t => {
   assert.equal(result.output, 'all good\n');
   assert.equal(existsSync(join(r.root, 'state/ticket-runner')), false, 'the doctor created the runner state');
   assert.deepEqual(r.gh.calls(), [['--version'], ['api', 'installation/repositories', '--jq', '.total_count'],
-    ['label', 'list', '-R', 'Example-Owner/example-project', '--limit', '1000', '--json', 'name', '--jq', '.[].name']]);
+    ['label', 'list', '-R', 'Example-Owner/example-project', '--limit', '1000', '--json', 'name', '--jq', '.[].name'],
+    ['api', 'repos/Example-Owner/example-project', '--jq', '.delete_branch_on_merge | tojson']]);
   const units = lines(join(r.root, 'systemctl/calls')).map(line => JSON.parse(line).at(-1));
   assert.deepEqual(units, ['ticket-runner@triphammer.timer', 'merge-when-ready@triphammer.timer']);
 });
@@ -367,6 +370,46 @@ test('gh that does not act as the App is reported', t => {
   r.gh.respond({'api installation/repositories': {exit: 1, stderr: 'HTTP 403\n'}});
   assertOneProblem(r.doctor(), /^gh does not act as the agents' GitHub App on Example-Owner, the owner of Example-Owner\/example-project .*Fix: install the App on Example-Owner, link bin\/gh and github-app-token/);
   assert.ok(!r.gh.calls().some(call => call[0] === 'label'), 'the labels were looked up without the App');
+  assert.ok(!r.gh.calls().some(call => call[1]?.startsWith('repos/')), 'the repository was read without the App');
+});
+
+test('a repository that keeps head branches after merge is reported, with the owner\'s setting as the fix', t => {
+  const r = doctorSetup(t);
+  r.gh.respond({'api repos/': {file: 'repo.json'}});
+  r.gh.json('repo.json', {full_name: 'Example-Owner/example-project', delete_branch_on_merge: true});
+  const on = r.doctor();
+  assert.equal(on.status, 0, on.output);
+  r.gh.json('repo.json', {full_name: 'Example-Owner/example-project', delete_branch_on_merge: false});
+  assertOneProblem(r.doctor(), new RegExp('^Example-Owner/example-project keeps head branches after their pull requests merge '
+    + '\\(delete_branch_on_merge is off\\)\\. Fix: the owner turns on Automatically delete head branches in the repository\'s '
+    + 'settings, or runs gh api -X PATCH repos/Example-Owner/example-project -F delete_branch_on_merge=true '));
+  // The doctor only reads the setting.
+  assert.ok(!r.gh.calls().some(call => call.includes('-X') || call.includes('PATCH')), 'the doctor changed the repository');
+});
+
+for (const [name, answer] of [
+  ['an answer without the setting', {file: 'repo.json'}],
+  ['an answer whose setting is not a boolean', {file: 'repo.json', value: 'true'}],
+  ['a failing call', {exit: 1, stderr: 'HTTP 403\n'}],
+]) {
+  test(`${name} for delete_branch_on_merge is reported as not checked, never as on`, t => {
+    const r = doctorSetup(t);
+    const {value, ...route} = answer;
+    r.gh.json('repo.json', {full_name: 'Example-Owner/example-project', ...(value === undefined ? {} : {delete_branch_on_merge: value})});
+    r.gh.respond({'api repos/': route});
+    assertOneProblem(r.doctor(), new RegExp('^gh api repos/Example-Owner/example-project gives no delete_branch_on_merge, '
+      + 'so whether Example-Owner/example-project deletes head branches after merge was not checked\\. Fix: the owner checks '
+      + 'Automatically delete head branches'));
+  });
+}
+
+test('the labels and the head branch setting are checked independently', t => {
+  const r = doctorSetup(t);
+  r.gh.respond({'label list': {exit: 1, stderr: 'HTTP 404\n'}, 'api repos/': {stdout: 'false\n'}});
+  const result = r.doctor();
+  assert.equal(result.problems.length, 2, result.output);
+  assert.match(result.problems[0], /^gh label list fails for /);
+  assert.match(result.problems[1], /keeps head branches after their pull requests merge/);
 });
 
 test('the App check gets its token for the owner of REPO, not the owner file\'s account', t => {

@@ -308,21 +308,37 @@ fi
 # gh as the App: only an installation token may list the installation's repositories.
 if tool gh "GitHub's gh" "install gh (https://cli.github.com) $units_path; through bin/gh it also needs the App's token (github-app-token)"; then
   # Its token is for the App's installation on the account that owns REPO, as ticket-runner's is (bin/github-app-token).
-  # Only this call needs it: the label list below names REPO with -R, from which bin/gh takes the account, and
+  # The calls without -R need it: the label list below names REPO with -R, from which bin/gh takes the account, and
   # `gh --version` above only shows that gh runs.
   app_owner="${cfg_repo%%/*}"
   if ! GITHUB_APP_OWNER="$app_owner" gh api installation/repositories --jq .total_count >/dev/null 2>&1; then
     problem "gh does not act as the agents' GitHub App on $app_owner, the owner of $cfg_repo (gh api installation/repositories fails)" \
       "install the App on $app_owner, link bin/gh and github-app-token into ~/.local/bin ahead of GitHub's gh and check the App's files (bin/README.md, Install)"
-  # The labels Triphammer reads and sets (bin/labels.sh), checked only once gh acts as the App, whose view counts.
-  elif ! missing="$(missing_labels "$cfg_repo" 2>/dev/null)"; then
-    problem "gh label list fails for $cfg_repo, so the labels Triphammer uses were not checked" \
-      "install the agents' GitHub App on $cfg_repo, then run the doctor again (bin/README.md, Labels)"
   else
-    while IFS= read -r name; do
-      [ -z "$name" ] || problem "$cfg_repo has no label $name, which Triphammer reads or sets" \
-        "run triphammer add $cfg_repo again, with the options it was added with (bin/README.md, Labels)"
-    done <<< "$missing"
+    # The labels Triphammer reads and sets (bin/labels.sh), checked only once gh acts as the App, whose view counts.
+    if ! missing="$(missing_labels "$cfg_repo" 2>/dev/null)"; then
+      problem "gh label list fails for $cfg_repo, so the labels Triphammer uses were not checked" \
+        "install the agents' GitHub App on $cfg_repo, then run the doctor again (bin/README.md, Labels)"
+    else
+      while IFS= read -r name; do
+        [ -z "$name" ] || problem "$cfg_repo has no label $name, which Triphammer reads or sets" \
+          "run triphammer add $cfg_repo again, with the options it was added with (bin/README.md, Labels)"
+      done <<< "$missing"
+    fi
+    # Merged branches are deleted only with delete_branch_on_merge on: GitHub carries out an armed auto-merge later, and
+    # merge-when-ready merges without --delete-branch. GitHub may leave the field out for a token without admin access,
+    # which prints null; tojson keeps a string quoted, so only the boolean true passes and only false counts as off.
+    delete_branch="$(GITHUB_APP_OWNER="$app_owner" gh api "repos/$cfg_repo" --jq '.delete_branch_on_merge | tojson' 2>/dev/null)" \
+      || delete_branch=''
+    case "$delete_branch" in
+      true) ;;
+      false)
+        problem "$cfg_repo keeps head branches after their pull requests merge (delete_branch_on_merge is off)" \
+          "the owner turns on Automatically delete head branches in the repository's settings, or runs gh api -X PATCH repos/$cfg_repo -F delete_branch_on_merge=true (bin/README.md, Install)" ;;
+      *)
+        problem "gh api repos/$cfg_repo gives no delete_branch_on_merge, so whether $cfg_repo deletes head branches after merge was not checked" \
+          "the owner checks Automatically delete head branches in the repository's settings, or grants the agents' GitHub App read access to its administration (bin/README.md, Install)" ;;
+    esac
   fi
 fi
 
