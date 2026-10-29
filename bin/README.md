@@ -787,6 +787,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | Credential files | `app-id`, `owner` and `agents.pem` in `${GITHUB_APP_CONFIG_DIR:-~/.config/github-app}`, and `QWEN_KEY_FILE` with the `qwen-audit` module on, are regular files owned by the user running the doctor, mode 600. It looks at them with `stat` only and never opens, reads or prints them. |
 | The App | `gh api installation/repositories` succeeds, which only the App's installation token can do (the `gh` wrapper, see Install). It runs with `GITHUB_APP_OWNER` set to the owner part of `REPO`, as `ticket-runner` sets it, so the token is for the App's installation on the account that owns `REPO`, not the `owner` file's. |
 | Labels | Once the App check passes, `gh label list` for `REPO` lists `hold`, `needs-owner`, `stop-agents`, `next`, `agent-working` and `light` (Labels), names compared case-insensitively. Each missing one is a problem whose fix is running `triphammer add <REPO>` again with the options the project was added with; a list that fails is a problem of its own, never a pass. |
+| Merged branches | Once the App check passes, whatever the labels give, `gh api repos/<REPO>` answers `delete_branch_on_merge` true, so GitHub deletes a pull request's branch when it merges (Install, Merged branches). False is a problem whose fix is the owner's: turn on "Automatically delete head branches" in the repository's settings, or `gh api -X PATCH repos/<REPO> -F delete_branch_on_merge=true`. A call that fails, or an answer without a boolean `delete_branch_on_merge` (GitHub may leave it out for a token without admin access), is a problem of its own saying the setting was not checked, never a pass. The doctor only reads the setting. |
 | Logins | `claude auth status` reports logged in; `codex login status` succeeds with the `codex` module on. |
 | Plugins | `claude plugin list --json` lists at user scope the Triphammer plugin (named by `.claude-plugin/marketplace.json` in Triphammer's checkout) and `humanizer@humanizer`, as `provision` checks them. Each missing one is a problem whose fix is running the installer again; a list that fails is a problem of its own, never a pass. Skipped without `jq`. |
 | bwrap | `bwrap --version` runs and `bwrap --unshare-user --ro-bind / / true` succeeds: the sessions' write limit (Sessions, The write limit), and Codex's sandbox, need unprivileged user namespaces, which Ubuntu restricts with AppArmor. Without them the runner starts no session. |
@@ -884,6 +885,12 @@ Another project on the same machine needs only its config file, `<name>.conf` wi
 `STATE_DIR`, and `systemctl --user enable --now ticket-runner@<name>.timer merge-when-ready@<name>.timer`; the projects
 then run one session at a time between them, or up to the number in the shared directory's `max-sessions` when the
 owner writes one (Several projects).
+
+**Merged branches.** For each project the owner turns on "Automatically delete head branches" in the repository's
+settings (General, Pull Requests), or runs `gh api -X PATCH repos/<owner>/<repo> -F delete_branch_on_merge=true` with
+the owner's own login. GitHub carries out an armed auto-merge later and deletes its branch only with that setting on,
+and `merge-when-ready` merges without deleting the branch, so without it every merged branch stays on GitHub. The App
+does not change repository settings; the doctor reports the setting when it is off.
 
 A machine that runs the non-template units (`ticket-runner.timer` and `merge-when-ready.timer`, which serve the project of
 the checkout the scripts live in) cuts over by linking the template units as above, checking that the project's
