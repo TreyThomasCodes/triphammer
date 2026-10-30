@@ -186,6 +186,15 @@ for (const [name, command, file] of [
   ['node -r before --eval', `node -r ./setup.js --eval 'fs.writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
   ['node --require before a heredoc', `node --require ./setup.js <<'EOF'\nfs.writeFileSync("src/x.cs", "x")\nEOF`,
     'src/x.cs'],
+  ['node -pe', `node -pe 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node -p', `node -p 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node --unhandled-rejections before -e',
+    `node --unhandled-rejections strict -e 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node --diagnostic-dir before a heredoc',
+    `node --diagnostic-dir /tmp <<'EOF'\nfs.writeFileSync("src/x.cs", "x")\nEOF`, 'src/x.cs'],
+  ['node -e after an option missing from the table',
+    `node --stack-size 2000 -e 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['python -c after an unknown option and its value', `python3 --unknown value -c 'open("src/x.cs", "w")'`, 'src/x.cs'],
 ]) {
   test(`a script write through ${name} is refused`, t => {
     const {dir} = repo(t);
@@ -204,6 +213,8 @@ test('scripts that read a tracked file, or write elsewhere or an untracked file,
     `python3 -c 'open("/tmp/out.cs", "w").write("x")'`,
     `node -e 'console.log(require("fs").readFileSync("src/x.cs", "utf8"))'`,
     `python3 tool.py <<'EOF'\nopen("src/x.cs", "w")\nEOF`,
+    `python3 -m tool <<'EOF'\nopen("src/x.cs", "w")\nEOF`,
+    `node --diagnostic-dir /tmp tool.js <<'EOF'\nfs.writeFileSync("src/x.cs", "x")\nEOF`,
     `cat <<'EOF'\nopen("src/x.cs", "w")\nEOF`,
     `cd src && python3 -c 'open("x.cs", "w").write("x")'`,
   ]) {

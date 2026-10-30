@@ -93,12 +93,27 @@ PATH_VARIABLES = ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TRIPHAMMER_SHARE
 # Files a write may always name: they hold nothing.
 DEVICES = re.compile(r"/dev/(?:null|zero|full|stdout|stderr|tty|fd/\d+)|/proc/self/fd/\d+")
 # Interpreters whose script, from -c or -e or a heredoc on stdin, the shell-edit rule reads: the option letters that
-# give the script, the other letters that take a value, and the long options that take the next word as a value (node's
-# common ones; the rest written with `=` cost nothing).
+# give the script, the other letters that take a value, and the long options that take the next word as a value (those
+# `python3 --help` and `node --help` list).
 INTERPRETERS = {
     "python": ("c", "mWX", {"--check-hash-based-pycs"}),
-    "node": ("ep", "rC", {"--require", "--import", "--loader", "--experimental-loader", "--conditions", "--input-type",
-                          "--env-file", "--env-file-if-exists", "--title", "--disable-warning", "--redirect-warnings"}),
+    "node": ("ep", "rC", {
+        "--allow-fs-read", "--allow-fs-write", "--build-snapshot-config", "--conditions", "--cpu-prof-dir",
+        "--cpu-prof-interval", "--cpu-prof-name", "--debug-port", "--diagnostic-dir", "--disable-proto",
+        "--disable-warning", "--dns-result-order", "--env-file", "--env-file-if-exists", "--experimental-config-file",
+        "--experimental-loader", "--experimental-sea-config", "--experimental-test-isolation",
+        "--experimental-test-tag-filter", "--heap-prof-dir", "--heap-prof-interval", "--heap-prof-name",
+        "--heapsnapshot-near-heap-limit", "--heapsnapshot-signal", "--icu-data-dir", "--import", "--input-type",
+        "--inspect-port", "--inspect-publish-uid", "--loader", "--localstorage-file", "--max-http-header-size",
+        "--max-old-space-size-percentage", "--network-family-autoselection-attempt-timeout", "--openssl-config",
+        "--redirect-warnings", "--report-dir", "--report-directory", "--report-filename", "--report-signal",
+        "--require", "--run", "--secure-heap", "--secure-heap-min", "--snapshot-blob", "--test-concurrency",
+        "--test-coverage-branches", "--test-coverage-exclude", "--test-coverage-functions", "--test-coverage-include",
+        "--test-coverage-lines", "--test-global-setup", "--test-isolation", "--test-name-pattern", "--test-random-seed",
+        "--test-reporter", "--test-reporter-destination", "--test-rerun-failures", "--test-shard",
+        "--test-skip-pattern", "--test-timeout", "--title", "--tls-cipher-list", "--tls-keylog",
+        "--trace-event-categories", "--trace-event-file-pattern", "--trace-require-module", "--unhandled-rejections",
+        "--use-largepages", "--v8-pool-size", "--watch-kill-signal", "--watch-path"}),
 }
 # A script's writes to a literal path: open(path, mode) with a writing mode, Path(path).write_text or write_bytes, and
 # node's fs.writeFile and appendFile (also Sync).
@@ -539,31 +554,36 @@ def analyze(command, cwd, findings, bodies):
 
 
 def interpreter_scripts(kind, args, heredocs):
-    """The script texts a python or node command runs: its -c or -e value, else its heredocs when it reads the script
-    from stdin (no script file named, or `-`)."""
+    """The script texts a python or node command runs: every -c or -e value wherever it stands, so an option missing
+    from INTERPRETERS cannot hide one, else its heredocs when it reads the script from stdin (no script file or module
+    named before, or `-`). Node takes a short option's value from the next word only, and `-pe` is `-p -e`."""
     script_letters, value_letters, long_values = INTERPRETERS[kind]
-    i = 0
+    scripts, stdin, i = [], None, 0
     while i < len(args):
         v, i = args[i].value, i + 1
         if v == "-" or not v.startswith("-"):
-            return heredocs if v == "-" else []
+            stdin = v == "-" if stdin is None else stdin
+            continue
         if v.startswith("--"):
             name, eq, attached = v.partition("=")
             if kind == "node" and name in ("--eval", "--print"):
-                return [attached] if eq else [args[i].value] if i < len(args) else []
+                if eq or i < len(args):
+                    scripts.append(attached if eq else args[i].value)
+                    i += not eq
+                continue
             i += not eq and name in long_values
             continue
         end = value_letter(v, script_letters + value_letters)
         if end is None:
             continue
-        value = v[end + 1:]
+        value = v[end + 1:] if kind != "node" else ""
         if not value and i < len(args):
             value, i = args[i].value, i + 1
         if v[end] in script_letters:
-            return [value]
-        if v[end] == "m":
-            return []
-    return heredocs
+            scripts.append(value)
+        elif v[end] == "m" and stdin is None:
+            stdin = False
+    return scripts or (heredocs if stdin is not False else [])
 
 
 def analyze_copy(name, args, cwd, findings):
