@@ -2,9 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
-import {createServer} from 'node:net';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, listenUnix, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -55,6 +54,24 @@ function sandboxRig(t) {
     return {status: result.status, output: result.stdout + result.stderr};
   };
   return {root, main, triphammer, home, worktree, env: {...env, HOME: home}, inside};
+}
+
+// Runs `before` under the limit, then `during` outside while the command waits, then `after` in the same command, with
+// `extra` in the environment; returns the command's exit status and output.
+async function insideAround(t, r, before, during, after, extra = {}) {
+  const signal = mkdtempSync('/tmp/session-sandbox-signal-');
+  t.after(() => rmSync(signal, {recursive: true, force: true}));
+  const child = spawn(join(r.triphammer, 'bin/session-sandbox'), [r.worktree, 'sh', '-c', `${before}; : > '${signal}/paused'
+for i in $(seq 100); do [ -e '${signal}/resumed' ] && break; sleep 0.1; done; ${after}`],
+  {cwd: r.worktree, env: {...r.env, ...extra}});
+  let output = '';
+  child.stdout.on('data', data => { output += data; });
+  child.stderr.on('data', data => { output += data; });
+  const exited = new Promise(done => child.on('exit', done));
+  for (let i = 0; i < 100 && !existsSync(join(signal, 'paused')); i++) await new Promise(done => setTimeout(done, 100));
+  await during();
+  writeFileSync(join(signal, 'resumed'), '');
+  return {status: await exited, output};
 }
 
 // Asserts that writing each of `paths` under the limit, with `extra` in the environment, is refused and leaves it as
@@ -515,20 +532,11 @@ test("under the limit, the App's files, the token cache and other sessions' toke
 test('a token file the runner rewrites through a rename shows inside the limit while the session runs', {skip}, async t => {
   const r = sandboxRig(t);
   const {own} = tokenFiles(r);
-  const signal = mkdtempSync('/tmp/session-sandbox-token-');
-  t.after(() => rmSync(signal, {recursive: true, force: true}));
-  const child = spawn(join(r.triphammer, 'bin/session-sandbox'), [r.worktree, 'sh', '-c', `cat '${own}'; : > '${signal}/read'
-for i in $(seq 100); do [ -e '${signal}/renamed' ] && break; sleep 0.1; done; cat '${own}'`],
-  {cwd: r.worktree, env: {...r.env, TRIPHAMMER_TOKEN_FILE: own}});
-  let output = '';
-  child.stdout.on('data', data => { output += data; });
-  child.stderr.on('data', data => { output += data; });
-  const exited = new Promise(done => child.on('exit', done));
-  for (let i = 0; i < 100 && !existsSync(join(signal, 'read')); i++) await new Promise(done => setTimeout(done, 100));
-  writeFileSync(`${own}.new`, '{"token":"ghs_second"}\n');
-  renameSync(`${own}.new`, own);
-  writeFileSync(join(signal, 'renamed'), '');
-  assert.equal(await exited, 0, output);
+  const {status, output} = await insideAround(t, r, `cat '${own}'`, () => {
+    writeFileSync(`${own}.new`, '{"token":"ghs_second"}\n');
+    renameSync(`${own}.new`, own);
+  }, `cat '${own}'`, {TRIPHAMMER_TOKEN_FILE: own});
+  assert.equal(status, 0, output);
   assert.equal(output, '{"token":"ghs_first"}\n{"token":"ghs_second"}\n');
 });
 
@@ -552,13 +560,10 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
   mkdirSync(join(runtime, 'gnupg'), {recursive: true, mode: 0o700});
   const sockets = {bus: join(runtime, 'bus'), agent: join(runtime, 'openssh_agent'),
     gpg: join(runtime, 'gnupg/S.gpg-agent'), docker: join(runtime, 'docker.sock')};
-  for (const path of Object.values(sockets)) {
-    const server = createServer(socket => socket.destroy());
-    await new Promise((resolve, reject) => server.once('error', reject).listen(path, resolve));
-    t.after(() => server.close());
-  }
+  for (const path of Object.values(sockets)) await listenUnix(t, path);
   const env = {XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sockets.bus}`,
-    SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`};
+    SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`,
+    TRIPHAMMER_DOCKER: '1'};
   for (const what of ['bus', 'agent', 'gpg']) {
     const {status, output} = r.inside(connect(sockets[what]), env);
     assert.notEqual(status, 0, `the ${what} socket was reached: ${output}`);
@@ -573,6 +578,90 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
   assert.equal(status, 0, output);
   assert.equal(output, `dbus=unset ssh=unset gpg=unset runtime=${runtime}\ndocker.sock\n700\nmade\n`);
   assert.ok(!existsSync(join(runtime, 'made')), "the runtime directory's tmpfs reached outside");
+  const {TRIPHAMMER_DOCKER, ...withoutDocker} = env;
+  const hidden = r.inside(`${connect(sockets.docker)}; ls -A "$XDG_RUNTIME_DIR"`, withoutDocker);
+  assert.match(hidden.output, /FileNotFoundError/, hidden.output);
+  assert.doesNotMatch(hidden.output, /docker\.sock/, hidden.output);
+});
+
+// A Docker socket outside the limit that DOCKER_HOST names, listening, and the machine's own Docker sockets.
+async function dockerSocket(t, r, socket = join(r.root, 'docker.sock')) {
+  const server = await listenUnix(t, socket);
+  return {socket, server, env: {DOCKER_HOST: `unix://${socket}`}};
+}
+// What a daemon restart does to its socket: closes it, deletes it and listens at the same path again.
+async function restart(t, r, server, socket) {
+  await new Promise(done => server.close(done));
+  rmSync(socket, {force: true});
+  await dockerSocket(t, r, socket);
+}
+const machineSockets = ['/var/run/docker.sock', '/run/docker.sock'];
+// Whether a socket at each of the machine's paths shows inside: `<path> socket` or `<path> none`.
+const findSockets = machineSockets.map(path => `if [ -S ${path} ]; then echo "${path} socket"; else echo "${path} none"; fi`)
+  .join('; ');
+const isSocket = path => spawnSync('test', ['-S', path]).status === 0;
+
+test("a project without Docker gets no Docker socket: one DOCKER_HOST names outside the limit and the machine's are hidden", {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, env} = await dockerSocket(t, r);
+  for (const extra of [{}, {TRIPHAMMER_DOCKER: 'true'}, {TRIPHAMMER_DOCKER: '0'}]) {
+    const {status, output} = r.inside(`${connect(socket)}; test -S '${socket}' || echo "no socket"`, {...env, ...extra});
+    assert.equal(status, 0, output);
+    assert.doesNotMatch(output, /^connected /m, output);
+    assert.match(output, /FileNotFoundError/, output);
+    assert.match(output, /^no socket$/m, output);
+    const machine = r.inside(findSockets, {...env, ...extra});
+    assert.equal(machine.output, machineSockets.map(path => `${path} none\n`).join(''), JSON.stringify(extra));
+  }
+  assert.ok(isSocket(socket), 'the socket outside is untouched');
+});
+
+test('a project with Docker reaches the Docker socket DOCKER_HOST names outside the limit, and the machine\'s', {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, env} = await dockerSocket(t, r);
+  const {status, output} = r.inside(connect(socket), {...env, TRIPHAMMER_DOCKER: '1'});
+  assert.equal(status, 0, output);
+  assert.equal(output, `connected ${socket}\n`);
+  const machine = r.inside(findSockets, {...env, TRIPHAMMER_DOCKER: '1'});
+  assert.equal(machine.output, machineSockets.map(path => `${path} ${isSocket(path) ? 'socket' : 'none'}\n`).join(''));
+});
+
+test('a project without Docker cannot reach a Docker socket the daemon deletes and makes again while the command runs', {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, server, env} = await dockerSocket(t, r);
+  const {status, output} = await insideAround(t, r, connect(socket), () => restart(t, r, server, socket), connect(socket),
+    env);
+  assert.equal(status, 1, output);
+  assert.doesNotMatch(output, /^connected /m, output);
+  assert.equal(output.match(/FileNotFoundError/g)?.length, 2, output);
+  assert.ok(isSocket(socket), 'the socket outside was made again');
+});
+
+test('a project without Docker cannot reach a Docker socket made only after the command starts', {skip}, async t => {
+  const r = sandboxRig(t);
+  for (const socket of [join(r.root, 'docker.sock'), join(r.root, 'later/run/docker.sock')]) {
+    const later = async () => {
+      mkdirSync(dirname(socket), {recursive: true});
+      await dockerSocket(t, r, socket);
+    };
+    const {status, output} = await insideAround(t, r, `test -e '${socket}' || echo absent`, later,
+      `${connect(socket)}; ls -A '${r.root}'`, {DOCKER_HOST: `unix://${socket}`});
+    assert.equal(status, 0, output);
+    assert.match(output, /^absent$/m, output);
+    assert.doesNotMatch(output, /^connected /m, output);
+    assert.match(output, /FileNotFoundError/, output);
+    assert.doesNotMatch(output, socket.endsWith('/run/docker.sock') ? /^later$/m : /^docker\.sock$/m, output);
+    assert.ok(isSocket(socket), 'the socket outside was made');
+  }
+});
+
+test('a project with Docker still reaches a Docker socket the daemon deletes and makes again while the command runs', {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, server, env} = await dockerSocket(t, r);
+  const {status, output} = await insideAround(t, r, connect(socket), () => restart(t, r, server, socket), connect(socket),
+    {...env, TRIPHAMMER_DOCKER: '1'});
+  assert.equal(status, 0, output);
+  assert.equal(output, `connected ${socket}\nconnected ${socket}\n`);
 });
 
 // The user's own runtime directory, which the user manager and the session bus listen in, when this machine has one.
