@@ -72,7 +72,9 @@ fail() {
   exit 1
 }
 
-# The machine file: Triphammer's repository and checkout, the service user and its home.
+# The machine file: Triphammer's repository and checkout, the service user and its home. This script reads it itself,
+# not through config.sh's machine_get: provision installs it alone, as a copy root owns, and root must not source the
+# service user's checkout.
 read_machine() {
   local line key value
   tri_repo="" tri_checkout="" user="" home=""

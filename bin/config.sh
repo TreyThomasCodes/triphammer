@@ -32,6 +32,19 @@
 # same_repo <dir> <dir>: succeeds when both directories are in one git repository (one common git directory), as a
 # project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is, or when one is a run's clone of the
 # other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
+#
+# machine_get <KEY>: prints the value of the machine file ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf gives KEY
+# (bin/provision writes it, one KEY=VALUE per line; bin/provision-lib.sh), as it stands after the `=`, from the last
+# line that gives it, or nothing when the file is missing or unreadable or gives no KEY. It checks no value: each
+# caller checks its own. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
+machine_get() {
+  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line value=""
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" != "$1="* ]] || value="${line#*=}"
+  done < "$file"
+  printf '%s' "$value"
+}
 
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
 # checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
