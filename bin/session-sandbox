@@ -76,14 +76,17 @@
 # network is shared. The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, are
 # each an empty tmpfs of mode 0700 that the command may write, mounted before everything above, so neither the user
 # manager, the session bus nor an agent's socket there is reachable; DBUS_SESSION_BUS_ADDRESS, SSH_AUTH_SOCK and
-# GPG_AGENT_INFO are unset. With TRIPHAMMER_DOCKER=1, which ticket-runner sets for a project whose project file
-# declares "docker": true, a rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back.
-# Without it the machine's Docker sockets are hidden too, whether they exist when the command starts or not: the
-# directory of each of /var/run/docker.sock, /run/docker.sock and the socket a DOCKER_HOST of unix://<path> names
-# outside the runtime directories becomes an empty tmpfs holding each of its entries but the socket's name, mounted
-# back as before, so neither a socket the daemon deletes and makes again nor one it makes later shows inside. For a
-# path whose directory is missing, the first missing name on its way is left out of the directory that exists. What
-# the machine adds to such a directory later, other than in an entry mounted back, does not show inside either.
+# GPG_AGENT_INFO are unset. The rootful Docker daemon's sockets, /var/run/docker.sock and /run/docker.sock, are hidden
+# for every command, whether they exist when the command starts or not: the directory of each becomes an empty tmpfs
+# holding each of its entries but the socket's name, mounted back as before, so neither a socket the daemon deletes and
+# makes again nor one it makes later shows inside. With TRIPHAMMER_DOCKER=1, which ticket-runner sets for a project
+# whose project file declares "docker": true, the command reaches the socket DOCKER_HOST (unix://<path>) names, which
+# ticket-runner sets to the rootless daemon's (/var/lib/<user>-docker/docker.sock, from the machine file): it stays
+# where it lies, read-only like the rest of the file system, so a daemon that makes it again is still reached, and one
+# in a runtime directory is mounted back into its tmpfs. Without it that socket is hidden as the rootful ones are,
+# unless it lies directly in /. For a path whose directory is missing, the first missing name on its way is left out
+# of the directory that exists. What the machine adds to such a directory later, other than in an entry mounted back,
+# does not show inside either.
 # bwrap ends the command when its parent dies (--die-with-parent), and every process left inside when the command
 # exits.
 #
@@ -93,11 +96,14 @@
 # which a later session of the same project reads and runs (a package in nuget/packages whose MSBuild targets a later
 # build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a later docker build
 # uses); anything else a writable path above lets a later session read (a transcript, local-audit's run count); with
-# TRIPHAMMER_DOCKER=1, the Docker socket, which the command can still reach, so a container started through Docker can
-# write anywhere on the machine; without it, a Docker daemon reached some other way than the sockets above (a socket
+# TRIPHAMMER_DOCKER=1, what the rootless daemon's user can do, as a container started through it, privileged or
+# mounting / or not, acts as that user on the machine: it reads what is world-readable there and the run clones in
+# <checkout>/.worktrees, which the command could read already, and writes what that user may (its own home, and
+# whatever on the machine is world-writable), and the containers and volumes of every project that declares Docker,
+# which share that daemon; a Docker daemon reached some other way than the sockets above (a socket
 # elsewhere, a Docker context, TCP), a DOCKER_HOST socket whose directory is deleted and made again while the command
-# runs, or one directly in /; and abstract Unix sockets, services listening on the machine's localhost, as the network is shared, and the
-# system bus, which the command can reach too.
+# runs, or one directly in /; and abstract Unix sockets, services listening on the machine's localhost, as the network
+# is shared, and the system bus, which the command can reach too.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
 # lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory,
@@ -298,42 +304,43 @@ else
   for name in "${cache_subdirs[@]}"; do args+=(--dir "$cache_dir/$name"); done
 fi
 [ -z "$token_dir" ] || bind --ro-bind "$token_dir"
-# For a project that does not use Docker, each Docker socket's directory, whether the socket exists or not: a mount
-# over the socket itself would hold only until the daemon deletes it and makes it again. A path whose directory is
-# missing hides the first missing name on its way in the directory that exists.
-if [ -z "$docker" ]; then
-  hide_dirs=() hide_names=()
-  for path in /var/run/docker.sock /run/docker.sock "$docker_host"; do
-    [ -n "$path" ] || continue
-    path="$(readlink -m -- "$path")"
-    while [ "$path" != / ] && [ ! -d "$(dirname -- "$path")" ]; do path="$(dirname -- "$path")"; done
-    [ "$path" != / ] && [ "$(dirname -- "$path")" != / ] || continue
-    hide_dirs+=("$(dirname -- "$path")") hide_names+=("${path##*/}")
+# The rootful Docker daemon's sockets for every project, and for a project that does not use Docker the socket
+# DOCKER_HOST names too: each socket's directory, whether the socket exists or not, as a mount over the socket itself
+# would hold only until the daemon deletes it and makes it again. A path whose directory is missing hides the first
+# missing name on its way in the directory that exists.
+hide_sockets=(/var/run/docker.sock /run/docker.sock)
+[ -n "$docker" ] || hide_sockets+=("$docker_host")
+hide_dirs=() hide_names=()
+for path in "${hide_sockets[@]}"; do
+  [ -n "$path" ] || continue
+  path="$(readlink -m -- "$path")"
+  while [ "$path" != / ] && [ ! -d "$(dirname -- "$path")" ]; do path="$(dirname -- "$path")"; done
+  [ "$path" != / ] && [ "$(dirname -- "$path")" != / ] || continue
+  hide_dirs+=("$(dirname -- "$path")") hide_names+=("${path##*/}")
+done
+# Each directory once: an empty tmpfs over it holding each entry but the hidden names, mounted back as the last mount
+# on the directory or one it lies in mounted it, and spliced right after that mount, so every later mount, inside
+# the directory or not, still comes after it. A directory in a tmpfs (a runtime directory's) is hidden already.
+for i in "${!hide_dirs[@]}"; do
+  dir="${hide_dirs[$i]}"
+  for ((j = 0; j < i; j++)); do [ "${hide_dirs[$j]}" != "$dir" ] || continue 2; done
+  for ((at = ${#args[@]} - 1; at > 1; at--)); do
+    [[ "${args[$at]}" == / || "$dir" == "${args[$at]}" || "$dir" == "${args[$at]}"/* ]] || continue
+    option="${args[$at - 1]}"
+    [ "$option" = --tmpfs ] || option="${args[$at - 2]}"
+    case "$option" in --tmpfs | --bind | --ro-bind) break ;; esac
   done
-  # Each directory once: an empty tmpfs over it holding each entry but the hidden names, mounted back as the last mount
-  # on the directory or one it lies in mounted it, and spliced right after that mount, so every later mount, inside
-  # the directory or not, still comes after it. A directory in a tmpfs (a runtime directory's) is hidden already.
-  for i in "${!hide_dirs[@]}"; do
-    dir="${hide_dirs[$i]}"
-    for ((j = 0; j < i; j++)); do [ "${hide_dirs[$j]}" != "$dir" ] || continue 2; done
-    for ((at = ${#args[@]} - 1; at > 1; at--)); do
-      [[ "${args[$at]}" == / || "$dir" == "${args[$at]}" || "$dir" == "${args[$at]}"/* ]] || continue
-      option="${args[$at - 1]}"
-      [ "$option" = --tmpfs ] || option="${args[$at - 2]}"
-      case "$option" in --tmpfs | --bind | --ro-bind) break ;; esac
+  [ "$option" != --tmpfs ] || continue
+  hidden=(--tmpfs "$dir")
+  for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    for ((j = i; j < ${#hide_dirs[@]}; j++)); do
+      [ "${hide_dirs[$j]}" != "$dir" ] || [ "${hide_names[$j]}" != "${path##*/}" ] || continue 2
     done
-    [ "$option" != --tmpfs ] || continue
-    hidden=(--tmpfs "$dir")
-    for path in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
-      [ -e "$path" ] || [ -L "$path" ] || continue
-      for ((j = i; j < ${#hide_dirs[@]}; j++)); do
-        [ "${hide_dirs[$j]}" != "$dir" ] || [ "${hide_names[$j]}" != "${path##*/}" ] || continue 2
-      done
-      if [ -L "$path" ]; then hidden+=(--symlink "$(readlink -- "$path")" "$path"); else hidden+=("$option" "$path" "$path"); fi
-    done
-    [ "$option" = --bind ] || hidden+=(--remount-ro "$dir")
-    args=("${args[@]:0:at + 1}" "${hidden[@]}" "${args[@]:at + 1}")
+    if [ -L "$path" ]; then hidden+=(--symlink "$(readlink -- "$path")" "$path"); else hidden+=("$option" "$path" "$path"); fi
   done
-fi
+  [ "$option" = --bind ] || hidden+=(--remount-ro "$dir")
+  args=("${args[@]:0:at + 1}" "${hidden[@]}" "${args[@]:at + 1}")
+done
 
 exec bwrap "${args[@]}" -- "$@"

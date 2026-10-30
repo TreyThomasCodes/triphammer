@@ -11,6 +11,7 @@ const qwenUrl = 'http://model.example.invalid:8080';
 const dotNetDropIn = '[Service]\nEnvironment=PATH=%h/.local/bin:%h/.dotnet:%h/.dotnet/tools:/usr/local/bin:/usr/bin:/bin\n'
   + 'Environment=DOTNET_ROOT=%h/.dotnet\n';
 const repoLabels = ['agent-working', 'bug', 'Cleanup', 'Hold', 'Light', 'needs-owner', 'next', 'stop-agents', 'upkeep'];
+const rootful = 'unix:///var/run/docker.sock';
 const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rollForward, allowPrerelease: false}});
 
 // A machine whose checkout has this branch's doctor and ticket-runner@.service, a global.json pinning 10.0.400
@@ -20,13 +21,16 @@ const globalJson = rollForward => JSON.stringify({sdk: {version: '10.0.400', rol
 // bin/README.md gives for a .NET SDK (`dotNetDropIn`), so the units' PATH starts with its ~/.local/bin (the fakes'
 // `bin`) and ~/.dotnet (a fake dotnet), fake node, shellcheck, systemctl (every unit enabled), bwrap (creates user namespaces), claude (logged
 // in, with the Triphammer and humanizer plugins at user scope), codex, curl (QWEN_BASE_URL answers), gh (acting as
-// the App) and docker (Compose v2) in `bin`, the App's files and a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
+// the App) and docker (Compose v2; the rootless daemon the machine file names answers and the rootful one does not)
+// in `bin`, the App's files and a Qwen key file holding `sentinel` with mode 600, a git config giving a commit identity, a Playwright Chromium
 // that starts headless, and a repository that has every label Triphammer uses (`repoLabels`, as gh label list prints
-// them). `doctor` runs `ticket-runner --doctor` and returns its status
-// and output.
-function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
+// them). Its project declares "docker": true, unless `project` gives another project file. `doctor` runs
+// `ticket-runner --doctor` and returns its status and output.
+function doctorSetup(t, {config = {}, rollForward = 'latestPatch',
+  project = `${JSON.stringify({...JSON.parse(projectJson), docker: true})}\n`} = {}) {
   const r = runnerSetup(t, {
     config,
+    project,
     files: {
       'bin/doctor': readFileSync(join(here, 'doctor'), 'utf8'),
       'systemd/ticket-runner@.service': readFileSync(join(here, '../systemd/ticket-runner@.service'), 'utf8'),
@@ -36,6 +40,7 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch'} = {}) {
     },
   });
   const bin = r.gh.bin;
+  r.docker.refuse(rootful);
   // gh's --jq is built in, so the setting's answer is canned as it prints and needs no jq; tests that serve
   // repo.json instead run it through jq as gh would.
   r.gh.respond({'label list': {stdout: `${repoLabels.join('\n')}\n`}, 'api repos/': {stdout: 'true\n'}});
@@ -203,17 +208,39 @@ test('engines.node partial versions are ranges, as in semver', t => {
   }
 });
 
-test('Docker that does not answer the user, and Docker without Compose v2, are reported', t => {
+test('a rootless Docker daemon that does not answer the user, and Docker without Compose v2, are reported', t => {
   const r = doctorSetup(t);
+  assert.equal(r.doctor().status, 0);
+  const asked = r.docker.hosts().filter(call => !call.includes('|compose version'));
+  assert.deepEqual(asked.map(call => call.slice(0, call.indexOf('|'))), [r.dockerHost, rootful],
+    'the rootless daemon the machine file names, then the rootful one');
   r.docker.compose('1.29.2');
   assertOneProblem(r.doctor(), /^Docker Compose v2 is missing \(docker compose version reports 1\.29\.2\).*Fix: install the docker-compose-plugin/);
   r.docker.compose(null);
   assertOneProblem(r.doctor(), /^Docker Compose v2 is missing \(docker compose version reports nothing\)/);
   r.docker.compose('2.32.4');
+  r.docker.refuse(rootful, r.dockerHost);
+  assertOneProblem(r.doctor(), new RegExp(`^The rootless Docker daemon does not answer this user at ${r.dockerSocket} \\(docker info fails\\).*Fix: start the daemon user's docker.service`));
+});
+
+test('a rootful Docker daemon that answers the service user is reported', t => {
+  const r = doctorSetup(t);
+  r.docker.refuse();
+  assertOneProblem(r.doctor(), /^The rootful Docker daemon at \/var\/run\/docker\.sock answers this user.*Fix: take this user out of the docker group with sudo bin\/provision/);
+});
+
+test('a machine file that names no rootless Docker daemon is reported for a project that declares Docker', t => {
+  const r = doctorSetup(t);
+  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  assertOneProblem(r.doctor(), /^The machine file .*\/etc\/triphammer\.conf names no rootless Docker daemon.*Fix: run sudo bin\/provision/);
+});
+
+test('a project that does not declare Docker gets no Docker checks', t => {
+  const r = doctorSetup(t, {project: projectJson});
   r.docker.unavailable();
   const result = r.doctor();
-  assert.equal(result.status, 1);
-  assert.match(result.problems[0], /^Docker Engine does not answer this user.*Fix: start the Docker daemon and add this user to the docker group/);
+  assert.equal(result.status, 0, result.output);
+  assert.deepEqual(r.docker.calls(), []);
 });
 
 // otherProject(r, name, pattern): a second project on the machine, with a config in the service user's

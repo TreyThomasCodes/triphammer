@@ -616,14 +616,16 @@ test("a project without Docker gets no Docker socket: one DOCKER_HOST names outs
   assert.ok(isSocket(socket), 'the socket outside is untouched');
 });
 
-test('a project with Docker reaches the Docker socket DOCKER_HOST names outside the limit, and the machine\'s', {skip}, async t => {
+test("a project with Docker reaches the Docker socket DOCKER_HOST names outside the limit, and not the machine's rootful ones", {skip}, async t => {
   const r = sandboxRig(t);
   const {socket, env} = await dockerSocket(t, r);
   const {status, output} = r.inside(connect(socket), {...env, TRIPHAMMER_DOCKER: '1'});
   assert.equal(status, 0, output);
   assert.equal(output, `connected ${socket}\n`);
-  const machine = r.inside(findSockets, {...env, TRIPHAMMER_DOCKER: '1'});
-  assert.equal(machine.output, machineSockets.map(path => `${path} ${isSocket(path) ? 'socket' : 'none'}\n`).join(''));
+  for (const host of [env.DOCKER_HOST, 'unix:///run/docker.sock', 'unix:///var/run/docker.sock']) {
+    const machine = r.inside(findSockets, {DOCKER_HOST: host, TRIPHAMMER_DOCKER: '1'});
+    assert.equal(machine.output, machineSockets.map(path => `${path} none\n`).join(''), host);
+  }
 });
 
 test('a project without Docker cannot reach a Docker socket the daemon deletes and makes again while the command runs', {skip}, async t => {

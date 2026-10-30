@@ -92,6 +92,10 @@ source "$bin/labels.sh"
 load_config ticket-runner "$bin/.."
 repo="$cfg_repo" checkout="$cfg_checkout" app_author="$cfg_app_author" state="$cfg_state_dir"
 project="$cfg_project" shared="$cfg_shared_dir"
+# The rootless Docker daemon's socket the machine file names (rootless_docker_host in config.sh), as DOCKER_HOST, or
+# nothing. Every session's write limit and teardown gets it: a project that declares Docker reaches that daemon and no
+# other, and the limit hides it from any other project. The database sweep talks to it too.
+docker_host="$(rootless_docker_host)"
 # The App's login in the issue events API, which the owner's brakes read (owner_brake in bin/labels.sh).
 app_login="$(event_login "$app_author")"
 # The project's cache directory (bin/README.md, The write limit): one per project in the shared directory's caches,
@@ -153,7 +157,8 @@ say() { if [ -n "$dry_run" ]; then printf '%s\n' "$*"; else log "$*"; fi; }
 # The project's data, from .triphammer/project.json in the main checkout (load_project, after the self-update): the
 # command that tears down a run directory's resources, and the compose project names the sweep may prune. Either may
 # be absent, and then its step is skipped without a word. docker is 1 when the project declares "docker": true, and
-# empty otherwise; it becomes the write limit's TRIPHAMMER_DOCKER, without which the limit hides the Docker sockets.
+# empty otherwise; it becomes the write limit's TRIPHAMMER_DOCKER, without which the limit hides the rootless daemon's
+# socket too.
 teardown=() compose_pattern="" docker=""
 load_project() {
   check_project ticket-runner "$checkout" || exit 2
@@ -164,10 +169,10 @@ load_project() {
 }
 
 # sandbox <run directory> <command> [argument...]: runs the command under the write limit, bin/session-sandbox, with the
-# project's cache directory, created first, and its Docker setting.
+# project's cache directory, created first, its Docker setting and the rootless Docker daemon's socket.
 sandbox() {
   mkdir -p -- "$cache_dir" && chmod 700 "$shared/caches" "$cache_dir" \
-    && TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" "$bin/session-sandbox" "$@"
+    && TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" DOCKER_HOST="$docker_host" "$bin/session-sandbox" "$@"
 }
 
 # Removes a run directory, <checkout>/.worktrees/issue-N or pr-N, first running the project's teardown command in it
@@ -245,11 +250,17 @@ prune_runs() {
 
 # Removes every compose project whose name matches the project's composeProjectPattern and whose working directory,
 # <run directory>/database, and that directory are gone. A project any of whose containers names a directory that exists, or
-# names none, is never touched. Without a pattern it does nothing, not even ask Docker.
+# names none, is never touched. Without a pattern it does nothing, not even ask Docker. It asks the rootless daemon,
+# the one sessions reach, and skips when the machine file names none.
 prune_databases() {
   local rows project dir out why
   local -A keep=() gone=()
   [ -n "$compose_pattern" ] || return 0
+  if [ -z "$docker_host" ]; then
+    say "database sweep skipped: the machine file names no rootless Docker daemon (run bin/provision)"
+    return 0
+  fi
+  local -x DOCKER_HOST="$docker_host"
   if ! command -v docker >/dev/null 2>&1 || ! rows="$(docker ps -a --filter label=com.docker.compose.project \
       --format '{{.Label "com.docker.compose.project"}}	{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)"; then
     say "database sweep skipped: docker is unavailable"
@@ -437,6 +448,12 @@ if [ "$kind" = close ]; then
   exit 0
 fi
 
+# A project that declares Docker reaches only the rootless daemon, so on a machine whose machine file names none, as
+# before bin/provision set one up, none of its sessions starts.
+if [ -n "$docker" ] && [ -z "$docker_host" ]; then
+  log "$kind${number:+ #$number}: this project declares \"docker\": true, but the machine file names no rootless Docker daemon, so no session starts (run bin/provision; ticket-runner --doctor names the fix)"
+  exit 1
+fi
 # Every session runs under the write limit (bin/session-sandbox; bin/README.md, The write limit). A machine where it
 # does not work starts none: a dry run of it in the checkout must succeed first, before anything counts as a run.
 if ! why="$(sandbox "$checkout" true 2>&1)"; then
@@ -918,8 +935,9 @@ rm -f "$brake_file"
 # file, which its gh and git read through github-app-token. The session and everything it starts run under the write
 # limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories, the project's cache
 # directory (TRIPHAMMER_CACHE_DIR, which the dry run above created) and little else, and read no token but that file;
-# a project that does not declare Docker gets no Docker socket (TRIPHAMMER_DOCKER, load_project).
-(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# a project that declares Docker reaches the rootless daemon DOCKER_HOST names and no other, and any other project no
+# Docker socket at all (TRIPHAMMER_DOCKER, load_project; docker_host).
+(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" DOCKER_HOST="$docker_host" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep

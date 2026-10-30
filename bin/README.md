@@ -49,6 +49,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
 | `doctor` | `ticket-runner --doctor`: lists what is missing or wrong on the machine for the project, one line per problem with its fix, and exits 1 when anything is; see Doctor below. |
 | `session-sandbox` | `session-sandbox <run directory> <command>`: runs the command under the sessions' write limit, bubblewrap with the file system read-only but for the run directory (the run's clone, with its own `.git`), the temporary directories and what Claude Code writes in the home directory, and with the App's files, the token cache and every session's token hidden but the one `TRIPHAMMER_TOKEN_FILE` names; `ticket-runner` starts every session through it. See Sessions, The write limit. |
+| `docker-probe` | The owner's probe, run as the service user once `provision` has set the rootless Docker daemon up: under the write limit as a Docker project's session, a container that mounts `/`, privileged or not, cannot write in the service user's home, and the rootful daemon does not answer. See On a machine of its own, The rootless Docker daemon. |
 | `ticket-decide.py` | Decides what a `ticket-runner` tick does, from the issues and pull requests `gh` returned: prints `close`, `repair`, `ticket`, `upkeep` or nothing; see below. |
 | `update-checkout` | Fast-forwards a checkout (Triphammer's, or a project's) to `origin/main` and restarts the long-running servers whose code changed: `triphammer-status.service` for `status/`, the running `demo-gallery@` units for `bin/demo-gallery`, and both for `bin/config.sh`, which each reads at startup. When the updated checkout's files differ from its commit, it creates the shared `stop` file and restarts nothing. `ticket-runner` calls it; see below. |
 | `demo-gallery` | The `demo` module's web server: serves `DEMO_GALLERY_DIR` read-only at `http://DEMO_GALLERY_HOST:DEMO_GALLERY_PORT/` until stopped. GET and HEAD only (anything else gets 405); a directory serves its `index.html` and is never listed; a path that leaves the gallery, by `..` or by a symlink whose target lies outside it, and anything but a regular file get 404. With the module off, `DEMO_GALLERY_DIR` missing or the config malformed it exits 2 naming why. `DEMO_URL` is the address the owner publishes, which may be this server itself or a proxy in front of it. |
@@ -183,7 +184,7 @@ project that leaves out a field gets none of its step, and the runner logs nothi
 | --- | --- | --- |
 | `name` | the Triphammer config's file name | `example-project` |
 | `demos` | the `triphammer:ticket-run` skill: `true` when the project has paced demo walkthroughs for the `demo` module to publish | `true` |
-| `docker` | `ticket-runner` and the write limit: `true` when the project's checks use Docker, so its sessions keep the Docker socket; without it, or with `false`, a session gets none (The write limit) | absent |
+| `docker` | `ticket-runner` and the write limit: `true` when the project's checks use Docker, so its sessions reach the rootless Docker daemon's socket and no other, and on a machine whose machine file names no rootless daemon none of its sessions starts; without it, or with `false`, a session gets no Docker socket (The write limit) | absent |
 | `worktreeTeardown` | `ticket-runner`: the command run in a run's clone, under the write limit, before it is removed, a list of words whose first is a path relative to the clone | `["scripts/local-db.sh", "down"]` |
 | `shellEditRoots` | the plugin's `agent-guard.py` hook, which reads it from the working tree of the repository a command runs in: the directories whose git-tracked files a shell command may not rewrite (they go through Edit or Write), a list of paths relative to the repository root and inside it; without it the hook has no shell-edit rule | `["src", "tests"]` |
 | `composeProjectPattern` | `ticket-runner`: the Docker Compose project names the sweep may prune, an extended regular expression | `^example-project-(local\|it)-[0-9]+$` |
@@ -227,7 +228,8 @@ Projects take turns when the slots run out: a tick that took the last free slot 
 project can take that one, so no project yields. An older mark, from a project that is stopped or removed, is ignored,
 so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes nothing.
 
-Sessions of several projects that declare `"docker": true` running at once share the machine's Docker. Each tick's database sweep prunes the Compose
+Sessions of several projects that declare `"docker": true` running at once share the machine's rootless Docker daemon,
+its containers and volumes included. Each tick's database sweep prunes the Compose
 projects its `composeProjectPattern` matches whose run directory is gone, so when two projects' patterns can match the same
 Compose project name, one project's sweep could prune the other's containers while both run; `triphammer doctor`
 warns about such a pair.
@@ -388,21 +390,30 @@ while the runner still sees the session's and its brake stops them. The network 
 directory, `/run/user/<uid>`, and `$XDG_RUNTIME_DIR` when it names another, are each an empty tmpfs of mode 0700 that
 the session may write, so neither the user manager (`systemctl --user`, `systemd-run --user`), the session bus nor an
 `ssh-agent` or `gpg-agent` socket there is reachable, and `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK` and
-`GPG_AGENT_INFO` are unset. For a project whose project file declares `"docker": true`, a rootless Docker socket there
-that `DOCKER_HOST` (`unix://<path>`) names is mounted back. A session of any other project gets no Docker socket: the
-directory of each of `/var/run/docker.sock`, `/run/docker.sock` and a socket that `DOCKER_HOST` (`unix://<path>`) names
-outside the runtime directories becomes an empty tmpfs holding each of its entries but the socket's name, mounted back
-as before, so the session can neither connect to one nor find one there, even when the daemon deletes and makes its
-socket again or makes it only after the session starts. What the machine adds to such a directory later, such as a
-new entry directly in `/run`, does not show inside. The runner tells the limit which applies (`TRIPHAMMER_DOCKER=1`
-for a project that declares it).
+`GPG_AGENT_INFO` are unset. No session reaches the rootful Docker daemon: the directory of each of
+`/var/run/docker.sock` and `/run/docker.sock` becomes an empty tmpfs holding each of its entries but the socket's name,
+mounted back as before, so the session can neither connect to one nor find one there, even when the daemon deletes
+and makes its socket again or makes it only after the session starts. The runner gives every session `DOCKER_HOST`
+naming the rootless daemon's socket that the machine file names (`unix:///var/lib/<user>-docker/docker.sock`; On a
+machine of its own, The rootless Docker daemon). A session of a project whose project file declares `"docker": true`
+(`TRIPHAMMER_DOCKER=1`) reaches that socket where it lies, read-only like the rest of the file system, so it still
+reaches a daemon that makes its socket again; a socket in a runtime directory is mounted back into its tmpfs. A
+session of any other project gets no Docker socket at all: that socket is hidden as the rootful ones are. What the
+machine adds to such a directory later, such as a new entry directly in `/run`, does not show inside. On a machine
+whose machine file names no rootless daemon, as before `provision` set one up, the runner starts no session of a
+project that declares Docker and logs `<action>: this project declares "docker": true, but the machine file names no
+rootless Docker daemon, so no session starts`, before anything counts as a run.
 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
-covered: for a project that declares `"docker": true`, the Docker socket, which its checks use, so a container a
-session starts can still write anywhere on the machine; for another project, a Docker daemon it reaches some other way
-than the sockets above (a socket elsewhere, a Docker context, TCP), or a `DOCKER_HOST` socket whose directory is
-deleted and made again during the session, or that lies directly in `/`; abstract Unix sockets, services listening on the machine's localhost, such as another project's
+covered: for a project that declares `"docker": true`, what the rootless daemon's user can do, as a container a session
+starts through it, privileged or mounting `/` or not, acts as that user on the machine: it reads what is
+world-readable there and the run clones in `<checkout>/.worktrees`, which the session can read already, and writes
+what that user may (its own home, and whatever on the machine is world-writable), and it reaches the containers and
+volumes of every project that declares Docker, which share the daemon; a Docker daemon a session reaches some other
+way than the sockets above (a socket elsewhere, a Docker context, TCP), or, for a project that does not declare
+Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the session, or that lies directly in
+`/`; abstract Unix sockets, services listening on the machine's localhost, such as another project's
 containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
 which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache
@@ -534,12 +545,14 @@ tick or a killed gate run never stops them. So:
   the `current` file names, nor any directory not named `issue-N` or `pr-N` (manual and harness checkouts), and an
   issue missing from the issue list keeps its clone. It logs each removal with its reason, then runs `git worktree
   prune`.
-- Then, when the project declares a `composeProjectPattern`, it lists the compose containers (`docker ps -a`) and
+- Then, when the project declares a `composeProjectPattern`, it lists the compose containers of the rootless Docker
+  daemon, the one sessions reach, with `DOCKER_HOST` naming the socket the machine file names (`docker ps -a`), and
   removes every project whose name matches it and whose `com.docker.compose.project.working_dir` label names a
   directory that no longer exists, in a run directory that no longer exists either, with `docker compose -p <project> down --volumes --remove-orphans`, logging `pruned database <project>
   (run directory <path> is gone)`. A project with any container whose working directory exists, or that has none, is never
   touched, running or stopped. When Docker is unavailable the tick logs `database sweep skipped: docker is
-  unavailable` and carries on.
+  unavailable` and carries on, and when the machine file names no rootless daemon, `database sweep skipped: the
+  machine file names no rootless Docker daemon (run bin/provision)`.
 - A failed removal is logged (`could not remove run directory ...`, `could not prune database ...`) and the tick carries on.
 
 `ticket-runner --prune-dry-run` prints `would remove run directory ...` and `would prune database ...` lines for what the
@@ -835,7 +848,9 @@ stands in for the runner start,
 `TICKET_RUNNER_BRAKE_SECONDS` and `TICKET_RUNNER_BRAKE_GRACE_SECONDS` shorten the brake checks during a session,
 and fakes of `gh`,
 `claude`, `codex`, `docker` and `demo-publish` stand in for the real ones. `runnerSetup` always puts the fake `docker`
-(`fake-docker.mjs`) on `PATH`, so a runner test never reaches the machine's real Docker. Every test that fakes `gh` uses `fakeGh` in `fixture.mjs`,
+(`fake-docker.mjs`) on `PATH`, so a runner test never reaches the machine's real Docker, and a machine file in
+`TRIPHAMMER_PROVISION_ROOT` naming a rootless daemon's socket in the test's directory, so it never reads the machine's
+own `/etc/triphammer.conf`. Every test that fakes `gh` uses `fakeGh` in `fixture.mjs`,
 which records each call and answers from canned responses keyed by argument prefix (`fake-gh.mjs`). The
 `github-app-token` tests put a fake `curl` (`fake-curl.mjs`) first on `PATH`, answering with canned GitHub responses
 for one or two installations,
@@ -878,7 +893,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | --- | --- |
 | .NET SDK | `dotnet --list-sdks` lists an SDK the checkout's `global.json` accepts: with `rollForward` `disable` the pinned version only; `patch`, `latestPatch` or none, the same feature band at or after it; `feature` or `latestFeature`, the same major.minor; `minor` or `latestMinor`, the same major; `major` or `latestMajor`, any later one. A prerelease counts only with `allowPrerelease` true. A checkout without `global.json` is not checked. |
 | Node | `node --version` is within the checkout's `package.json` `engines.node` when its comparators are `>=`, `>`, `<=`, `<`, `=` or bare versions of one to three parts, blank-separated; other forms (`^`, `~`, `\|\|`) only need `node` to run. A partial version is a range as in semver: `24` is `24.x`, `<=24` is `<25.0.0`, `>24` is `>=25.0.0`, `<24` is `<24.0.0`, and `24.1` is `24.1.x`. |
-| Docker | `docker info` answers the user running the doctor, and `docker compose version` is 2 or later. |
+| Docker | Checked only when the project's `.triphammer/project.json` declares `"docker": true`, or cannot be read. The machine file names the rootless Docker daemon's socket, `docker info` with `DOCKER_HOST` naming it answers the user running the doctor, `docker -H unix:///var/run/docker.sock info`, the rootful daemon, does not (when it does, the user is still in the `docker` group, and `provision` takes it out), and `docker compose version` is 2 or later. |
 | Compose names | Checked only when the project's `.triphammer/project.json` gives a `composeProjectPattern`. For each other project with a config in `${XDG_CONFIG_HOME:-~/.config}/triphammer` whose project file gives one too, the two patterns can match no common Compose project name, so neither project's database sweep prunes the other's containers (Several projects). Two patterns count as disjoint only when each starts with `^` and a literal prefix, has no `\|` outside parentheses, and neither prefix starts the other; any other pair is a problem. An other project whose project file is missing or malformed runs no sweep and is left out. |
 | Playwright | Checked only when the checkout pins Playwright as `provision-project` reads it: a `package.json` that `git ls-files` lists names `@playwright/test` or `playwright` in `dependencies` or `devDependencies`. When the doctor cannot tell (no `jq`, no git checkout, a `package.json` that is not JSON), it checks. `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
@@ -900,8 +915,10 @@ user it checks is the one running it, so run it as the service user.
 ## Install
 
 This is the setup on a shared machine, such as the owner's workstation, where Triphammer runs as the owner's own
-user and a session can reach whatever that user can: the owner's `~/.claude`, caches, Docker daemon and logins. It is
-the weaker setup; a machine of its own (below) holds nothing but Triphammer's credentials.
+user and a session can reach whatever that user can: the owner's `~/.claude`, caches and logins. It is
+the weaker setup; a machine of its own (below) holds nothing but Triphammer's credentials. It has no rootless Docker
+daemon of `provision`'s and no machine file naming one, so no session of a project that declares `"docker": true`
+starts there (The write limit).
 
 The sessions' write limit needs `bwrap` (`apt-get install bubblewrap`) able to create user namespaces, which on Ubuntu
 takes the AppArmor profile `provision` writes (Sessions, The write limit); the doctor at the end checks it.
@@ -1096,6 +1113,14 @@ before `provision` set one up; `triphammer update` runs `provision` first. `prov
 the `docker` group, whose socket is the rootful daemon's and so root's; its running processes keep the group until its
 user manager restarts or the machine reboots, which `provision` says. The rootful Docker Engine stays installed and
 running for whatever else on the machine uses it.
+
+Once `provision` has set the daemon up, the owner checks it as the service user with `sudo -iu <user>
+<checkout>/bin/docker-probe`. Each check runs as a Docker project's session does, under the write limit with
+`TRIPHAMMER_DOCKER=1` and `DOCKER_HOST` naming the rootless socket: `docker run --rm busybox true` must work (it pulls
+`busybox` into the daemon user's images when they lack it), then `docker run --rm -v /:/host busybox sh -c 'touch
+/host<home>/docker-probe-...'`, and the same container with `--privileged`, must not create the file in the service
+user's home, and `docker -H unix:///var/run/docker.sock info` must fail, inside the limit and outside it. It prints
+`PASS: ...` or `FAIL: ...` for each, removes any file a container created, and exits 1 when any check fails.
 
 **What is left.** `provision` ends with the owner's steps that are still left, numbered, each with its fix, or with
 `Nothing left for the owner: the machine is ready.` It tells from what it can check without reading a credential's

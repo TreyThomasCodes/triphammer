@@ -132,6 +132,7 @@ test('a run that progressed stops its database before it removes its clone', t =
   r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
   r.tick();
   assert.ok(r.docker.calls().some(call => call.startsWith(`${project}|compose --file `) && call.endsWith(' down --volumes --remove-orphans')));
+  assert.ok(r.docker.hosts().some(call => call.startsWith(`${r.dockerHost}|compose --file `)), 'the teardown gets the rootless daemon');
   assert.match(r.log(), new RegExp(`tore down ${r.worktree}:  Container ${project}-db-1  Removed\n`));
   assert.equal(existsSync(r.worktree), false);
 });
@@ -669,17 +670,35 @@ const hides = (call, path) => call.some((arg, i) => arg === '--tmpfs' && call[i 
 
 for (const [declared, docker, hidden] of [['without docker', undefined, true], ['with "docker": false', false, true],
   ['with "docker": true', true, false]]) {
-  test(`a project's Docker setting reaches the write limit: a project ${declared} ${hidden ? 'gets no' : 'keeps its'} Docker socket`, async t => {
+  test(`a project's Docker setting reaches the write limit: a project ${declared} ${hidden ? 'gets no' : 'reaches the rootless'} Docker socket, and none gets the rootful one`, async t => {
     const r = ticketSetup(t, [issue(7)], {project: docker === undefined ? projectJson : `${JSON.stringify({...example, docker})}\n`});
-    const socket = join(r.root, 'docker.sock');
-    await listenUnix(t, socket);
-    r.tick({DOCKER_HOST: `unix://${socket}`});
+    await listenUnix(t, r.dockerSocket);
+    // The session's checks run Compose, as a project's gate does; DOCKER_HOST outside the runner is not the one it gets.
+    const gate = join(r.root, 'gate.sh');
+    writeFileSync(gate, `#!/bin/sh\nprintf '%s' "$DOCKER_HOST" > "$PROBE/session-docker-host"\ndocker compose -p example-gate up -d\n`,
+      {mode: 0o755});
+    r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock', DURING_SESSION: gate});
     assert.equal(r.ran(), true);
+    assert.equal(r.probe('session-docker-host'), r.dockerHost);
+    assert.ok(r.docker.hosts().includes(`${r.dockerHost}|compose -p example-gate up -d`), r.docker.hosts().join('\n'));
     const calls = r.bwrapCalls();
     assert.equal(calls.length, 2, JSON.stringify(calls));
-    for (const call of calls) assert.equal(hides(call, realpathSync(socket)), hidden, JSON.stringify(call));
+    for (const call of calls) {
+      assert.equal(hides(call, realpathSync(r.dockerSocket)), hidden, JSON.stringify(call));
+      assert.ok(hides(call, '/run/docker.sock'), JSON.stringify(call));
+    }
   });
 }
+
+test('a project that declares Docker starts no session on a machine whose machine file names no rootless daemon', t => {
+  const r = ticketSetup(t, [issue(7)], {project: `${JSON.stringify({...example, docker: true})}\n`});
+  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  assert.throws(() => r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'}), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: this project declares "docker": true, but the machine file names no rootless Docker daemon, so no session starts/);
+  assert.deepEqual(r.bwrapCalls(), [], 'not even the dry run of the write limit');
+  assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'the run is not counted');
+});
 
 test('a project file whose docker is not true or false stops the tick', t => {
   const r = ticketSetup(t, [issue(7)], {project: project({docker: 'yes'})});
@@ -1276,6 +1295,18 @@ test('a tick prunes the databases whose run directory is gone and never one whos
   assert.deepEqual(downs, ['example-project-it-2', 'example-project-local-1']
     .map(project => `|compose -p ${project} down --volumes --remove-orphans`));
   assert.doesNotMatch(log, /local-3|local-4|local-5|local-6|example-model/);
+  const sweep = r.docker.hosts().filter(call => /\|(ps|compose -p)/.test(call));
+  assert.ok(sweep.length > 0 && sweep.every(call => call.startsWith(`${r.dockerHost}|`)),
+    `the sweep asks the rootless daemon: ${sweep.join('\n')}`);
+});
+
+test('on a machine whose machine file names no rootless daemon the database sweep is skipped with one log line', t => {
+  const r = ticketSetup(t, [recentUpkeep]);
+  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  r.docker.containers([['example-project-local-1', join(r.root, 'issue-561/database')]]);
+  r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'});
+  assert.equal(r.log().match(/database sweep skipped: the machine file names no rootless Docker daemon/g).length, 1);
+  assert.deepEqual(r.docker.calls(), []);
 });
 
 test('with Docker unavailable the database sweep is skipped with one log line and the tick carries on', t => {

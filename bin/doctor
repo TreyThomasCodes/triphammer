@@ -149,19 +149,35 @@ if tool node Node "install Node (https://nodejs.org) $units_path"; then
   fi
 fi
 
-# Docker: the engine answers this user (docker info reaches the daemon), and Compose is v2 or later.
-if command -v docker >/dev/null 2>&1; then
-  if ! docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-    problem "Docker Engine does not answer this user (docker info fails)" \
-      "start the Docker daemon and add this user to the docker group (sudo usermod -aG docker \$USER, then log in again)"
+# Docker, for a project that declares "docker": true, or whose project file cannot be read: its sessions reach only
+# the rootless daemon whose socket the machine file names (rootless_docker_host in config.sh), so that daemon answers
+# this user, the rootful one at /var/run/docker.sock does not, and Compose is v2 or later.
+docker_project=1
+if check_project doctor "$checkout" >/dev/null 2>&1 && [ "$(project_get "$checkout" docker)" != true ]; then
+  docker_project=""
+fi
+docker_host="$(rootless_docker_host)"
+if [ -z "$docker_project" ]; then
+  :
+elif ! command -v docker >/dev/null 2>&1; then
+  problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
+else
+  if [ -z "$docker_host" ]; then
+    problem "The machine file ${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf names no rootless Docker daemon, so no session of this project starts" \
+      "run sudo bin/provision from Triphammer's checkout, which sets the daemon up (bin/README.md, The rootless Docker daemon)"
+  elif ! DOCKER_HOST="$docker_host" docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
+    problem "The rootless Docker daemon does not answer this user at ${docker_host#unix://} (docker info fails)" \
+      "start the daemon user's docker.service, or run sudo bin/provision again (bin/README.md, The rootless Docker daemon)"
   fi
-  compose="$(first_version "$(docker compose version --short 2>/dev/null || true)")"
+  if docker -H unix:///var/run/docker.sock info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
+    problem "The rootful Docker daemon at /var/run/docker.sock answers this user, so a container it starts can write anywhere on the machine" \
+      "take this user out of the docker group with sudo bin/provision, then restart its user manager or reboot so its processes drop the group"
+  fi
+  compose="$(first_version "$(DOCKER_HOST="$docker_host" docker compose version --short 2>/dev/null || true)")"
   if [ -z "$compose" ] || ! version_at_least "$compose" 2; then
     problem "Docker Compose v2 is missing (docker compose version reports ${compose:-nothing})" \
       "install the docker-compose-plugin package (https://docs.docker.com/compose/install/linux/)"
   fi
-else
-  problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
 fi
 
 # Compose names: each other project with a config in ${XDG_CONFIG_HOME:-~/.config}/triphammer whose project file gives

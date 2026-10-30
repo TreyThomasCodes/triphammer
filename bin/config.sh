@@ -32,6 +32,20 @@
 # same_repo <dir> <dir>: succeeds when both directories are in one git repository (one common git directory), as a
 # project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is, or when one is a run's clone of the
 # other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
+#
+# rootless_docker_host: prints unix://<path> for the rootless Docker daemon's socket that the machine file
+# ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf names (TRIPHAMMER_DOCKER_SOCKET, which bin/provision writes;
+# bin/provision-lib.sh), or nothing when the file is missing or names no absolute path of the plain characters
+# provision writes. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
+rootless_docker_host() {
+  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line socket=""
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" != TRIPHAMMER_DOCKER_SOCKET=* ]] || socket="${line#*=}"
+  done < "$file"
+  [[ "$socket" =~ ^(/[A-Za-z0-9._-]+)+$ && "$socket/" != */./* && "$socket/" != */../* ]] || return 0
+  printf 'unix://%s\n' "$socket"
+}
 
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
 # checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
