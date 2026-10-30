@@ -101,7 +101,12 @@
 # TRIPHAMMER_DOCKER=1, what the project's rootless daemon's user can do, as a container started through it,
 # privileged or mounting / or not, acts as that user on the machine: it reads what is world-readable there and the
 # project's run clones in <checkout>/.worktrees, which the command could read already, and writes what that user may
-# (its own home, and whatever on the machine is world-writable), and the containers, images, volumes, networks and
+# (its daemon's data-root ~/.local/share/docker, the one part of its home root does not own, where what the runner's
+# sweep does not remove through Docker's API outlasts the session; its runtime directory /run/user/<uid>, a tmpfs,
+# whose user bus and runtime unit directories let it start a unit or a transient unit as that user that runs until
+# the machine reboots; its socket's directory /var/lib/<user>-docker-<project>, where a socket of its own in the place
+# of the daemon's answers the project's later sessions until the daemon restarts; and whatever on the machine is
+# world-writable), and the containers, images, volumes, networks and
 # build cache of the project's other sessions, which share that daemon; what the command starts or leaves on that
 # daemon (a container run detached or with a restart policy, an image, such as one re-tagged under a name a later
 # session runs or builds from, a volume) outlives the session, a container running on through later sessions and

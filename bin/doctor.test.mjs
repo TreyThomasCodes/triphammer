@@ -41,6 +41,29 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch',
   });
   const bin = r.gh.bin;
   r.docker.refuse(rootful);
+  // The home of the project's rootless daemon's user, as provision-project makes it, with getent and stat from the fake
+  // machine (fake-machine.mjs), whose stat reports root as the owner of the paths `owners` gives 0.
+  const machine = join(r.root, 'fake-machine');
+  const dockerHome = join(r.root, 'example-docker-triphammer');
+  const daemonUnits = join(dockerHome, '.config/systemd/user');
+  const daemonUnit = join(daemonUnits, 'docker.service');
+  const owners = {};
+  for (const dir of ['', '.config', '.config/systemd', '.config/systemd/user', '.config/systemd/user/default.target.wants',
+    '.local', '.local/share']) {
+    mkdirSync(join(dockerHome, dir), {recursive: true});
+    chmodSync(join(dockerHome, dir), 0o755);
+    owners[join(dockerHome, dir)] = 0;
+  }
+  mkdirSync(join(dockerHome, '.local/share/docker'), {mode: 0o700});
+  writeFileSync(daemonUnit, '[Service]\n');
+  chmodSync(daemonUnit, 0o644);
+  owners[daemonUnit] = 0;
+  symlinkSync(daemonUnit, join(daemonUnits, 'default.target.wants/docker.service'));
+  mkdirSync(machine);
+  const machineState = state => writeFileSync(join(machine, 'machine.json'), JSON.stringify({stat: realCommand('stat'), ...state}));
+  // The other project's daemon user (runnerSetup's machine file names it) has a home of the same shape.
+  machineState({users: {'example-docker-triphammer': {home: dockerHome}, 'example-docker-other-project': {home: dockerHome}}, owners});
+  for (const name of ['getent', 'stat']) fakeCommand(bin, name, join(machine, name), 'machine');
   // gh's --jq is built in, so the setting's answer is canned as it prints and needs no jq; tests that serve
   // repo.json instead run it through jq as gh would.
   r.gh.respond({'label list': {stdout: `${repoLabels.join('\n')}\n`}, 'api repos/': {stdout: 'true\n'}});
@@ -89,7 +112,8 @@ function doctorSetup(t, {config = {}, rollForward = 'latestPatch',
   const broken = (name, real) => writeFileSync(join(bin, name),
     `#!/bin/sh\n[ "$1" = --version ] && exit 127\n${real ? `exec '${real}' "$@"` : 'exit 127'}\n`, {mode: 0o755});
   return {
-    ...r, bin, home, userUnits, app, qwenKey, browsers, chromium, answers, curlRoutes, broken,
+    ...r, bin, home, userUnits, app, qwenKey, browsers, chromium, answers, curlRoutes, broken, dockerHome, daemonUnits,
+    daemonUnit, owners, machineState,
     doctor(extraEnv = {}, args = []) {
       const result = spawnSync(join(r.checkout, 'bin/ticket-runner'), ['--doctor', ...args],
         {env: {...env, ...extraEnv}, encoding: 'utf8'});
@@ -237,6 +261,29 @@ test("each project's doctor asks its own rootless daemon, and reports another pr
   assertOneProblem(r.doctor(), new RegExp(`^The machine file .*/etc/triphammer\\.conf names ${r.dockerSocket}, this project's rootless Docker daemon, for another daemon too.*Fix: run sudo triphammer update`));
 });
 
+test("a daemon user's home whose unit directory is the user's, or that holds a unit provision-project did not write, is reported", t => {
+  const r = doctorSetup(t);
+  const {[r.daemonUnits]: _, ...owners} = r.owners;
+  r.machineState({users: {'example-docker-triphammer': {home: r.dockerHome}}, owners});
+  writeFileSync(join(r.daemonUnits, 'other.service'), '[Service]\nExecStart=/bin/true\n');
+  mkdirSync(join(r.dockerHome, '.local/share/dbus-1'));
+  assertOneProblem(r.doctor(), new RegExp(`^The home of this project's rootless Docker daemon's user is not as provision-project makes it \\(`
+    + `${r.daemonUnits} is not root's with mode 755; ${r.daemonUnits}/other\\.service is not provision-project's; `
+    + `${r.dockerHome}/\\.local/share/dbus-1 is not provision-project's\\), so a container on that daemon may have changed what its user runs\\. `
+    + `Fix: look at each path named and remove what provision-project did not write, then run sudo triphammer update`));
+});
+
+test("a daemon user's home with a symlink for a directory, a unit the user owns, or no user the doctor can find is reported", t => {
+  const r = doctorSetup(t);
+  rmSync(join(r.dockerHome, '.local/share'), {recursive: true});
+  symlinkSync(r.root, join(r.dockerHome, '.local/share'));
+  const {[r.daemonUnit]: _, ...owners} = r.owners;
+  r.machineState({users: {'example-docker-triphammer': {home: r.dockerHome}}, owners});
+  assertOneProblem(r.doctor(), new RegExp(`\\(${r.dockerHome}/\\.local/share is not a directory; ${r.daemonUnit} is not a file root owns with mode 644\\)`));
+  r.machineState({users: {}, owners});
+  assertOneProblem(r.doctor(), /\(the machine has no user example-docker-triphammer, so the doctor cannot tell\)/);
+});
+
 test('a rootful Docker daemon that answers the service user is reported', t => {
   const r = doctorSetup(t);
   r.docker.refuse();
@@ -354,7 +401,7 @@ test('the units\' PATH is the last a drop-in sets, by file name, the project\'s 
   const r = doctorSetup(t);
   // The project example-project's own rootless daemon, so the Docker checks find nothing to report.
   writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_SOCKET_TRIPHAMMER=/m,
-    'TRIPHAMMER_DOCKER_SOCKET_EXAMPLE_PROJECT='));
+    'TRIPHAMMER_DOCKER_SOCKET_EXAMPLE_PROJECT=').replace(/^TRIPHAMMER_DOCKER_USER_TRIPHAMMER=/m, 'TRIPHAMMER_DOCKER_USER_EXAMPLE_PROJECT='));
   const doctor = () => r.doctor({TRIPHAMMER_PROJECT: 'example-project'});
   // A machine whose only SDK is ~/.dotnet's: the system directories on every PATH here can hold one of their own (CI
   // runners have /usr/bin/dotnet), so ~/.local/bin, first on each, finds dotnet only where the PATH reaches ~/.dotnet.

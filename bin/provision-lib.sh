@@ -298,14 +298,67 @@ docker_reads() {
   done
 }
 
+# The directories of a rootless Docker daemon's user's home that root owns with mode 755, from the home (.) down, each
+# followed by the only entries it may hold; bin/doctor checks the same shape.
+docker_home_shape=(
+  ". .config .local"
+  ".config systemd"
+  ".config/systemd user"
+  ".config/systemd/user docker.service default.target.wants"
+  ".config/systemd/user/default.target.wants docker.service"
+  ".local share"
+  ".local/share docker"
+)
+# docker_home: makes each directory docker_home_shape names root's, mode 755, from the home down, creating the missing
+# ones, so the daemon's user, and a container on its daemon, can write none of what its user manager, its user bus or
+# dockerd read as code or config there. A home the user owns is taken over the same way. A symlink
+# or other file where a directory belongs stops the run without being followed, as does any entry of those directories
+# other than the shape's, once all of them are root's: the user may have planted it, so the owner looks at it and
+# removes it, as nothing here deletes it. Last, the daemon's data-root, ~/.local/share/docker, is the user's, mode 700
+# when made here, the one place in the home dockerd writes.
+docker_home() {
+  local line dir path name want entries strays=() data="$docker_home/.local/share/docker"
+  for line in "${docker_home_shape[@]}"; do
+    read -ra entries <<< "$line"
+    dir="${entries[0]}" path="$docker_home"
+    [ "$dir" = . ] || path="$docker_home/$dir"
+    if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+      fail "$path is a symlink or not a directory, where $docker_user's home needs a directory root owns, and $docker_user may have planted it: look at it, remove it, then run $prog again"
+    fi
+    [ "$(stat -c '%u %a' -- "$path" 2>/dev/null)" = "0 755" ] \
+      || change "make $path root's, mode 755, so $docker_user cannot change what it holds" \
+        sh -c 'mkdir -p -- "$1" && chown -- root:root "$1" && chmod 755 -- "$1"' sh "$path" \
+      || fail "could not make $path root's"
+    while IFS= read -r name; do
+      for want in "${entries[@]:1}"; do [ "$name" != "$want" ] || continue 2; done
+      strays+=("$path/$name")
+    done < <(find "$path" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | LC_ALL=C sort)
+  done
+  [ ${#strays[@]} -eq 0 ] \
+    || fail "$docker_user's home holds ${strays[*]}, which $prog did not write and $docker_user may have planted to run code as itself: look at each, remove it, then run $prog again"
+  if [ -L "$data" ] || { [ -e "$data" ] && [ ! -d "$data" ]; }; then
+    fail "$data is a symlink or not a directory, where the daemon's data-root belongs, and $docker_user may have planted it: look at it, remove it, then run $prog again"
+  fi
+  if ! [ -d "$data" ] || [ "$(stat -c %u -- "$data")" != "$(id -u "$docker_user" 2>/dev/null)" ]; then
+    change "make $data, mode 700, $docker_user's, for its daemon's images, containers and volumes" \
+      sh -c 'mkdir -p -- "$1" && chmod 700 -- "$1" && chown -- "$2:" "$1"' sh "$data" "$docker_user" \
+      || fail "could not make $data"
+  fi
+}
+# write_docker_unit <path> <content>: writes the daemon's unit as root_file does, and makes it root's.
+write_docker_unit() { write_root_file "$1" 644 "$2" && chown -- root:root "$1"; }
+
 # docker_daemon <project> <checkout>: the rootless Docker daemon of one project that declares "docker": true, which its
 # sessions alone reach, so no other project's session reaches its containers, images, volumes, networks or build
 # cache. It runs as a user of its own, <user>-docker-<project>, in a user namespace on that user's subordinate ids, so
 # a container that mounts / or runs privileged acts as that user on the machine, and that user may read only the
 # project's run clones (docker_reads). It is in neither the service user's group nor the docker group. Its home, beside
-# the service user's, holds the images and volumes (~/.local/share/docker). A project whose name has no docker_key
-# (config.sh), or whose user's name would be longer than the 32 characters useradd takes, stops the run: a shortened
-# name could be another project's.
+# the service user's, is root's but for the daemon's data-root, ~/.local/share/docker, which holds the images,
+# containers and volumes (docker_home): root writes the daemon's user unit and links it into default.target.wants, as
+# systemctl enable would, so in the home a container on the daemon writes only that data-root; beyond it, it writes the
+# user's runtime directory /run/user/<uid> and the socket's directory, as bin/README.md's Not covered says. A project
+# whose name has no docker_key (config.sh), or whose user's name would be longer than the 32 characters useradd takes,
+# stops the run: a shortened name could be another project's.
 #
 # The socket: dockerd, started with --host, makes it at /var/lib/<daemon user>/docker.sock, in a directory of its own
 # that the daemon's user owns with mode 700, outside /run, which RootlessKit replaces in the daemon's mount namespace
@@ -315,7 +368,7 @@ docker_reads() {
 # the write limit hides it from every other project's session (bin/session-sandbox). Last, the machine file names the
 # user and the socket under the project's keys.
 docker_daemon() {
-  local project="$1" key script kind start before
+  local project="$1" key script kind start rewritten=""
   key="$(docker_key "$project")" \
     || fail "the project $project declares \"docker\": true, and its name cannot name a rootless Docker daemon: rename the project to lower-case letters, digits and dashes, starting with a letter or a digit"
   docker_user="$user-docker-$project"
@@ -332,9 +385,10 @@ docker_daemon() {
     docker_home="$(getent passwd "$docker_user" | cut -d: -f6)"
   else
     change "create the user $docker_user with the home $docker_home, for the rootless Docker daemon of $project" \
-      useradd --create-home --home-dir "$docker_home" --shell /usr/sbin/nologin --user-group "$docker_user" \
+      useradd --no-create-home --home-dir "$docker_home" --shell /usr/sbin/nologin --user-group "$docker_user" \
       || fail "useradd failed"
   fi
+  docker_home
   leave_group "$docker_user" "$user"
   leave_group "$docker_user" docker
   linger "$docker_user"
@@ -358,9 +412,16 @@ docker_daemon() {
   fi
   acl "$docker_dir" "user:$user:--x"
 
-  # The daemon's user unit, as dockerd-rootless-setuptool.sh install writes it, with the socket's path and its grant.
-  before="$changes"
-  as_docker user_file "$docker_home/.config/systemd/user/docker.service" 644 "# Written by Triphammer's bin/provision-project: the rootless Docker daemon of the project $project, whose socket $user reaches (bin/README.md).
+  # The daemon's user unit, as dockerd-rootless-setuptool.sh install writes it, with the socket's path and its grant,
+  # root's, and its link in default.target.wants, as systemctl --user enable makes it. A unit of other content is
+  # rewritten and the running daemon restarted; one of the same content the user owns only becomes root's.
+  local units="$docker_home/.config/systemd/user" content
+  local unit="$units/docker.service" link="$units/default.target.wants/docker.service"
+  { [ ! -e "$unit" ] || [ -f "$unit" ]; } && [ ! -L "$unit" ] \
+    || fail "$unit is a symlink or not a regular file, where root writes the daemon's unit, and $docker_user may have planted it: look at it, remove it, then run $prog again"
+  [ ! -e "$link" ] || [ -L "$link" ] \
+    || fail "$link is not a symlink, where the daemon's unit is linked, and $docker_user may have planted it: look at it, remove it, then run $prog again"
+  content="# Written by Triphammer's bin/provision-project: the rootless Docker daemon of the project $project, whose socket $user reaches (bin/README.md).
 [Unit]
 Description=Docker Application Container Engine (Rootless), for $user's project $project
 Documentation=https://docs.docker.com/go/rootless/
@@ -388,17 +449,22 @@ KillMode=mixed
 [Install]
 WantedBy=default.target
 "
-  if [ "$changes" -ne "$before" ]; then
-    as_docker reload_units
-    if as_docker user_enabled docker.service; then
-      change "restart $docker_user's docker.service, whose unit changed" systemctl --machine="$docker_user@" --user restart docker.service \
-        || fail "systemctl could not restart $docker_user's docker.service"
-    fi
+  if ! same_root_file "$unit" 644 "$content"; then
+    change "write $unit, root's" write_docker_unit "$unit" "$content" || fail "could not write $unit"
+    rewritten=1
+  elif [ "$(stat -c %u -- "$unit")" != 0 ]; then
+    change "make $unit root's" chown -- root:root "$unit" || fail "could not make $unit root's"
   fi
-  if ! as_docker user_enabled docker.service; then
-    change "enable and start $docker_user's docker.service, the rootless Docker daemon of $project" \
-      systemctl --machine="$docker_user@" --user enable --now docker.service \
+  if [ "$(readlink -- "$link")" != "$unit" ]; then
+    change "enable $docker_user's docker.service, the rootless Docker daemon of $project: link $link to it" \
+      ln -sfn -- "$unit" "$link" || fail "could not link $link"
+    as_docker reload_units
+    change "start $docker_user's docker.service" systemctl --machine="$docker_user@" --user start docker.service \
       || fail "systemctl could not start $docker_user's docker.service; journalctl --machine=$docker_user@ --user -u docker.service says why"
+  elif [ -n "$rewritten" ]; then
+    as_docker reload_units
+    change "restart $docker_user's docker.service, whose unit changed" systemctl --machine="$docker_user@" --user restart docker.service \
+      || fail "systemctl could not restart $docker_user's docker.service"
   fi
 
   docker_reads "$2"

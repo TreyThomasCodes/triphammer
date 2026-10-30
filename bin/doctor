@@ -152,7 +152,61 @@ fi
 # Docker, for a project that declares "docker": true, or whose project file cannot be read: its sessions reach only
 # the project's own rootless daemon, whose socket the machine file names (rootless_docker_host in config.sh), so that
 # daemon answers this user, no other project's key names the same socket (rootless_docker_sockets), the rootful one at
-# /var/run/docker.sock does not answer, and Compose is v2 or later.
+# /var/run/docker.sock does not answer, the home of that daemon's user has the shape provision-project gives it
+# (docker_home_problem), and Compose is v2 or later.
+#
+# The directories of the daemon's user's home that root owns with mode 755, from the home (.) down, each followed by
+# the only entries it may hold, as docker_home_shape in bin/provision-lib.sh gives them.
+docker_home_shape=(
+  ". .config .local"
+  ".config systemd"
+  ".config/systemd user"
+  ".config/systemd/user docker.service default.target.wants"
+  ".config/systemd/user/default.target.wants docker.service"
+  ".local share"
+  ".local/share docker"
+)
+# docker_home_problem <daemon user>: reports one problem naming each part of the user's home that differs from
+# docker_home_shape, or from the unit root owns with mode 644 that default.target.wants links, so a container on the
+# daemon could have planted a unit, a drop-in or a config its user manager, user bus or dockerd reads. A user the
+# machine lacks, or a directory the doctor cannot list, counts as wrong, as the doctor cannot tell.
+docker_home_problem() {
+  local docker_user="$1" home line path name want names entries wrong=()
+  home="$( { getent passwd "$docker_user" 2>/dev/null || true; } | cut -d: -f6)"
+  if [ -z "$docker_user" ]; then
+    wrong+=("the machine file names no user of it, so the doctor cannot tell")
+  elif [ -z "$home" ]; then
+    wrong+=("the machine has no user $docker_user, so the doctor cannot tell")
+  else
+    for line in "${docker_home_shape[@]}"; do
+      read -ra entries <<< "$line"
+      path="$home"
+      [ "${entries[0]}" = . ] || path="$home/${entries[0]}"
+      if [ -L "$path" ] || [ ! -d "$path" ]; then
+        wrong+=("$path is not a directory")
+        continue
+      fi
+      [ "$(stat -c '%u %a' -- "$path" 2>/dev/null)" = "0 755" ] || wrong+=("$path is not root's with mode 755")
+      if ! names="$(find "$path" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null | LC_ALL=C sort)"; then
+        wrong+=("$path cannot be listed, so the doctor cannot tell what it holds")
+        continue
+      fi
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        for want in "${entries[@]:1}"; do [ "$name" != "$want" ] || continue 2; done
+        wrong+=("$path/$name is not provision-project's")
+      done <<< "$names"
+    done
+    path="$home/.config/systemd/user/docker.service"
+    { [ -f "$path" ] && [ ! -L "$path" ] && [ "$(stat -c '%u %a' -- "$path" 2>/dev/null)" = "0 644" ]; } \
+      || wrong+=("$path is not a file root owns with mode 644")
+    [ "$(readlink -- "$home/.config/systemd/user/default.target.wants/docker.service" 2>/dev/null)" = "$path" ] \
+      || wrong+=("$home/.config/systemd/user/default.target.wants/docker.service does not link to $path")
+  fi
+  [ ${#wrong[@]} -eq 0 ] && return 0
+  problem "The home of this project's rootless Docker daemon's user is not as provision-project makes it ($(printf '%s; ' "${wrong[@]}" | sed 's/; $//')), so a container on that daemon may have changed what its user runs" \
+    "look at each path named and remove what provision-project did not write, then run sudo triphammer update, which makes those directories root's (bin/README.md, The rootless Docker daemon)"
+}
 docker_project=1
 if check_project doctor "$checkout" >/dev/null 2>&1 && [ "$(project_get "$checkout" docker)" != true ]; then
   docker_project=""
@@ -180,6 +234,9 @@ else
   if docker -H unix:///var/run/docker.sock info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
     problem "The rootful Docker daemon at /var/run/docker.sock answers this user, so a container it starts can write anywhere on the machine" \
       "take this user out of the docker group with sudo bin/provision, then restart its user manager or reboot so its processes drop the group"
+  fi
+  if docker_key "$project" >/dev/null && [ -n "$docker_host" ]; then
+    docker_home_problem "$(machine_get "TRIPHAMMER_DOCKER_USER_$(docker_key "$project")")"
   fi
   compose="$(first_version "$(DOCKER_HOST="$docker_host" docker compose version --short 2>/dev/null || true)")"
   if [ -z "$compose" ] || ! version_at_least "$compose" 2; then
