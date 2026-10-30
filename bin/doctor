@@ -155,19 +155,8 @@ fi
 # /var/run/docker.sock does not answer, the home of that daemon's user has the shape provision-project gives it
 # (docker_home_problem), and Compose is v2 or later.
 #
-# The directories of the daemon's user's home that root owns with mode 755, from the home (.) down, each followed by
-# the only entries it may hold, as docker_home_shape in bin/provision-lib.sh gives them.
-docker_home_shape=(
-  ". .config .local"
-  ".config systemd"
-  ".config/systemd user"
-  ".config/systemd/user docker.service default.target.wants"
-  ".config/systemd/user/default.target.wants docker.service"
-  ".local share"
-  ".local/share docker"
-)
 # docker_home_problem <daemon user>: reports one problem naming each part of the user's home that differs from
-# docker_home_shape, or from the unit root owns with mode 644 that default.target.wants links, so a container on the
+# docker_home_shape (config.sh), or from the unit root owns with mode 644 that default.target.wants links, so a container on the
 # daemon could have planted a unit, a drop-in or a config its user manager, user bus or dockerd reads. A user the
 # machine lacks, or a directory the doctor cannot list, counts as wrong, as the doctor cannot tell.
 docker_home_problem() {

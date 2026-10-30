@@ -298,18 +298,7 @@ docker_reads() {
   done
 }
 
-# The directories of a rootless Docker daemon's user's home that root owns with mode 755, from the home (.) down, each
-# followed by the only entries it may hold; bin/doctor checks the same shape.
-docker_home_shape=(
-  ". .config .local"
-  ".config systemd"
-  ".config/systemd user"
-  ".config/systemd/user docker.service default.target.wants"
-  ".config/systemd/user/default.target.wants docker.service"
-  ".local share"
-  ".local/share docker"
-)
-# docker_home: makes each directory docker_home_shape names root's, mode 755, from the home down, creating the missing
+# docker_home: makes each directory docker_home_shape (config.sh) names root's, mode 755, from the home down, creating the missing
 # ones, so the daemon's user, and a container on its daemon, can write none of what its user manager, its user bus or
 # dockerd read as code or config there. A home the user owns is taken over the same way. A symlink
 # or other file where a directory belongs stops the run without being followed, as does any entry of those directories
