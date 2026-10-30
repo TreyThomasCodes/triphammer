@@ -9,7 +9,7 @@ import {fakeCommand, git, here, lines, realCommand, run, toolingEnv} from './fix
 
 // The commands provision changes or inspects the machine with, each a fake-machine.mjs acting on one state.
 const machineCommands = ['apt-get', 'dpkg-query', 'dpkg', 'useradd', 'usermod', 'getent', 'id', 'loginctl', 'systemctl',
-  'curl', 'apparmor_parser', 'bwrap', 'runuser', 'chown', 'gpasswd', 'setfacl', 'getfacl'];
+  'curl', 'apparmor_parser', 'bwrap', 'runuser', 'chown', 'stat', 'gpasswd', 'setfacl', 'getfacl'];
 export const scripts = ['ticket-runner', 'merge-when-ready', 'land-pr', 'github-app-token', 'gh', 'demo-gallery'];
 export const units = ['ticket-runner@.service', 'ticket-runner@.timer', 'merge-when-ready@.service', 'merge-when-ready@.timer',
   'demo-gallery@.service'];
@@ -131,7 +131,7 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
     downloads['https://api.github.com/app/installations/41/access_tokens'] = download('access-token.json',
       JSON.stringify({token: 'ghs_fake', expires_at: new Date(Date.now() + 3600_000).toISOString().replace(/\.\d+Z$/, 'Z')}));
   }
-  writeFileSync(join(state, 'machine.json'), JSON.stringify({bin, sys, downloads, git: realCommand('git')}));
+  writeFileSync(join(state, 'machine.json'), JSON.stringify({bin, sys, downloads, git: realCommand('git'), stat: realCommand('stat')}));
 
   const env = {...toolingEnv, PATH: `${bin}:${process.env.PATH}`, TRIPHAMMER_PROVISION_ROOT: sys,
     TRIPHAMMER_PROVISION_GIT_BASE: `file://${root}/origins/`};
@@ -163,7 +163,7 @@ mkdir -p "$HOME/.local/bin" && cp '${state}/shims/claude' "$HOME/.local/bin/clau
 // command run as the user that writes (sh -c, npm, an installer through bash -c, git clone, npx install).
 export function changingCalls(calls) {
   return calls.filter(([command, ...args]) => {
-    if (['dpkg-query', 'dpkg', 'getent', 'id', 'bwrap', 'git', 'getfacl'].includes(command)) return false;
+    if (['dpkg-query', 'dpkg', 'getent', 'id', 'bwrap', 'git', 'getfacl', 'stat'].includes(command)) return false;
     if (command === 'loginctl') return args[0] !== 'show-user';
     if (command === 'systemctl') return !args.includes('is-enabled');
     if (command === 'curl') return !args.includes('-fsSIL') && args.at(-1) !== 'https://api.github.com/app';

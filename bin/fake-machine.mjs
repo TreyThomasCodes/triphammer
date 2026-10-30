@@ -3,10 +3,10 @@
 // fakeCommand(bin, <command>, join(<machine>, <command>), 'machine'), so the directory's last part names the command.
 // Every call appends [command, ...arguments] to <machine>/calls as a JSON line. The machine's state is
 // <machine>/machine.json: {packages, unavailable, users: {name: {home, groups, uid}}, linger, enabled, loaded,
-// downloads: {url: file}, acls: {path: [entry]}, bin, sys}, which the calls read and change:
+// downloads: {url: file}, acls: {path: [entry]}, owners: {path: uid}, bin, sys}, which the calls read and change:
 // - apt-get update; apt-get install ... <packages> adds them, or fails like apt-get when one is `unavailable`;
 //   dpkg-query -W -f=... <package> prints `installed` for an installed one; dpkg --print-architecture prints amd64;
-// - useradd --home-dir <home> ... <name> creates the user (and its home), usermod -aG <group> <name> adds a group,
+// - useradd --home-dir <home> ... <name> creates the user (and, with --create-home, its home), usermod -aG <group> <name> adds a group,
 //   gpasswd -d <name> <group> removes one, usermod --add-subuids|--add-subgids <first>-<last> <name> appends
 //   <name>:<first>:<count> to <sys>/etc/subuid or subgid, getent passwd <name> and id -u [<name>] / id -nG <name> report
 //   them (id -u alone is root's 0; a user's uid is its `uid`, by default the caller's own, so the files the tests write
@@ -28,7 +28,9 @@
 //   credential helpers for github.com credentials with the same -c options (`git credential fill`) and fails as an
 //   authentication failure does unless they give a password; then it, and every other git call, runs the real git at
 //   `git`;
-// - chown only records.
+// - chown [--] <owner>[:[<group>]] <path...> sets `owners[path]` to the owner's uid (root's is 0), which stat then
+//   reports: stat ... -c <format> [--] <path> runs the real stat at `stat` with each %u in the format made the uid
+//   `owners` gives the path, when it gives one, so a file the tests write is the caller's until a chown gives it away.
 import {spawnSync} from 'node:child_process';
 import {appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join} from 'node:path';
@@ -69,7 +71,7 @@ switch (command) {
   case 'useradd': {
     const name = args.at(-1);
     const home = option('--home-dir');
-    mkdirSync(home, {recursive: true});
+    if (args.includes('--create-home')) mkdirSync(home, {recursive: true});
     state.users[name] = {home, groups: [name]};
     save();
     done();
@@ -107,6 +109,19 @@ switch (command) {
       const effective = rights(entry) & mask;
       return named(entry) && effectiveShown && effective !== rights(entry) ? `${entry}\t#effective:${text(effective)}\n` : `${entry}\n`;
     }).join(''));
+  }
+  case 'chown': {
+    const [owner, ...paths] = args.filter(arg => !arg.startsWith('-'));
+    const name = owner.split(':')[0];
+    for (const path of paths) (state.owners ??= {})[path] = name === 'root' ? 0 : state.users[name]?.uid ?? process.getuid();
+    save();
+    done();
+  }
+  case 'stat': {
+    const uid = state.owners?.[args.at(-1)];
+    const result = spawnSync(state.stat, uid === undefined ? args : args.map((arg, i) => args[i - 1] === '-c' ? arg.replaceAll('%u', uid) : arg),
+      {stdio: 'inherit'});
+    process.exit(result.status ?? 1);
   }
   case 'getent': {
     const user = state.users[args[1]];
