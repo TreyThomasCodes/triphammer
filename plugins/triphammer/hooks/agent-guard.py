@@ -103,10 +103,11 @@ SYSTEMCTL_CHANGING = {"start", "stop", "reload", "restart", "try-restart", "relo
                       "force-reload", "condrestart", "condreload", "condstop", "kill", "clean", "freeze", "thaw",
                       "enable", "disable", "reenable", "preset", "revert", "link", "mask", "unmask", "edit",
                       "set-property", "add-wants", "add-requires", "bind", "mount-image"}
-SYSTEMCTL_VALUE_OPTIONS = ("tpPsHMno", {
-    "--type", "--property", "--state", "--signal", "--kill-whom", "--kill-value", "--what", "--job-mode", "--root",
-    "--image", "--host", "--machine", "--lines", "--output", "--preset-mode", "--timestamp", "--message", "--drop-in",
-    "--when"})
+SYSTEMCTL_VALUE_OPTIONS = ("tpPsHMCno", {
+    "--type", "--property", "--state", "--signal", "--kill-whom", "--kill-value", "--kill-subgroup", "--what", "--job-mode", "--root",
+    "--image", "--image-policy", "--host", "--machine", "--capsule", "--lines", "--output", "--preset-mode",
+    "--timestamp", "--message", "--boot-loader-menu", "--boot-loader-entry", "--reboot-argument", "--drop-in", "--when",
+    "--legend", "--check-inhibitors"})
 # cp, mv and ln: the options that take a value.
 COPY_OPTIONS = ("St", {"--suffix", "--target-directory", "--no-preserve", "--sparse"})
 RECURSIVE = {"-r", "-R", "--recursive"}
@@ -114,9 +115,15 @@ SCHEDULERS = {"crontab", "at", "batch", "systemd-run"}
 # pgrep/pkill options that take a value as the next word.
 KILL_VALUE_OPTIONS = {"-d", "-g", "-G", "-P", "-s", "-t", "-u", "-U", "-F", "-r", "--delimiter", "--pgroup",
                       "--group", "--parent", "--session", "--terminal", "--euid", "--uid", "--pidfile", "--runstates",
-                      "--signal", "--ns", "--nslist", "--env"}
+                      "--signal", "--ns", "--nslist", "--env", "-q", "--queue", "-O", "--older", "--cgroup"}
 # The label a session never removes: the owner's brake, which only someone other than the App lifts.
 OWNER_LABEL = "needs-owner"
+# The options of gh issue edit and gh pr edit that take a value.
+GH_EDIT_VALUE_OPTIONS = ("RbFmtB", {"--repo", "--add-label", "--remove-label", "--add-assignee", "--remove-assignee",
+                                     "--add-project", "--remove-project", "--add-reviewer", "--remove-reviewer",
+                                     "--body", "--body-file", "--milestone", "--title", "--base", "--attach",
+                                     "--add-blocked-by", "--remove-blocked-by", "--add-blocking", "--remove-blocking",
+                                     "--add-sub-issue", "--remove-sub-issue", "--parent", "--type"})
 # The shell variables a kill operand can name the shell itself ($$) or its parent, the Claude Code session ($PPID) by.
 OWN_SHELL, OWN_SESSION = "the shell running the command", "the Claude Code session that runs the shell"
 SELF_PIDS = {"$$": OWN_SHELL, "${$}": OWN_SHELL, "$PPID": OWN_SESSION, "${PPID}": OWN_SESSION}
@@ -560,7 +567,7 @@ def analyze_gh(args, findings):
             positional.append(value)
     if positional not in (["issue", "edit"], ["pr", "edit"]):
         return
-    _, options = split_options(args, "R", {"--repo", "--remove-label"})
+    _, options = split_options(args, *GH_EDIT_VALUE_OPTIONS)
     for option, value in options:
         if option == "--remove-label" and value is not None and any(
                 label.strip().lower() == OWNER_LABEL for label in value.value.split(",")):

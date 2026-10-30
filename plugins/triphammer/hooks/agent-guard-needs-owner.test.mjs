@@ -19,6 +19,7 @@ const removals = [
   'gh issue edit 7 --repo owner/name --title x --remove-label needs-owner',
   'gh issue edit 7 --remove-label needs-owner && echo done',
   'gh issue edit 7 --body "a <<EOF; x | y" --remove-label needs-owner',
+  'gh issue edit 7 --add-label -R --remove-label needs-owner',
 ];
 
 const allowed = [

@@ -43,6 +43,14 @@ test('pkill -f inside a longer command is refused', () => {
     /self-kill rule/);
 });
 
+test('pkill -f with an option that takes the next word before the pattern is refused', () => {
+  // A value with brackets, read as the pattern, would pass for the bracket form.
+  for (const command of [`pgrep -f --cgroup '[a]pp' web-e2e`, `pkill -f -O '[6]0' web-e2e`,
+    `pkill -f --older '[6]0' web-e2e`, `pkill -f -q '[1]' web-e2e`, `pkill -f --queue '[1]' web-e2e`]) {
+    assert.match(decide(command, tmpdir()) ?? '', /self-kill rule/, command);
+  }
+});
+
 test('pkill -f or pgrep -f after a reserved word is refused', () => {
   for (const command of ['if true; then pkill -f web-e2e; fi', 'while pgrep -f web-e2e; do sleep 1; done',
     '{ pkill -f web-e2e; }', 'until ! pgrep -f web-e2e; do sleep 1; done']) {
