@@ -29,8 +29,12 @@ Triphammer merges code without a person watching, so several limits apply to eve
 - CI reads those rules from the default branch, never from the pull request, so a pull request can't loosen its own
   tier.
 - A change no rule covers waits for you. A repository with no rules file sends every change to you.
-- Guard hooks in each session refuse commands that would install anything lasting on the machine. In sessions
-  Triphammer starts, they also allow writes only inside the session's clone and temporary directories.
+- Each session Triphammer starts runs under an OS-level write limit that leaves only its clone, the temporary
+  directories and the tools' own runtime and cache directories writable. The write limit and the runner hold the
+  session's boundaries.
+- Guard hooks in each session catch honest mistakes early, such as changing Triphammer's units or writing outside the
+  session's clone, and say what to do instead. They read commands in their plain forms and are not a security
+  boundary: a command written to get past them gets past them.
 - A session that goes through three review rounds, each with a blocking problem, stops. It labels its issue
   `needs-owner` and explains what it needs from you.
 
