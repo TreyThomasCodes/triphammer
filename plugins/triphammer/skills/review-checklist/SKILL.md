@@ -77,12 +77,3 @@ A parser that skips a command's options before judging its operands needs the li
 - Is there a test that puts a value-taking option before the operand, and does the command still get checked?
 
 Found in: a guard hook's `script` entry, which lacked `-m` (`--logging-format`), so `script -q -m advanced -c true ~/.bashrc` read `advanced` as the file and let the write through.
-
-## 12. Commands that xargs extends
-
-A rule that judges the command after `xargs` as written misses the operands xargs appends from its input or puts in place of `-I`'s string. Those operands can turn a read into a write (`git config KEY` becomes a set) or supply a wrapper's own file operand (`flock`'s lock file), which the rule then never judges.
-
-- For each command or wrapper a rule judges by its operands, are `echo PATH | xargs COMMAND` and `xargs -I{} COMMAND {}` still checked, or refused when the hook cannot tell?
-- Does a command that only reads with the operands written become a write once more operands follow?
-
-Found in: a guard hook's xargs handling, which allowed `echo /tmp/h | xargs git config core.hooksPath` and `echo ~/.newfile true | xargs flock`.

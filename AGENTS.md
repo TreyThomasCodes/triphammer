@@ -32,7 +32,7 @@ that hold the rest.
 - **Never acquire, extract or disclose credentials** beyond the configured workflow. Config holds paths to secrets,
   never values.
 - **Fail safe.** A tier that cannot be decided escalates. The guard hook fails open on its own errors, and its header
-  says so and lists what it does not cover.
+  says so.
 - **Security is judged against the threat model** in `bin/security-review-brief.md`. The guard hooks are a
   best-effort layer above the write limit, not a boundary.
 - **Docs describe now.** Issues, pull requests and Git hold history.
@@ -58,8 +58,9 @@ Triphammer's checkout, which tracks `origin/main` (Self-update).
 ## Guard hooks
 
 The plugin's `agent-guard.py` and `text-lint.py` (`plugins/triphammer/hooks/`) run in every session and its
-subagents: the runner loads the plugin from Triphammer's checkout, and `provision` installs it for the user. Their
-headers hold the rules and what each does not cover. The ones a session meets first:
+subagents: the runner loads the plugin from Triphammer's checkout, and `provision` installs it for the user. The guard
+catches honest mistakes in their plain forms and is not a security boundary: the write limit and the runner hold the
+threat model's boundaries. Their headers hold the rules. The ones a session meets first:
 
 - A git-tracked file under a `shellEditRoots` path of `.triphammer/project.json` changes through Edit or Write, not
   `sed -i`, a redirect or another shell write.
@@ -93,8 +94,8 @@ shellcheck -x <script>                      # each bash script under bin/ and sc
 actionlint                                  # any change under .github/workflows/
 ```
 
-The slowest files, slowest first: `bin/provision-project.test.mjs`, `bin/ticket-runner.test.mjs`,
-`plugins/triphammer/hooks/agent-guard-session-git.test.mjs` and `bin/doctor.test.mjs`.
+The slowest files, slowest first: `bin/provision-project.test.mjs`, `bin/ticket-runner.test.mjs` and
+`bin/doctor.test.mjs`.
 
 ## Workflow
 

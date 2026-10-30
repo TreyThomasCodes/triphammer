@@ -263,13 +263,16 @@ plugin's agents and skills with its prefix, and the orchestrator starts subagent
 (`triphammer:builder`); a bare `--agent orchestrator` would pick a project's own `.claude/agents/orchestrator.md` over
 the plugin's. The plugin's hooks run in the session and its subagents. The runner starts the session with
 `TRIPHAMMER_SESSION` set to the run's clone (`local-audit` sets it to its own clone for the Qwen audit), which tells
-the plugin's `agent-guard.py` that Triphammer started it: such a session writes only inside that clone (not its `.git`)
-and the temporary directories, writes no git configuration (`git config` and `git remote` only read, and an upstream is
-set only for its own branch in its clone), sets no one-command `git -c` key that makes git run a command or changes
-what it fetches or pushes, and schedules nothing with `crontab`, `at`, `batch` or `systemd-run`. A `# guard-override:`
-token lifts none of these, only the shell-edit rule, and the hook logs each override it honors to `guard-overrides.log`
-in the shared directory; the hook's header lists what it checks and what it does not cover. Below the hook, the
-write limit (below) holds the session's writes at the OS level. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
+the plugin's `agent-guard.py` that Triphammer started it. The hook catches honest mistakes early and says what to do
+instead; it is not a security boundary, and the write limit (below) and the runner hold the session's boundaries. In
+every session it refuses changes to Triphammer's persistence (a `systemctl --user` verb on its units or the manager,
+and a write to `~/.local/bin`, `~/.config/systemd/user`, `~/.config/triphammer` or the state directories), the
+shell-edit rule's rewrites and a `pkill -f` or `kill` that would hit the session itself. In a session Triphammer
+started it also refuses a write outside the clone (or in its `.git`) and the temporary directories, `gh issue edit` or
+`gh pr edit` removing `needs-owner`, and scheduling with `crontab`, `at`, `batch` or `systemd-run`. It reads the plain
+forms of these commands: a path computed at run time, or a relative one after a `cd`, is left to the write limit. A
+`# guard-override:` token lifts only the shell-edit rule, and the hook logs each override it honors to
+`guard-overrides.log` in the shared directory; the hook's header lists what it checks. The prompt names the `triphammer:ticket-run` skill, the builder the session briefs, and the modules
 that are on. A tick whose Triphammer `origin/main` has no
 `plugins/triphammer/skills/ticket-run/SKILL.md` starts no session.
 
@@ -377,7 +380,7 @@ so no session reads or fills another project's caches.
 
 Everything else, the main checkout's files, Triphammer's checkout, the units, `~/.local/bin`, the configs, the state
 directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the session and to everything it starts:
-the Edit and Write tools, Bash commands, python or node scripts the guard does not parse, git hooks and subagents, as
+the Edit and Write tools, Bash commands, python or node scripts, git hooks and subagents, as
 they all run in its process tree. Claude Code cannot save `~/.claude.json` under the limit; it logs that and carries on.
 The session also gets a process namespace of its own, so it neither sees nor signals the machine's other processes,
 while the runner still sees the session's and its brake stops them. The network is shared. The user's runtime
@@ -424,8 +427,8 @@ The status page does not read the records yet.
 
 A session does not open issues itself. Before it starts, `ticket-runner` creates a directory of the run's own with
 `mktemp -d` (under `$TMPDIR`, outside the run's clone, so nothing commits it) and an empty `proposals.jsonl` in it, and
-gives the session its path as `TRIPHAMMER_PROPOSALS`. `agent-guard.py` works out a write target that starts with
-`$TRIPHAMMER_PROPOSALS` and lets a session append to it, since it lies in a temporary directory. The simplifier
+gives the session its path as `TRIPHAMMER_PROPOSALS`, which the session may append to, since it lies in a temporary
+directory. The simplifier
 appends one proposal for a mechanism it finds a third copy of, and the review loop one for a harness gap; the
 orchestrator lists them in its pull request comment too. Each proposal is one line, a JSON object whose fields are
 all non-empty text:
@@ -707,7 +710,7 @@ is open and changes a path the project's `securityReviewPaths` matches (the exam
 or a systemd unit, `*.service`, `*.timer`, `*.path`; a project that declares none has nothing reviewed; a renamed
 file counts under its old path as well as its new one), and its head
 commit is not yet in `security-reviewed` in the state directory. That file is the script's own record, one line
-`<REPO> <n> <head>` per head it posted a comment on, reviewed, skipped or failed; `agent-guard.py` keeps agents from
+`<REPO> <n> <head>` per head it posted a comment on, reviewed, skipped or failed; the write limit keeps agents from
 writing the state directory, and pull request comments are never read, so a comment that looks like a review cannot
 stop one.
 The file filter decides and labels are not read: the `risk-tier` workflow adds `needs-owner` some seconds after the pull
@@ -735,7 +738,7 @@ that session ends with exit 0, `ticket-runner` appends the head's line to `secur
 progress, whether or not it pushed; a failed, timed-out or braked session records nothing, so the head is repaired
 again under the usual three runs. A pushed fix is a new head, which gets its own review. Until the head is followed
 up, `merge-when-ready` neither merges nor updates the pull request. Only the scripts write the two records, and
-`agent-guard.py` keeps agents out of the state directory, so no comment can forge a follow-up.
+the write limit keeps agents out of the state directory, so no comment can forge a follow-up.
 
 Nothing reads model text to decide a merge: merge-policy, `land-pr` and `merge-when-ready` never read the comment, and
 a missing, skipped or failed review, or one with no findings, records nothing and never blocks or delays a merge. The
