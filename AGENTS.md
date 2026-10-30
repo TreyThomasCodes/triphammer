@@ -74,7 +74,8 @@ Behavioral tests with fakes that stand in for the real commands, put first on `P
 a test that fails on the hook in `main`.
 
 - `bin/fixture.mjs`: throwaway origin and checkout rigs (`checkoutSetup`, `runnerSetup`), and `fakeCommand`,
-  `fakeGh`, `fakeDocker`, `fakeCodex` and `fakeSudo`, which put the fakes on `PATH`.
+  `fakeGh`, `fakeDocker`, `fakeCodex` and `fakeSudo`, which put the fakes on `PATH`, and `realCommand`, which finds a
+  real command on it.
 - `bin/fake-gh.mjs`, `fake-curl.mjs`, `fake-answers.mjs`: canned answers keyed by argument prefix for `gh`, for
   `curl` in the `github-app-token` tests, and for any other command that only needs answers.
 - `bin/fake-claude.mjs`, `fake-codex.mjs`: `claude` (a run, `auth status`, plugin installs) and `codex`, recording
