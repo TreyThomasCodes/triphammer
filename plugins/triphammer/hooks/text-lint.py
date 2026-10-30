@@ -370,10 +370,11 @@ def text_failures(kind, verb, title, body, cwd):
 
     if kind == "pr":
         if re.search(r"generated with \[?claude code", text, re.I):
-            fail.append("FOOTER: no 'Generated with Claude Code' line. The description is the squash commit message.")
+            fail.append("FOOTER: remove the 'Generated with Claude Code' line. The description is the squash commit "
+                        "message.")
         if re.search(r"^\s*co-authored-by:", prose, re.I | re.M):
-            fail.append("CO-AUTHORED-BY: no Co-Authored-By line in the description. Your commits carry the trailer "
-                        "and GitHub adds it to the squash commit.")
+            fail.append("CO-AUTHORED-BY: remove the Co-Authored-By line from the description. Your commits carry the "
+                        "trailer and GitHub adds it to the squash commit.")
         sections = {m.group(1).lower() for m in SECTION.finditer(prose)}
         if test_plan and not re.search(r"^\s*\*\*\s*test plan\b", prose, re.I | re.M):
             sections.discard("test plan")
