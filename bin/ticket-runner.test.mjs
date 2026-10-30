@@ -2111,6 +2111,33 @@ test('an issue the owner labelled stop-agents keeps pausing after its label even
   assert.equal(r.tick({}, ['--plan']).trim(), 'ticket 7');
 });
 
+test("past the 300 pages of events GitHub serves, the owner's stop-agents the App unlabelled still pauses, and the record is written", t => {
+  const r = ticketSetup(t);
+  serveStopAgents(r, stopAgentsCases['unlabelled by the App'], [repoEvent(9, 'unlabeled', 'example-agents[bot]', 'stop-agents'),
+    ...Array.from({length: 99}, () => repoEvent(3, 'labeled', 'Example-Owner', 'bug'))]);
+  r.gh.respond({[`${repoEventsCall}?per_page=100&page=301`]:
+    {stderr: 'gh: Pagination is limited for this resource. (HTTP 422)\n', exit: 1}});
+  assert.match(r.tick({}, ['--plan']), stopAgentsPaused);
+  assert.equal(r.ghCalls().filter(call => call.join(' ').startsWith(repoEventsCall)).length, 300);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/stop-agents-events'), 'utf8'), '2026-10-17T10:00:00Z\n9\n');
+});
+
+test("the owner's stop-agents the App closed pauses while its label is on, though its labeled event is past the events read", t => {
+  const r = ticketSetup(t);
+  serveStopAgents(r, stopAgentsCases['closed by the App'], [repoEvent(3, 'labeled', 'Example-Owner', 'bug')]);
+  r.gh.respond({[`issue list -R ${repo} --label stop-agents --state all`]: {stdout: '9\n'}});
+  assert.match(r.tick({}, ['--plan']), stopAgentsPaused);
+});
+
+test('a failed read of the issues labelled stop-agents pauses the project', t => {
+  const r = ticketSetup(t);
+  serveStopAgents(r, stopAgentsLifted['closed by the owner']);
+  r.gh.respond({[`issue list -R ${repo} --label stop-agents --state all`]: failedRead});
+  r.tick();
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /paused: the stop-agents events of Example-Owner\/example-project, which could not be read/);
+});
+
 test('a failed read of the stop-agents events pauses the project', t => {
   for (const routes of [{[repoEventsCall]: failedRead}, {[eventsCall(9)]: failedRead}]) {
     const r = ticketSetup(t);

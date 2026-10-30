@@ -116,14 +116,16 @@ owner_brake() {
 # stop-agents holds, whatever their labels and state are now: each one that someone other than the App labelled
 # stop-agents and did not unlabel or close afterwards, judged from its events (brake_events) in order, so a close
 # before the label lifts nothing, and a reopening by someone other than the App while their label is on holds again.
-# The App's unlabelling, closing or reopening counts for nothing. The candidates are the issues with a `labeled` stop-agents event by
-# someone other than the App in the repository's issue events, which GitHub lists newest first. <record>, a file only
-# the caller writes, keeps them between calls after a first line with the time of the newest event read, so a call
-# reads the events back to an hour before that time (pages of 100 until a short one or one that reaches it), and the
-# whole list when the record is missing or malformed. A candidate whose stop-agents someone other than the App removed
-# leaves the record, and a later label brings it back. Fails, printing nothing, when an events read fails, so the
-# caller brakes; an issue whose events cannot be read, a deleted one too, fails every call until its line leaves the
-# record.
+# The App's unlabelling, closing or reopening counts for nothing. The candidates are the issues labelled stop-agents
+# now, in any state, and those with a `labeled` stop-agents event by someone other than the App or an `unlabeled` one
+# by anyone in the repository's issue events, which GitHub lists newest first. <record>, a file only the caller writes,
+# keeps them between calls after a first line with the time of the newest event read, so a call reads the events back
+# to an hour before that time (pages of 100 until a short one or one that reaches it), and the whole list when the
+# record is missing or malformed, up to the 300th page, the last one GitHub serves. Past it, an owner's stop-agents
+# whose label is off now is missed unless its `unlabeled` event is among the events read. A candidate whose
+# stop-agents someone other than the App removed leaves the record, and a later label brings it back. Fails, printing
+# nothing, when a read fails, so the caller brakes; an issue whose events cannot be read, a deleted one too, fails
+# every call until its line leaves the record.
 owner_stop_agents() {
   local repository="$1" record="$2" mark="" cutoff="" newest="" candidates="" kept="" paused="" failed="" page=1
   local events count oldest at number event actor name n out label held
@@ -133,6 +135,8 @@ owner_stop_agents() {
     cutoff="$(date -u -d "@$(( $(date -u -d "$mark" +%s) - 3600 ))" +%Y-%m-%dT%H:%M:%SZ)"
     newest="$mark"
   fi
+  candidates+=$'\n'"$(gh issue list -R "$repository" --label stop-agents --state all --limit 1000 --json number \
+    --jq '.[].number' 2>/dev/null)" || return 1
   while :; do
     events="$(gh api "repos/$repository/issues/events?per_page=100&page=$page" --jq '.[]
       | "\(.created_at) \(.issue.number // 0) \(.event) \(.actor.login // "-") \(.label.name // "" | ascii_downcase)"' \
@@ -142,11 +146,14 @@ owner_stop_agents() {
       [ -n "$at" ] || continue
       count=$((count + 1)) oldest="$at"
       [[ "$at" < "$newest" ]] || newest="$at"
-      if [ "$event" = labeled ] && [ "$name" = stop-agents ] && [ "${actor,,}" != "${app_login,,}" ]; then
+      if [ "$name" = stop-agents ] && { [ "$event" = unlabeled ] \
+          || { [ "$event" = labeled ] && [ "${actor,,}" != "${app_login,,}" ]; }; }; then
         candidates+=$'\n'"$number"
       fi
     done <<< "$events"
-    if [ "$count" -lt 100 ] || { [ -n "$cutoff" ] && [[ "$oldest" < "$cutoff" ]]; }; then break; fi
+    if [ "$count" -lt 100 ] || [ "$page" -ge 300 ] || { [ -n "$cutoff" ] && [[ "$oldest" < "$cutoff" ]]; }; then
+      break
+    fi
     page=$((page + 1))
   done
   candidates="$(grep -xE '[1-9][0-9]*' <<< "$candidates" | sort -nu || true)"
