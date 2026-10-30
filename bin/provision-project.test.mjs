@@ -104,7 +104,7 @@ test("Triphammer's own repository as a project shares its checkout, gets its too
   assert.ok(lines(join(m.state, 'npx-calls')).includes('-y playwright@1.63.0 install-deps chromium'));
   assert.ok(existsSync(join(m.home, '.cache/ms-playwright/chromium-1243/INSTALLATION_COMPLETE')));
   assert.ok(!existsSync(join(m.state, 'npm-calls')), 'Codex was installed without the codex module');
-  assert.ok(!m.calls().some(([command, ...args]) => command === 'systemctl' && args.includes('enable')), 'provision-project enabled a unit');
+  assert.ok(!first.calls.some(([command, ...args]) => command === 'systemctl' && args.includes('enable')), 'provision-project enabled a unit');
   assert.match(first.stdout, /\nproject: example-project\n$/);
   assert.deepEqual(readdir(join(m.sys, 'tmp')), [], 'the copy of github-app-token was left behind');
 
@@ -196,6 +196,50 @@ test('two projects, with their modules, get one config and their own extras each
     assert.doesNotMatch(again.stdout, /Log Codex in/);
     assert.deepEqual(changingCalls(again.calls), []);
   }
+});
+
+test('a project that declares "docker": true lets the rootless daemon\'s user read its run clones alone, and a second run changes nothing', t => {
+  const m = ready(t, {
+    'example/compose': {'.triphammer/project.json': JSON.stringify({name: 'compose', docker: true})},
+    'example/other': {'.triphammer/project.json': JSON.stringify({name: 'other', docker: false})},
+  });
+  const checkout = join(m.root, 'srv/compose');
+  const before = m.machine().acls;
+  const first = m.project('example/compose', checkout);
+  assert.equal(first.status, 0, first.output);
+  const worktrees = join(checkout, '.worktrees');
+  assert.ok(statSync(worktrees).isDirectory());
+  // Read and search on .worktrees, inherited by each clone made there; search alone on the directories above that are
+  // the service user's (on the fake machine, those the caller owns, from the checkout up past the temporary directory).
+  const {[worktrees]: clones, ...added} = Object.fromEntries(Object.entries(m.machine().acls).filter(([path]) => !before[path]));
+  assert.deepEqual(clones, ['user:triphammer-docker:r-x', 'default:user:triphammer-docker:r-x']);
+  for (const dir of [checkout, join(m.root, 'srv'), m.root]) assert.ok(added[dir], dir);
+  for (const [dir, entries] of Object.entries(added)) {
+    assert.ok(`${checkout}/`.startsWith(`${dir}/`), `${dir} is not above the checkout`);
+    assert.deepEqual(entries, ['user:triphammer-docker:--x'], dir);
+  }
+  assert.ok(!Object.keys(added).some(path => path.startsWith(m.home)), 'the daemon\'s user may reach the service user\'s home');
+
+  const again = m.project('example/compose', checkout);
+  assert.equal(again.status, 0, again.output);
+  assert.deepEqual(changingCalls(again.calls), []);
+
+  // A project without Docker gives the daemon's user nothing.
+  const acls = m.machine().acls;
+  const other = m.project('example/other', join(m.root, 'other'));
+  assert.equal(other.status, 0, other.output);
+  assert.deepEqual(m.machine().acls, acls);
+  assert.ok(!existsSync(join(m.root, 'other/.worktrees')));
+});
+
+test('a Docker project on a machine whose file names no rootless daemon stops provision-project with exit 1', t => {
+  const m = ready(t, {'example/compose': {'.triphammer/project.json': JSON.stringify({name: 'compose', docker: true})}});
+  const file = join(m.sys, 'etc/triphammer.conf');
+  writeFileSync(file, readFileSync(file, 'utf8').split('\n').filter(line => !line.startsWith('TRIPHAMMER_DOCKER_')).join('\n'));
+  const result = m.project('example/compose', join(m.root, 'compose'));
+  assert.equal(result.status, 1, result.output);
+  assert.match(result.stderr, /declares "docker": true, and .*triphammer\.conf names no rootless Docker daemon's user that exists; run triphammer update/);
+  assert.ok(!changingCalls(result.calls).some(([command]) => command === 'setfacl'));
 });
 
 test("a private project clones with the App's token, and the token never reaches the output", t => {

@@ -4,7 +4,7 @@ import {execFileSync, spawnSync} from 'node:child_process';
 import {chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import net from 'node:net';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {gitEnv, toolingEnv} from '../scripts/test-git-repo.mjs';
 
@@ -186,14 +186,18 @@ export function fakeGh(dir, routes = {}) {
 
 // A fake `docker` (fake-docker.mjs) in `bin`, recording into `dir`. `containers` sets the compose containers `ps`
 // lists ([project, working_dir] pairs), `unavailable` makes every call fail, `failDown` makes `compose down` of the
-// projects named fail, `compose` sets the version `compose version` reports (null: no Compose plugin), and `calls`
-// lists `<COMPOSE_PROJECT_NAME>|<arguments>` per call.
+// projects named fail, `compose` sets the version `compose version` reports (null: no Compose plugin), `refuse` makes
+// every call to the daemons named (unix://<path>) fail, `writes` makes `docker run` create the files its `touch /host<path>`
+// names, `calls` lists `<COMPOSE_PROJECT_NAME>|<arguments>` per call and `hosts` `<daemon>|<arguments>`.
 export function fakeDocker(dir, bin) {
   mkdirSync(dir, {recursive: true});
   fakeCommand(bin, 'docker', dir);
   return {
     containers: pairs => writeFileSync(join(dir, 'ps.json'), JSON.stringify(pairs)),
     unavailable: () => writeFileSync(join(dir, 'unavailable'), ''),
+    refuse: (...daemons) => writeFileSync(join(dir, 'refuse'), daemons.join('\n')),
+    writes: () => writeFileSync(join(dir, 'writes'), ''),
+    hosts: () => lines(join(dir, 'hosts')),
     failDown: (...projects) => writeFileSync(join(dir, 'fail-down'), projects.join('\n')),
     compose: version => writeFileSync(join(dir, 'compose-version'), version ?? ''),
     calls: () => lines(join(dir, 'calls')),
@@ -315,7 +319,10 @@ export function checkoutSetup(t, files = {}, config = {}) {
 // executes the checkout's copy with its state in the temporary directory and `bin` (name -> script) first on PATH. Its
 // Triphammer config is Triphammer's, with `config` over it. Its `gh` is a fakeGh answering from `gh` (argument prefix -> response), so by default it answers
 // nothing (no stop-agents issue) but that the owner is a person (`api users/`), and its `docker` a fakeDocker listing
-// no containers, so a test never reaches the machine's real Docker. Its `bwrap` appends its arguments as one JSON line
+// no containers, so a test never reaches the machine's real Docker. Its machine file (in $TRIPHAMMER_PROVISION_ROOT)
+// names the rootless Docker daemon's socket `dockerSocket`, in a directory that exists, without the socket, as
+// provision writes it (bin/provision-lib.sh); `dockerHost` is its DOCKER_HOST, and `noRootlessDaemon` rewrites the
+// file naming no daemon, as a provision from before the rootless daemon wrote it. Its `bwrap` appends its arguments as one JSON line
 // to bwrap-calls (`bwrapCalls`) and runs the command after `--` with no limit, so a test never needs the real one; a
 // `bin` entry named bwrap replaces it. Its HOME is `home`, in the temporary directory, with a ~/.codex, so the
 // runtime directories the sandbox creates in Codex's directory (~/.codex/sessions) land there as they do on a machine
@@ -356,9 +363,17 @@ exec "$@"
   for (const [name, script] of Object.entries(bin)) writeFileSync(join(fake.bin, name), script, {mode: 0o755});
   const home = join(r.root, 'home');
   mkdirSync(join(home, '.codex'), {recursive: true});
-  const env = {...withoutSandboxPaths(r.env), HOME: home, XDG_STATE_HOME: join(r.root, 'state'), PATH: `${fake.bin}:${process.env.PATH}`};
+  const machine = join(r.root, 'machine');
+  const machineFile = join(machine, 'etc/triphammer.conf');
+  const dockerSocket = join(r.root, 'example-docker/docker.sock');
+  for (const dir of [dirname(machineFile), dirname(dockerSocket)]) mkdirSync(dir, {recursive: true});
+  const machineText = `TRIPHAMMER_USER=example\nTRIPHAMMER_HOME=${home}\n`;
+  writeFileSync(machineFile, `${machineText}TRIPHAMMER_DOCKER_USER=example-docker\nTRIPHAMMER_DOCKER_SOCKET=${dockerSocket}\n`);
+  const env = {...withoutSandboxPaths(r.env), HOME: home, XDG_STATE_HOME: join(r.root, 'state'),
+    PATH: `${fake.bin}:${process.env.PATH}`, TRIPHAMMER_PROVISION_ROOT: machine};
   return {
-    ...r, env, home, gh: fake, docker,
+    ...r, env, home, gh: fake, docker, dockerSocket, dockerHost: `unix://${dockerSocket}`,
+    noRootlessDaemon: () => writeFileSync(machineFile, machineText),
     bwrapCalls: () => lines(bwrapCalls).map(line => JSON.parse(line)),
     tokenCalls: () => lines(join(r.root, 'state/github-app-token-calls')),
     runTicketRunner: (args = [], extraEnv = {}) =>

@@ -46,6 +46,16 @@ machine_get() {
   printf '%s' "$value"
 }
 
+# rootless_docker_host: prints unix://<path> for the rootless Docker daemon's socket that the machine file names
+# (machine_get TRIPHAMMER_DOCKER_SOCKET, which bin/provision writes), or nothing when the file is missing or names no
+# absolute path of the plain characters provision writes.
+rootless_docker_host() {
+  local socket
+  socket="$(machine_get TRIPHAMMER_DOCKER_SOCKET)"
+  [[ "$socket" =~ ^(/[A-Za-z0-9._-]+)+$ && "$socket/" != */./* && "$socket/" != */../* ]] || return 0
+  printf 'unix://%s\n' "$socket"
+}
+
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
 # checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
 # for under the jq filter $playwright_filter, which prints nothing when the file asks for no Playwright.
