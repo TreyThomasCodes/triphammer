@@ -692,7 +692,7 @@ for (const [declared, docker, hidden] of [['without docker', undefined, true], [
 
 test('a project that declares Docker starts no session on a machine whose machine file names no rootless daemon', t => {
   const r = ticketSetup(t, [issue(7)], {project: `${JSON.stringify({...example, docker: true})}\n`});
-  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  r.noRootlessDaemon();
   assert.throws(() => r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'}), error => error.status === 1);
   assert.equal(r.ran(), false);
   assert.match(r.log(), /ticket #7: this project declares "docker": true, but the machine file names no rootless Docker daemon, so no session starts/);
@@ -1302,7 +1302,7 @@ test('a tick prunes the databases whose run directory is gone and never one whos
 
 test('on a machine whose machine file names no rootless daemon the database sweep is skipped with one log line', t => {
   const r = ticketSetup(t, [recentUpkeep]);
-  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  r.noRootlessDaemon();
   r.docker.containers([['example-project-local-1', join(r.root, 'issue-561/database')]]);
   r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'});
   assert.equal(r.log().match(/database sweep skipped: the machine file names no rootless Docker daemon/g).length, 1);

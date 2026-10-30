@@ -75,9 +75,9 @@ Run these steps on the server, as a user who can use `sudo`.
    ```
 
 The installer sets up git, ShellCheck, Docker, Node, the GitHub CLI and Claude Code. It creates a `triphammer` user and
-clones Triphammer to `/srv/triphammer`. A project whose checks use Docker gets a rootless Docker daemon that runs as a
-second user, `triphammer-docker`. For that user it installs the Triphammer plugin and the humanizer plugin, which
-comes from the `blader/humanizer` marketplace on GitHub.
+clones Triphammer to `/srv/triphammer`. For that user it installs the Triphammer plugin and the humanizer plugin, which
+comes from the `blader/humanizer` marketplace on GitHub. A project whose checks use Docker gets a rootless Docker
+daemon that runs as a second user, `triphammer-docker`.
 
 It asks for your password once, and it's safe to run again: it only changes what isn't right yet. To preview its
 changes, end the line with `bash -s -- --dry-run` instead of `bash`. When it finishes, it lists what's still left for

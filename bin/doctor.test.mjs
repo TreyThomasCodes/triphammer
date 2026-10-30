@@ -231,7 +231,7 @@ test('a rootful Docker daemon that answers the service user is reported', t => {
 
 test('a machine file that names no rootless Docker daemon is reported for a project that declares Docker', t => {
   const r = doctorSetup(t);
-  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  r.noRootlessDaemon();
   assertOneProblem(r.doctor(), /^The machine file .*\/etc\/triphammer\.conf names no rootless Docker daemon.*Fix: run sudo bin\/provision/);
 });
 

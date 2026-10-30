@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {readdirSync, readFileSync, realpathSync, writeFileSync} from 'node:fs';
+import {readdirSync, readFileSync, realpathSync} from 'node:fs';
 import {dirname, join} from 'node:path';
 import {here, runnerSetup} from './fixture.mjs';
 
@@ -77,7 +77,7 @@ test('the probe fails when the rootful daemon answers, and when the rootless one
 
 test('the probe fails at once on a machine whose machine file names no rootless daemon', t => {
   const r = probeSetup(t);
-  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_.*\n/gm, ''));
+  r.noRootlessDaemon();
   const {status, output} = r.probe();
   assert.equal(status, 1);
   assert.equal(output, 'FAIL: the machine file names no rootless Docker daemon; run sudo bin/provision first\n');
