@@ -29,6 +29,8 @@ Triphammer merges code without a person watching, so several limits apply to eve
 - CI reads those rules from the default branch, never from the pull request, so a pull request can't loosen its own
   tier.
 - A change no rule covers waits for you. A repository with no rules file sends every change to you.
+- Each machine serves one project, and these limits rest on that: none of them is meant to keep two projects on one
+  machine apart. `triphammer add` refuses a second project, and the doctor reports a machine that has more than one.
 - Each session Triphammer starts runs under an OS-level write limit that leaves only its clone, the temporary
   directories and the tools' own runtime and cache directories writable. The write limit and the runner hold the
   session's boundaries.
@@ -179,6 +181,9 @@ triphammer start <project>
 `triphammer add` clones the repository to `/srv/<repo>`, installs the toolchains it pins, writes the project's config
 and creates any labels Triphammer needs. It then runs the doctor, which lists anything missing and how to fix it. The
 timers aren't on yet, so the doctor skips them until you run `triphammer start`, which turns them on.
+
+A machine serves one project. When the machine already has a different one, `triphammer add` names it and stops
+without changing anything; set the new project up on a machine of its own.
 
 You can run `triphammer add` again at any time. It keeps your existing settings and prints what each one ended up as.
 To change a setting, use `--set KEY=VALUE`, `--modules` or `--app-author`. To remove one, use `--unset KEY`.

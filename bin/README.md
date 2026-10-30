@@ -43,7 +43,7 @@ or classifier of its own. This repository's CI is the exception: its workflows r
 | File | What it does |
 | --- | --- |
 | `ticket-runner` | One tick of the unattended backlog: self-update, then close a finished parent issue, repair an agent pull request, start a fresh Claude Code session on the next ready issue (the `triphammer:ticket-run` skill), or open and run the weekly upkeep issue. Each tick first removes the run clones and databases nothing uses any more (see below). Its header lists the order and the owner's brakes; `ticket-runner --plan` prints what the next tick would do. While a session runs, `current` in the state directory (the config's `STATE_DIR`) names the run (the runner's pid and start time, its kind and number, the branch its session works on, and the open pull requests it may push to) for `merge-when-ready`; once the session ends it names no pull request and no branch, and the runner removes it when the run ends. The run's own issue (a ticket) or pull request (a repair) carries the label `agent-working` while the run lasts, telling the owner not to update or push to it; it is information and never a brake, only the runner adds it, and each tick removes any left on anything else first. State and logs are in the state directory. The projects on one machine share the session slots (`max-sessions`, by default one), a backoff and a stop file, and take turns when the slots run out (see Several projects). |
-| `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers, `update` runs a fresh clone's `provision` and each project's `provision-project` again for what the runner does not update by itself; see On a machine of its own below. |
+| `triphammer` | The owner's command, installed by `provision` as `/usr/local/bin/triphammer`: `triphammer add` sets a project up, and refuses one other than the project the machine has, as a machine serves one project (Several projects), `doctor` and `plan` run `ticket-runner --doctor` and `--plan` as the service user, `start` starts a project's timers, `update` runs a fresh clone's `provision` and each project's `provision-project` again for what the runner does not update by itself; see On a machine of its own below. |
 | `provision` | Run as root (by `install.sh`, through sudo) on a fresh Ubuntu server, turns it into a machine of Triphammer's own with no project yet: the shared toolchain, the service user, Triphammer's checkout, the links, the plugin, the machine file and the `triphammer` command; see On a machine of its own below. |
 | `provision-project` | Run as root by `triphammer add`, from a fresh clone of Triphammer: sets one project up on that machine, with its checkout, its toolchains, its modules' extras and its config. |
 | `provision-lib.sh` | Sourced by `provision` and `provision-project`: what they share, from the argument checks to the clone, and the machine file `/etc/triphammer.conf`. |
@@ -203,6 +203,13 @@ absolute or leaves the repository stops the script that reads it with exit 2, na
 exists.
 
 ## Several projects
+
+A machine serves one project. The threat model (`security-review-brief.md`) rests on that, so keeping projects apart
+is no security boundary: what this section and The write limit say keeps one project's sessions from another's on the
+same machine is a convenience, and anything that needs a second project on the machine is not a finding. `triphammer
+add` refuses a project other than the one the machine has (On a machine of its own, Add a project), and the doctor
+reports a machine whose service user has more than one config (Doctor, One project); each further project goes on a
+machine of its own.
 
 Triphammer runs the backlog of every project that has a config file, at most one session per project and at most
 `max-sessions` sessions at once across them (one unless the owner raises it): `ticket-runner@<project>` and
@@ -435,6 +442,8 @@ which a Claude Code run outside the limit would load for that project; what a se
 directory, which a later session of the same project reads and runs, such as a package in `nuget/packages` whose
 MSBuild targets a later build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a
 later `docker build` uses; and what another writable path above lets a later session read, such as a transcript.
+What the limit hides of other projects (their tokens, caches and Docker daemons) keeps them apart only as a
+convenience: a machine serves one project, and the threat model rests on that (Several projects).
 
 Before it counts a run, each tick runs `session-sandbox <checkout> true`. When that fails, as it does without
 `bwrap` or where `bwrap` cannot create a user namespace, the runner logs why, starts no session and exits 1; `ticket-runner
@@ -774,8 +783,8 @@ as `n` runs, so it is skipped unless the cap and the floor leave room for all `n
 ## Security review
 
 Triphammer's threat model is the first section of `security-review-brief.md`, the review's prompt: who is trusted,
-who the attacker is, the five boundaries that must hold against a session the attacker controls, and what is not a
-finding. A repair session and upkeep's monthly audit judge findings against the same copy, and file only those that
+who the attacker is, the four boundaries that must hold against a session the attacker controls, and what is not a
+finding. It assumes each machine runs one project (Several projects). A repair session and upkeep's monthly audit judge findings against the same copy, and file only those that
 cross a boundary.
 
 `security-review` belongs to the `codex` module: with the module off, or without the config's `CODEX_SECURITY_MODEL`,
@@ -925,6 +934,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 
 | Check | Passes when |
 | --- | --- |
+| One project | `${XDG_CONFIG_HOME:-~/.config}/triphammer` holds at most one `*.conf`, as a machine serves one project (Several projects). More is a problem naming each config's project, whose fix is moving all but one of them to machines of their own. |
 | .NET SDK | `dotnet --list-sdks` lists an SDK the checkout's `global.json` accepts: with `rollForward` `disable` the pinned version only; `patch`, `latestPatch` or none, the same feature band at or after it; `feature` or `latestFeature`, the same major.minor; `minor` or `latestMinor`, the same major; `major` or `latestMajor`, any later one. A prerelease counts only with `allowPrerelease` true. A checkout without `global.json` is not checked. |
 | Node | `node --version` is within the checkout's `package.json` `engines.node` when its comparators are `>=`, `>`, `<=`, `<`, `=` or bare versions of one to three parts, blank-separated; other forms (`^`, `~`, `\|\|`) only need `node` to run. A partial version is a range as in semver: `24` is `24.x`, `<=24` is `<25.0.0`, `>24` is `>=25.0.0`, `<24` is `<24.0.0`, and `24.1` is `24.1.x`. |
 | Docker | Checked only when the project's `.triphammer/project.json` declares `"docker": true`, or cannot be read. The project's name has a key (lower-case letters, digits and dashes), the machine file names the socket of the project's own rootless Docker daemon and names it for no other daemon, `docker info` with `DOCKER_HOST` naming it answers the user running the doctor, `docker -H unix:///var/run/docker.sock info`, the rootful daemon, does not (when it does, the user is still in the `docker` group, and `provision` takes it out), and `docker compose version` is 2 or later. |
@@ -1031,9 +1041,9 @@ project's `REPO` (`GITHUB_APP_OWNER`), the `gh` wrapper takes it from `-R`/`--re
 account's token is cached on its own. A project an organization owns also needs `OWNER` in its config and the
 repository variable `TRIPHAMMER_OWNER` (Configuration).
 
-Another project on the same machine needs only its config file, `<name>.conf` with its own `REPO`, `CHECKOUT` and
-`STATE_DIR`, and `systemctl --user enable --now ticket-runner@<name>.timer merge-when-ready@<name>.timer`; the projects
-then run one session at a time between them, or up to the number in the shared directory's `max-sessions` when the
+A machine serves one project, and the threat model rests on that (Several projects): another project goes on a
+machine of its own, and the doctor reports a second config here as a problem. The runner still runs each config's
+project, one session at a time between them, or up to the number in the shared directory's `max-sessions` when the
 owner writes one (Several projects).
 
 **Merged branches.** For each project the owner turns on "Automatically delete head branches" in the repository's
@@ -1129,7 +1139,8 @@ enables no timer of the service user's.
 
 **The rootless Docker daemon.** Each project that declares `"docker": true` has a rootless Docker daemon of its own,
 which its sessions alone reach, so no session of one project reaches another's containers, images, volumes, networks
-or build cache. `provision-project` sets it up (`docker_daemon` in `bin/provision-lib.sh`) once the project is cloned.
+or build cache. Keeping projects apart is no security boundary, as a machine serves one project (Several projects).
+`provision-project` sets it up (`docker_daemon` in `bin/provision-lib.sh`) once the project is cloned.
 It runs as a user of its own, `<user>-docker-<project>` (`triphammer-docker-web-app` for a project named
 `web-app`), with its home beside the service user's, holding its images and volumes, and in neither the
 service user's group nor `docker`. The daemon runs in a user namespace on that user's subordinate ids, so a container
@@ -1208,7 +1219,11 @@ runs code from the checkout the service user can write. It then runs `ticket-run
 `gh` acts as the App, to create the labels Triphammer uses that the repository lacks (Labels; a failure is reported and
 undoes nothing, and the doctor lists what is still missing), runs the doctor for the project with `--before-start`,
 which leaves out the units `start` enables and says so (Doctor), and prints the command that starts it. With
-`--dry-run` it does neither.
+`--dry-run` it does neither. A machine serves one project (Several projects): before `provision-project` runs, with
+`--dry-run` or without, `triphammer add` reads the service user's configs and exits 1, changing nothing, when one has a
+`REPO` other than the repository given (compared ignoring case) or none it can read, naming that config's project; it
+does the same when `~/.config/triphammer` is there but cannot be listed. Adding the project the machine has again keeps
+its settings, as below.
 
 | `provision-project` argument | What it is |
 | --- | --- |

@@ -300,7 +300,8 @@ docker_reads() {
 
 # docker_daemon <project> <checkout>: the rootless Docker daemon of one project that declares "docker": true, which its
 # sessions alone reach, so no other project's session reaches its containers, images, volumes, networks or build
-# cache. It runs as a user of its own, <user>-docker-<project>, in a user namespace on that user's subordinate ids, so
+# cache; that is no security boundary, as a machine serves one project (bin/README.md, Several projects). It runs as a
+# user of its own, <user>-docker-<project>, in a user namespace on that user's subordinate ids, so
 # a container that mounts / or runs privileged acts as that user on the machine, and that user may read only the
 # project's run clones (docker_reads). It is in neither the service user's group nor the docker group. Its home, beside
 # the service user's, holds the images and volumes (~/.local/share/docker). A project whose name has no docker_key
