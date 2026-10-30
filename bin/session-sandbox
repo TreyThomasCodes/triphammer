@@ -88,7 +88,9 @@
 # ($TRIPHAMMER_PROVISION_ROOT/etc/triphammer.conf, rootless_docker_sockets in config.sh) names is hidden the same way:
 # each other Docker project's, and the one daemon they all shared before each had its own. For a path whose directory
 # is missing, the first missing name on its way is left out of the directory that exists. What the machine adds to
-# such a directory later, other than in an entry mounted back, does not show inside either.
+# such a directory later, other than in an entry mounted back, does not show inside either. What it hides of other
+# projects (their tokens, caches and Docker daemons) is no security boundary: a machine serves one project, and the
+# threat model rests on that (bin/README.md, Several projects).
 # bwrap ends the command when its parent dies (--die-with-parent), and every process left inside when the command
 # exits.
 #
