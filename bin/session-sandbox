@@ -76,7 +76,11 @@
 # network is shared. The user's runtime directory, /run/user/<uid>, and $XDG_RUNTIME_DIR when it names another, are
 # each an empty tmpfs of mode 0700 that the command may write, mounted before everything above, so neither the user
 # manager, the session bus nor an agent's socket there is reachable; DBUS_SESSION_BUS_ADDRESS, SSH_AUTH_SOCK and
-# GPG_AGENT_INFO are unset. A rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back.
+# GPG_AGENT_INFO are unset. With TRIPHAMMER_DOCKER=1, which ticket-runner sets for a project whose project file
+# declares "docker": true, a rootless Docker socket there that DOCKER_HOST (unix://<path>) names is mounted back.
+# Without it the machine's Docker sockets are hidden too: each of /var/run/docker.sock, /run/docker.sock and the
+# socket a DOCKER_HOST of unix://<path> names outside the runtime directories that exists gets an empty read-only file
+# over it, mounted after every writable path, so the command can neither connect to it nor find a socket there.
 # bwrap ends the command when its parent dies (--die-with-parent), and every process left inside when the command
 # exits.
 #
@@ -85,9 +89,10 @@
 # Code run outside the limit would load for that project; what the command writes to its project's cache directory,
 # which a later session of the same project reads and runs (a package in nuget/packages whose MSBuild targets a later
 # build runs, a tarball in the npm cache, or buildx's builder state, which picks the builder a later docker build
-# uses); anything else a writable path above lets a later session read (a transcript, local-audit's run count); and
-# the Docker socket, which the command can still reach, so a container started through Docker can write anywhere on the
-# machine; and abstract Unix sockets, services listening on the machine's localhost, as the network is shared, and the
+# uses); anything else a writable path above lets a later session read (a transcript, local-audit's run count); with
+# TRIPHAMMER_DOCKER=1, the Docker socket, which the command can still reach, so a container started through Docker can
+# write anywhere on the machine; without it, a Docker daemon reached some other way than the sockets above (a socket
+# elsewhere, a Docker context, TCP); and abstract Unix sockets, services listening on the machine's localhost, as the network is shared, and the
 # system bus, which the command can reach too.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
@@ -208,7 +213,10 @@ cover() {
     fi
   done
 }
-# The user's runtime directories, each an empty tmpfs, with a rootless Docker socket there mounted back.
+# The user's runtime directories, each an empty tmpfs, with a rootless Docker socket there mounted back for a project
+# that uses Docker.
+docker=''
+[ "${TRIPHAMMER_DOCKER:-}" != 1 ] || docker=1
 runtime_dirs=()
 for path in "/run/user/$UID" "${XDG_RUNTIME_DIR:-}"; do
   [ -n "$path" ] && [ -d "$path" ] || continue
@@ -217,10 +225,21 @@ for path in "/run/user/$UID" "${XDG_RUNTIME_DIR:-}"; do
 done
 for path in "${runtime_dirs[@]}"; do args+=(--perms 0700 --tmpfs "$path"); done
 args+=(--unsetenv DBUS_SESSION_BUS_ADDRESS --unsetenv SSH_AUTH_SOCK --unsetenv GPG_AGENT_INFO)
-if [[ "${DOCKER_HOST:-}" == unix://* ]] && [ -S "${DOCKER_HOST#unix://}" ]; then
-  docker_socket="$(readlink -f -- "${DOCKER_HOST#unix://}")"
-  for path in "${runtime_dirs[@]}"; do
-    [[ "$docker_socket" != "$path"/* ]] || { bind --bind "$docker_socket"; break; }
+# The machine's Docker sockets that exist, symlinks resolved, each once (bwrap cannot mount a file twice onto one
+# path), and whether each lies in a runtime directory.
+docker_sockets=() in_runtime=()
+docker_host=''
+[[ "${DOCKER_HOST:-}" != unix://* ]] || docker_host="${DOCKER_HOST#unix://}"
+for path in /var/run/docker.sock /run/docker.sock "$docker_host"; do
+  [ -n "$path" ] && [ -S "$path" ] || continue
+  path="$(readlink -f -- "$path")"
+  for seen in "${docker_sockets[@]}"; do [ "$seen" != "$path" ] || continue 2; done
+  docker_sockets+=("$path") in_runtime+=('')
+  for dir in "${runtime_dirs[@]}"; do [[ "$path" != "$dir"/* ]] || in_runtime[-1]=1; done
+done
+if [ -n "$docker" ]; then
+  for i in "${!docker_sockets[@]}"; do
+    [ -z "${in_runtime[$i]}" ] || bind --bind "${docker_sockets[$i]}"
   done
 fi
 bind --bind "$run_dir" /tmp "${TMPDIR:-}" \
@@ -284,6 +303,15 @@ if [ -n "${TRIPHAMMER_CACHE_DIR:-}" ]; then
   bind --bind "$cache_dir"
 else
   for name in "${cache_subdirs[@]}"; do args+=(--dir "$cache_dir/$name"); done
+fi
+# For a project that does not use Docker, an empty read-only file over each Docker socket outside the runtime
+# directories, whose tmpfs already hides the ones there, after every writable path so none shows one again.
+if [ -z "$docker" ]; then
+  for i in "${!docker_sockets[@]}"; do
+    [ -z "${in_runtime[$i]}" ] || continue
+    exec {fd}< /dev/null
+    args+=(--ro-bind-data "$fd" "${docker_sockets[$i]}")
+  done
 fi
 [ -z "$token_dir" ] || bind --ro-bind "$token_dir"
 

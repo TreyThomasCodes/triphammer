@@ -558,7 +558,8 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
     t.after(() => server.close());
   }
   const env = {XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sockets.bus}`,
-    SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`};
+    SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`,
+    TRIPHAMMER_DOCKER: '1'};
   for (const what of ['bus', 'agent', 'gpg']) {
     const {status, output} = r.inside(connect(sockets[what]), env);
     assert.notEqual(status, 0, `the ${what} socket was reached: ${output}`);
@@ -573,6 +574,49 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
   assert.equal(status, 0, output);
   assert.equal(output, `dbus=unset ssh=unset gpg=unset runtime=${runtime}\ndocker.sock\n700\nmade\n`);
   assert.ok(!existsSync(join(runtime, 'made')), "the runtime directory's tmpfs reached outside");
+  const {TRIPHAMMER_DOCKER, ...withoutDocker} = env;
+  const hidden = r.inside(`${connect(sockets.docker)}; ls -A "$XDG_RUNTIME_DIR"`, withoutDocker);
+  assert.match(hidden.output, /FileNotFoundError/, hidden.output);
+  assert.doesNotMatch(hidden.output, /docker\.sock/, hidden.output);
+});
+
+// A Docker socket outside the limit that DOCKER_HOST names, listening, and the machine's own Docker sockets.
+async function dockerSocket(t, r) {
+  const socket = join(r.root, 'docker.sock');
+  const server = createServer(connection => connection.destroy());
+  await new Promise((resolve, reject) => server.once('error', reject).listen(socket, resolve));
+  t.after(() => server.close());
+  return {socket, env: {DOCKER_HOST: `unix://${socket}`}};
+}
+const machineSockets = ['/var/run/docker.sock', '/run/docker.sock'];
+// Whether a socket at each of the machine's paths shows inside: `<path> socket` or `<path> none`.
+const findSockets = machineSockets.map(path => `if [ -S ${path} ]; then echo "${path} socket"; else echo "${path} none"; fi`)
+  .join('; ');
+const isSocket = path => spawnSync('test', ['-S', path]).status === 0;
+
+test("a project without Docker gets no Docker socket: one DOCKER_HOST names outside the limit and the machine's are hidden", {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, env} = await dockerSocket(t, r);
+  for (const extra of [{}, {TRIPHAMMER_DOCKER: 'true'}, {TRIPHAMMER_DOCKER: '0'}]) {
+    const {status, output} = r.inside(`${connect(socket)}; test -S '${socket}' || echo "no socket"`, {...env, ...extra});
+    assert.equal(status, 0, output);
+    assert.doesNotMatch(output, /^connected /m, output);
+    assert.match(output, /ConnectionRefusedError/, output);
+    assert.match(output, /^no socket$/m, output);
+    const machine = r.inside(findSockets, {...env, ...extra});
+    assert.equal(machine.output, machineSockets.map(path => `${path} none\n`).join(''), JSON.stringify(extra));
+  }
+  assert.ok(isSocket(socket), 'the socket outside is untouched');
+});
+
+test('a project with Docker reaches the Docker socket DOCKER_HOST names outside the limit, and the machine\'s', {skip}, async t => {
+  const r = sandboxRig(t);
+  const {socket, env} = await dockerSocket(t, r);
+  const {status, output} = r.inside(connect(socket), {...env, TRIPHAMMER_DOCKER: '1'});
+  assert.equal(status, 0, output);
+  assert.equal(output, `connected ${socket}\n`);
+  const machine = r.inside(findSockets, {...env, TRIPHAMMER_DOCKER: '1'});
+  assert.equal(machine.output, machineSockets.map(path => `${path} ${isSocket(path) ? 'socket' : 'none'}\n`).join(''));
 });
 
 // The user's own runtime directory, which the user manager and the session bus listen in, when this machine has one.

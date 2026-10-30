@@ -183,6 +183,7 @@ project that leaves out a field gets none of its step, and the runner logs nothi
 | --- | --- | --- |
 | `name` | the Triphammer config's file name | `example-project` |
 | `demos` | the `triphammer:ticket-run` skill: `true` when the project has paced demo walkthroughs for the `demo` module to publish | `true` |
+| `docker` | `ticket-runner` and the write limit: `true` when the project's checks use Docker, so its sessions keep the Docker socket; without it, or with `false`, a session gets none (The write limit) | absent |
 | `worktreeTeardown` | `ticket-runner`: the command run in a run's clone, under the write limit, before it is removed, a list of words whose first is a path relative to the clone | `["scripts/local-db.sh", "down"]` |
 | `shellEditRoots` | the plugin's `agent-guard.py` hook, which reads it from the working tree of the repository a command runs in: the directories whose git-tracked files a shell command may not rewrite (they go through Edit or Write), a list of paths relative to the repository root and inside it; without it the hook has no shell-edit rule | `["src", "tests"]` |
 | `composeProjectPattern` | `ticket-runner`: the Docker Compose project names the sweep may prune, an extended regular expression | `^example-project-(local\|it)-[0-9]+$` |
@@ -193,8 +194,8 @@ project that leaves out a field gets none of its step, and the runner logs nothi
 | `reviewSkills` | the `triphammer:reviewer`, `triphammer:upkeep` §3, `local-audit`: the domain review skills followed after the checklists, each where its description says it applies; a list of paths | `[".agents/skills/example-safety-review/SKILL.md"]` |
 | `uiVerificationSkill` | the `triphammer:builder`: the skill whose checks a change to the user interface also passes | `.agents/skills/example-web-verification/SKILL.md` |
 
-A project file that is not a JSON object, lacks a valid `name`, or has a field of the wrong type (`demos` is `true` or
-`false`), a pattern that does not compile, a check that is unknown or not plain words, or a shell-edit root that is
+A project file that is not a JSON object, lacks a valid `name`, or has a field of the wrong type (`demos` and `docker` are `true`
+or `false`), a pattern that does not compile, a check that is unknown or not plain words, or a shell-edit root that is
 absolute or leaves the repository stops the script that reads it with exit 2, naming the file and the field; the
 `agent-guard.py` hook instead ignores a malformed `shellEditRoots`, as it ignores anything it cannot work out.
 `triphammer:upkeep` §3 checks that every command, skill and path the file names
@@ -226,7 +227,7 @@ Projects take turns when the slots run out: a tick that took the last free slot 
 project can take that one, so no project yields. An older mark, from a project that is stopped or removed, is ignored,
 so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes nothing.
 
-Sessions of several projects running at once share the machine's Docker. Each tick's database sweep prunes the Compose
+Sessions of several projects that declare `"docker": true` running at once share the machine's Docker. Each tick's database sweep prunes the Compose
 projects its `composeProjectPattern` matches whose run directory is gone, so when two projects' patterns can match the same
 Compose project name, one project's sweep could prune the other's containers while both run; `triphammer doctor`
 warns about such a pair.
@@ -387,12 +388,17 @@ while the runner still sees the session's and its brake stops them. The network 
 directory, `/run/user/<uid>`, and `$XDG_RUNTIME_DIR` when it names another, are each an empty tmpfs of mode 0700 that
 the session may write, so neither the user manager (`systemctl --user`, `systemd-run --user`), the session bus nor an
 `ssh-agent` or `gpg-agent` socket there is reachable, and `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK` and
-`GPG_AGENT_INFO` are unset. A rootless Docker socket there that `DOCKER_HOST` (`unix://<path>`) names is mounted back.
+`GPG_AGENT_INFO` are unset. For a project whose project file declares `"docker": true`, a rootless Docker socket there
+that `DOCKER_HOST` (`unix://<path>`) names is mounted back. A session of any other project gets no Docker socket: an
+empty read-only file covers each of `/var/run/docker.sock`, `/run/docker.sock` and a socket that `DOCKER_HOST`
+(`unix://<path>`) names outside the runtime directories, so it can neither connect to one nor find one there. The
+runner tells the limit which applies (`TRIPHAMMER_DOCKER=1` for a project that declares it).
 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
-covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
-the machine; abstract Unix sockets, services listening on the machine's localhost, such as another project's
+covered: for a project that declares `"docker": true`, the Docker socket, which its checks use, so a container a
+session starts can still write anywhere on the machine; for another project, a Docker daemon it reaches some other way
+than the sockets above (a socket elsewhere, a Docker context, TCP); abstract Unix sockets, services listening on the machine's localhost, such as another project's
 containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
 which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache

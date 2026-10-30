@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
+import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {exampleProject, git, here, lines, manyLabels, projectJson, realCommand, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
@@ -663,6 +664,32 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
     }
   });
 }
+
+// The paths a bwrap call's `--ro-bind-data` arguments cover with a file.
+const covered = call => call.flatMap((arg, i) => arg === '--ro-bind-data' ? [call[i + 2]] : []);
+
+for (const [declared, docker, hidden] of [['without docker', undefined, true], ['with "docker": false', false, true],
+  ['with "docker": true', true, false]]) {
+  test(`a project's Docker setting reaches the write limit: a project ${declared} ${hidden ? 'gets no' : 'keeps its'} Docker socket`, async t => {
+    const r = ticketSetup(t, [issue(7)], {project: docker === undefined ? projectJson : `${JSON.stringify({...example, docker})}\n`});
+    const socket = join(r.root, 'docker.sock');
+    const server = createServer(connection => connection.destroy());
+    await new Promise((resolve, reject) => server.once('error', reject).listen(socket, resolve));
+    t.after(() => server.close());
+    r.tick({DOCKER_HOST: `unix://${socket}`});
+    assert.equal(r.ran(), true);
+    const calls = r.bwrapCalls();
+    assert.equal(calls.length, 2, JSON.stringify(calls));
+    for (const call of calls) assert.equal(covered(call).includes(realpathSync(socket)), hidden, JSON.stringify(call));
+  });
+}
+
+test('a project file whose docker is not true or false stops the tick', t => {
+  const r = ticketSetup(t, [issue(7)], {project: project({docker: 'yes'})});
+  assert.throws(() => r.tick(), error => error.status === 2
+    && error.stderr.includes(`${join(r.checkout, '.triphammer/project.json')} is malformed: docker must be true or false`));
+  assert.equal(r.ran(), false);
+});
 
 test("the runtime directories the write limit creates in Codex's directory land in the fixture's home", t => {
   const r = ticketSetup(t);
