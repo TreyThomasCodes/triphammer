@@ -409,10 +409,13 @@ tool (Edit and Write go through permission rules alone), and the model can ask t
 covered: for a project that declares `"docker": true`, what the rootless daemon's user can do, as a container a session
 starts through it, privileged or mounting `/` or not, acts as that user on the machine: it reads what is
 world-readable there and the run clones in `<checkout>/.worktrees`, which the session can read already, and writes
-what that user may (its own home, and whatever on the machine is world-writable), and it reaches the containers and
-volumes of every project that declares Docker, which share the daemon; a Docker daemon a session reaches some other
-way than the sockets above (a socket elsewhere, a Docker context, TCP), or, for a project that does not declare
-Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the session, or that lies directly in
+what that user may (its own home, and whatever on the machine is world-writable), and it reaches the containers,
+images, volumes, networks and build cache of every project that declares Docker, which share the daemon; what a
+session starts or leaves on the daemon (a container run detached or with a restart policy, an image, such as one
+re-tagged under a name a later session pulls, a volume) outlives the session, a container running on through later
+sessions and reboots, and is there for later sessions of every project that declares Docker; a Docker daemon a session
+reaches some other way than the sockets above (a socket elsewhere, a Docker context, TCP), or, for a project that does
+not declare Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the session, or that lies directly in
 `/`; abstract Unix sockets, services listening on the machine's localhost, such as another project's
 containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
