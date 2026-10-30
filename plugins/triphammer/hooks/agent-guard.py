@@ -579,7 +579,9 @@ def interpreter_scripts(kind, args, heredocs):
         value = v[end + 1:] if kind != "node" else ""
         if not value and i < len(args):
             value, i = args[i].value, i + 1
-        if v[end] in script_letters:
+        elif not value:
+            value = None  # a bare -p (or -c, -e) at the end reads the script from stdin
+        if v[end] in script_letters and value is not None:
             scripts.append(value)
         elif v[end] == "m" and stdin is None:
             stdin = False

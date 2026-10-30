@@ -188,6 +188,7 @@ for (const [name, command, file] of [
     'src/x.cs'],
   ['node -pe', `node -pe 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
   ['node -p', `node -p 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node -p before a heredoc', `node -p <<'EOF'\nrequire("fs").writeFileSync("src/x.cs", "x")\nEOF`, 'src/x.cs'],
   ['node --unhandled-rejections before -e',
     `node --unhandled-rejections strict -e 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
   ['node --diagnostic-dir before a heredoc',
