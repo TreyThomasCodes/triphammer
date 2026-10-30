@@ -90,18 +90,20 @@ switch (command) {
     done(`Removing user ${option('-d')} from group ${args.at(-1)}\n`);
   }
   case 'setfacl': {
-    const entries = state.acls[args.at(-1)] ??= [];
+    const path = args.at(-1);
+    const entries = state.acls[path] ??= [];
     entries.push(...option('-m').split(',').filter(entry => !entries.includes(entry)));
-    const mode = statSync(args.at(-1)).mode & 0o777;
+    const mode = statSync(path).mode & 0o777;
     const mask = entries.filter(named).reduce((bits, entry) => bits | rights(entry), (mode >> 3) & 7);
-    chmodSync(args.at(-1), (mode & 0o707) | (mask << 3));
+    chmodSync(path, (mode & 0o707) | (mask << 3));
     save();
     done();
   }
   case 'getfacl': {
-    const mask = existsSync(args.at(-1)) ? (statSync(args.at(-1)).mode >> 3) & 7 : 7;
+    const path = args.at(-1);
+    const mask = existsSync(path) ? (statSync(path).mode >> 3) & 7 : 7;
     const effectiveShown = !args.some(arg => /^-[a-zA-Z]*E/.test(arg));
-    done((state.acls[args.at(-1)] ?? []).map(entry => {
+    done((state.acls[path] ?? []).map(entry => {
       const effective = rights(entry) & mask;
       return named(entry) && effectiveShown && effective !== rights(entry) ? `${entry}\t#effective:${text(effective)}\n` : `${entry}\n`;
     }).join(''));
