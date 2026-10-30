@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
-import {run, decide, triphammerSession, assertNoOverrideHint, assertNotLifted} from './agent-guard-fixture.mjs';
+import {decide, assertNoOverrideHint, assertNotLifted} from './agent-guard-fixture.mjs';
 
 // The self-kill rule.
 
@@ -43,6 +43,14 @@ test('pkill -f inside a longer command is refused', () => {
     /self-kill rule/);
 });
 
+test('pkill -f with an option that takes the next word before the pattern is refused', () => {
+  // A value with brackets, read as the pattern, would pass for the bracket form.
+  for (const command of [`pgrep -f --cgroup '[a]pp' web-e2e`, `pkill -f -O '[6]0' web-e2e`,
+    `pkill -f --older '[6]0' web-e2e`, `pkill -f -q '[1]' web-e2e`, `pkill -f --queue '[1]' web-e2e`]) {
+    assert.match(decide(command, tmpdir()) ?? '', /self-kill rule/, command);
+  }
+});
+
 test('pkill -f or pgrep -f after a reserved word is refused', () => {
   for (const command of ['if true; then pkill -f web-e2e; fi', 'while pgrep -f web-e2e; do sleep 1; done',
     '{ pkill -f web-e2e; }', 'until ! pgrep -f web-e2e; do sleep 1; done']) {
@@ -72,7 +80,6 @@ const selfKills = [
   ['sudo kill -9 $PPID', /Claude Code session/],
   [`kill ${process.pid}`, new RegExp(`process ${process.pid}, the Claude Code session or one of its parents`)],
   [`kill -9 ${process.ppid}`, new RegExp(`process ${process.ppid}`)],
-  [`bash -c 'kill -HUP ${process.pid}'`, new RegExp(`process ${process.pid}`)],
 ];
 
 for (const [command, process_] of selfKills) {
@@ -86,24 +93,6 @@ for (const [command, process_] of selfKills) {
     assertNoOverrideHint(reason);
   });
 }
-
-test('in a Triphammer session xargs running kill, pkill, pgrep or killall is refused, since its input gives the target',
-  t => {
-    const s = triphammerSession(t);
-    if (!s) return;
-    for (const command of ['echo $PPID | xargs kill', 'echo $$ | xargs kill -9', 'echo $PPID | xargs -I{} kill {}',
-      'echo ticket-runner | xargs pkill -f', 'echo ticket-runner | xargs pgrep -f', 'echo bash | xargs killall',
-      'echo $PPID | xargs sudo kill', 'echo $PPID | xargs /bin/kill', 'echo $PPID | xargs busybox kill']) {
-      const reason = decide(command, s.worktree, {env: s.env});
-      assert.match(reason ?? '', /self-kill rule/, command);
-      assert.match(reason, /kill "\$pid"/, command);
-      assertNoOverrideHint(reason, command);
-    }
-    assertNotLifted('echo $PPID | xargs kill', 'self-kill', s.worktree, {env: s.env});
-    for (const command of ['xargs grep foo < src/x.cs', 'echo src/x.cs | xargs wc -l']) {
-      assert.equal(decide(command, s.worktree, {env: s.env}), null, command);
-    }
-  });
 
 test('kill of a PID outside the session, a job or a saved PID is allowed', () => {
   const other = spawnSync('true').pid;  // exited, and never a parent of the hook

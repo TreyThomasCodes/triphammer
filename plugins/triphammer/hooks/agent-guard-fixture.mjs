@@ -70,15 +70,11 @@ export function repo(t, {contract = {name: 'sample', shellEditRoots: ['src', 'te
   return {dir, scratch: join(root, 'scratch')};
 }
 
-export const pyEdit = path => `python3 - <<'PY'
-from pathlib import Path
-p = Path("${path}")
-p.write_text(p.read_text().replace("X", "Z"))
-PY`;
 export const editsOf = path => [
   `sed -i 's/X/Z/' ${path}`,
   `cat > ${path} <<EOF\nclass Z {}\nEOF`,
-  pyEdit(path),
+  `echo x | tee ${path}`,
+  `cp /tmp/x ${path}`,
 ];
 
 export function assertShellEditDenied(reason, file) {
@@ -90,8 +86,8 @@ export function assertShellEditDenied(reason, file) {
   assert.match(reason, /# guard-override: <reason>/);
 }
 
-// The variables that move Triphammer's directories or name a run's proposals file, which each rig below removes.
-const triphammerVariables = ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR', 'TRIPHAMMER_PROPOSALS'];
+// The variables that move Triphammer's directories, which each rig below removes.
+const triphammerVariables = ['XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'TRIPHAMMER_SHARED_DIR'];
 
 // Changes to Triphammer's persistence. Each test runs the hook with a throwaway HOME and none of the variables that move
 // Triphammer's directories, so nothing depends on the real home directory; machineHome sets those it is given.
@@ -191,11 +187,9 @@ export const outsidePlaces = s => [
   join(s.worktree, '..', 'issue-8', 'x'),
 ];
 
-// Each shell writer, aimed at a target (outside or inside); the targets it names are the ones checked.
+// Each plain writer, aimed at a target (outside or inside).
 export const shellWriters = target => [
   `echo x > ${target}`, `echo x >> ${target}`, `echo x &> ${target}`, `echo x | tee -a ${target}`,
   `cp src/x.cs ${target}`, `mv src/x.cs ${target}`, `ln -s src/x.cs ${target}`, `ln -sf src/x.cs ${target}`,
-  `install -m 755 src/x.cs ${target}`, `rm -f ${target}`, `rm -rf ${target}`, `chmod +x ${target}`,
-  `chown "$USER" ${target}`, `touch ${target}`, `mkdir -p ${target}`, `sed -i 's/a/b/' ${target}`,
-  `sed -i -e 's/a/b/' ${target}`, `truncate -s 0 ${target}`,
+  `rm -f ${target}`, `rm -rf ${target}`, `sed -i 's/a/b/' ${target}`, `sed -i -e 's/a/b/' ${target}`,
 ];

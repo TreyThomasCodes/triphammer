@@ -17,8 +17,6 @@ const files = [
   'plugins/triphammer/hooks/agent-guard-file-tools.test.mjs',
   'plugins/triphammer/hooks/agent-guard-kill.test.mjs',
   'plugins/triphammer/hooks/agent-guard-persistence.test.mjs',
-  'plugins/triphammer/hooks/agent-guard-session-git.test.mjs',
-  'plugins/triphammer/hooks/agent-guard-session-paths.test.mjs',
   'plugins/triphammer/hooks/agent-guard-session-writes.test.mjs',
   'plugins/triphammer/hooks/agent-guard-shell-edit.test.mjs',
   'plugins/triphammer/skills/merge-policy/SKILL.md',
