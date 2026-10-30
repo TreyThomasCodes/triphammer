@@ -33,16 +33,25 @@
 # project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is, or when one is a run's clone of the
 # other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
 #
-# rootless_docker_host: prints unix://<path> for the rootless Docker daemon's socket that the machine file
-# ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf names (TRIPHAMMER_DOCKER_SOCKET, which bin/provision writes;
-# bin/provision-lib.sh), or nothing when the file is missing or names no absolute path of the plain characters
-# provision writes. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
-rootless_docker_host() {
-  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line socket=""
+# machine_get <KEY>: prints the value of the machine file ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf gives KEY
+# (bin/provision writes it, one KEY=VALUE per line; bin/provision-lib.sh), as it stands after the `=`, from the last
+# line that gives it, or nothing when the file is missing or unreadable or gives no KEY. It checks no value: each
+# caller checks its own. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
+machine_get() {
+  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line value=""
   [ -r "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
-    [[ "$line" != TRIPHAMMER_DOCKER_SOCKET=* ]] || socket="${line#*=}"
+    [[ "$line" != "$1="* ]] || value="${line#*=}"
   done < "$file"
+  printf '%s' "$value"
+}
+
+# rootless_docker_host: prints unix://<path> for the rootless Docker daemon's socket that the machine file names
+# (machine_get TRIPHAMMER_DOCKER_SOCKET, which bin/provision writes), or nothing when the file is missing or names no
+# absolute path of the plain characters provision writes.
+rootless_docker_host() {
+  local socket
+  socket="$(machine_get TRIPHAMMER_DOCKER_SOCKET)"
   [[ "$socket" =~ ^(/[A-Za-z0-9._-]+)+$ && "$socket/" != */./* && "$socket/" != */../* ]] || return 0
   printf 'unix://%s\n' "$socket"
 }

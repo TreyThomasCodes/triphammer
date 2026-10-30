@@ -32,6 +32,8 @@ git_base="${TRIPHAMMER_PROVISION_GIT_BASE:-https://github.com/}"
 repo_pattern='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 machine_file="$root/etc/triphammer.conf"
 node_bin="$root/usr/local/bin"
+# shellcheck source=bin/config.sh
+source "$here/config.sh"  # machine_get
 
 # check_place <flag> <repo> <path>: a repository as owner/name and a checkout as a plain absolute path, or exit 2.
 check_place() {
@@ -49,21 +51,10 @@ machine_text() {
 # read_machine: sets tri_repo, tri_checkout, user and home from the machine file, or exits 1 naming what is wrong, and
 # docker_user and docker_socket, which are empty in the file of a provision from before the rootless daemon.
 read_machine() {
-  local line key value
-  tri_repo="" tri_checkout="" user="" home="" docker_user="" docker_socket=""
   [ -r "$machine_file" ] || fail "$machine_file is missing; set the machine up first (install.sh, or bin/provision)"
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in ''|'#'*) continue ;; esac
-    key="${line%%=*}" value="${line#*=}"
-    case "$key" in
-      TRIPHAMMER_REPO) tri_repo="$value" ;;
-      TRIPHAMMER_CHECKOUT) tri_checkout="$value" ;;
-      TRIPHAMMER_USER) user="$value" ;;
-      TRIPHAMMER_HOME) home="$value" ;;
-      TRIPHAMMER_DOCKER_USER) docker_user="$value" ;;
-      TRIPHAMMER_DOCKER_SOCKET) docker_socket="$value" ;;
-    esac
-  done < "$machine_file"
+  tri_repo="$(machine_get TRIPHAMMER_REPO)" tri_checkout="$(machine_get TRIPHAMMER_CHECKOUT)"
+  user="$(machine_get TRIPHAMMER_USER)" home="$(machine_get TRIPHAMMER_HOME)"
+  docker_user="$(machine_get TRIPHAMMER_DOCKER_USER)" docker_socket="$(machine_get TRIPHAMMER_DOCKER_SOCKET)"
   [[ "$tri_repo" =~ $repo_pattern && "$tri_checkout" == /* && "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$home" == /* ]] \
     || fail "$machine_file does not name Triphammer's repository, checkout, user and home; run bin/provision again"
   [ -z "$docker_user$docker_socket" ] \
