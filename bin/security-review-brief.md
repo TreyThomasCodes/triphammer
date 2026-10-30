@@ -8,6 +8,7 @@ pull request cannot change the model it is reviewed against.
 
 How the workflow runs:
 
+- Each machine runs one project: `triphammer add` refuses a second, and the doctor reports a machine that has more.
 - Unattended Claude Code agents run in auto mode, one session per issue or pull request, under the write limit of
   `bin/session-sandbox` and the guard hooks.
 - A session reaches GitHub as the agents' GitHub App, with the network open.
@@ -40,7 +41,6 @@ What must hold even then. A way around one of these is a finding:
 4. Credentials: the attacker gets no credential beyond the installation token of the repository's own account, which
    expires within the hour, and the logins the session itself runs on (Claude Code's, and Codex's for the upkeep
    audits). The App's private key, the owner's credentials and other accounts' tokens stay out of reach.
-5. Other projects: a session of one project changes nothing that another project's runs, checkouts or merges use.
 
 Not findings:
 
@@ -48,6 +48,7 @@ Not findings:
   limit and the runner, not a boundary. Report a gap in them only when you show a boundary above crossed through it.
 - Anything that only stops work: a brake that holds too long, a machine that stops, a review that does not run.
 - Anything that needs trusted access, as above.
+- Anything that needs a second project on the same machine.
 
 Severity: High when the attacker crosses a boundary with what a session can do. Medium when they need a condition they
 cannot bring about themselves, such as a setting, a timing or a rare repository state.

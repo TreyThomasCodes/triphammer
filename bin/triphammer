@@ -8,6 +8,10 @@
 #   triphammer start [<project>]
 #   triphammer update [--dry-run]
 #
+# A machine serves one project. add, --dry-run or not, exits 1 naming the machine's project, before provision-project
+# runs, when the service user's ~/.config/triphammer holds a config whose REPO is not the repository given, or one whose
+# REPO cannot be read, or the directory is there but cannot be listed. Adding the machine's own project again works.
+#
 # add clones Triphammer's repository (from the machine file) into a temporary directory as the caller, runs that
 # clone's bin/provision-project as root through sudo with the arguments given (which keeps the settings a project's
 # config has unless they give others or --unset removes them), removes the clone, creates the labels
@@ -152,11 +156,15 @@ service_runner() {
   detached "${service[@]}" -- env TRIPHAMMER_PROJECT="$1" "$home/.local/bin/ticket-runner" "${@:2}"
 }
 
-# config_names: sets `names` to the projects that have a config in the service user's ~/.config/triphammer.
+# config_names: sets `names` to the projects that have a config in the service user's ~/.config/triphammer. A directory
+# that is missing has none; one that is there but cannot be listed stops the script.
 config_names() {
-  local configs name
+  local configs name dir="$home/.config/triphammer"
   names=()
-  configs="$(as_service ls -1 "$home/.config/triphammer" 2>/dev/null || true)"
+  if ! configs="$(as_service ls -1 "$dir" 2>/dev/null)"; then
+    ! as_service test -e "$dir" || fail "could not list $dir as $user, so which projects this machine has is unknown"
+    configs=""
+  fi
   while IFS= read -r name; do
     [[ "$name" != *.conf ]] || names+=("${name%.conf}")
   done <<< "$configs"
@@ -204,6 +212,19 @@ as_root() {
   return "$status"
 }
 
+# one_project <owner/name>: stops the script when the service user has a config for a project of another repository
+# than the one given (its REPO, compared as provision-project compares it, ignoring case), or one whose REPO cannot be
+# read: a machine serves one project.
+one_project() {
+  local names name repo others=()
+  config_names
+  for name in "${names[@]}"; do
+    repo="$(as_service sed -n 's/^REPO=//p' "$home/.config/triphammer/$name.conf")" || repo=""
+    [ "${repo,,}" = "${1,,}" ] || others+=("$name")
+  done
+  [ ${#others[@]} -eq 0 ] || fail "this machine serves ${others[*]} already, and one machine serves one project; set $1 up on a machine of its own (bin/README.md, Several projects)"
+}
+
 add() {
   local arg dry_run="" status=0 name
   for arg; do [ "$arg" != --dry-run ] || dry_run=1; done
@@ -211,6 +232,7 @@ add() {
   read_machine
   fresh_clone "triphammer add installs the project's toolchains as root and writes its files as $user" \
     "bin/provision-project sets the project up"
+  one_project "$1"
   as_root provision-project "$@" || status=$?
   [ "$status" -eq 0 ] || exit "$status"
   name="$(sed -n 's/^project: //p' "$work/output" | tail -n 1)"
