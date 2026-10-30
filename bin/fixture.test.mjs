@@ -5,7 +5,13 @@ import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
-import {interrupt, lines} from './fixture.mjs';
+import {interrupt, lines, realCommand} from './fixture.mjs';
+
+test('realCommand gives the absolute path of a command on PATH, and nothing for one that is missing', () => {
+  assert.match(realCommand('sh'), /^\/\S*\/sh$/);
+  assert.equal(realCommand('triphammer-no-such-command'), '');
+  assert.equal(realCommand('no such; command'), '');
+});
 
 // A script in a temporary directory for interrupt() (fixture.mjs) to wait on: `body` runs under bash, with $pids (a
 // file each process of it appends its pid to), $slow (the slow step's log) and $got (where its traps record a signal).

@@ -380,12 +380,17 @@ directories, `~/.gitconfig` and `~/.claude.json` among them, is read-only to the
 the Edit and Write tools, Bash commands, python or node scripts the guard does not parse, git hooks and subagents, as
 they all run in its process tree. Claude Code cannot save `~/.claude.json` under the limit; it logs that and carries on.
 The session also gets a process namespace of its own, so it neither sees nor signals the machine's other processes,
-while the runner still sees the session's and its brake stops them. The network is shared.
+while the runner still sees the session's and its brake stops them. The network is shared. The user's runtime
+directory, `/run/user/<uid>`, and `$XDG_RUNTIME_DIR` when it names another, are each an empty tmpfs of mode 0700 that
+the session may write, so neither the user manager (`systemctl --user`, `systemd-run --user`), the session bus nor an
+`ssh-agent` or `gpg-agent` socket there is reachable, and `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK` and
+`GPG_AGENT_INFO` are unset. A rootless Docker socket there that `DOCKER_HOST` (`unix://<path>`) names is mounted back.
 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
 covered: the Docker socket, which a session's checks use, so a container a session starts can still write anywhere on
-the machine; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
+the machine; abstract Unix sockets, services listening on the machine's localhost, such as another project's
+containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
 which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache
 directory, which a later session of the same project reads and runs, such as a package in `nuget/packages` whose

@@ -5,7 +5,7 @@ import {createPublicKey, createVerify} from 'node:crypto';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {fakeCommand, here, lines, run, toolingEnv} from './fixture.mjs';
+import {fakeCommand, here, lines, realCommand, run, toolingEnv} from './fixture.mjs';
 
 const api = 'https://api.github.com/app';
 const installationsUrl = `GET ${api}/installations`;
@@ -280,7 +280,7 @@ test('the gh wrapper runs nothing when the only gh on PATH is itself', t => {
   // Only bash and the tools the wrapper itself uses are on PATH, so no real gh is.
   const tools = join(r.root, 'tools');
   mkdirSync(tools);
-  for (const tool of ['bash', 'readlink', 'dirname']) symlinkSync(run('sh', ['-c', `command -v ${tool}`]).trim(), join(tools, tool));
+  for (const tool of ['bash', 'readlink', 'dirname']) symlinkSync(realCommand(tool), join(tools, tool));
   const result = spawnSync(join(linked, 'gh'), ['pr', 'list'], {env: {...r.env, PATH: `${linked}:${here}:${tools}`}, encoding: 'utf8'});
   assert.equal(result.status, 1);
   assert.match(result.stderr, /no gh on PATH besides this wrapper/);
