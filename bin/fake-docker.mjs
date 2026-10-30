@@ -1,15 +1,19 @@
 // The `docker` Triphammer tests put first on PATH (see fakeDocker in fixture.mjs): `node fake-docker.mjs <dir> <docker
 // arguments>`. It appends `<COMPOSE_PROJECT_NAME>|<arguments>` to <dir>/calls, and fails every call while
 // <dir>/unavailable exists, as docker does when its daemon is down. `ps` prints <dir>/ps.json (an array of
-// [project, working_dir]) as tab-separated lines, whatever the --format asks. `compose ... down` for the project
+// [project, working_dir]) as tab-separated lines, whatever the --format asks, but `ps -aq` prints each container's id,
+// <project>-db-1; `rm` drops the containers whose ids it names from ps.json. `compose ... down` for the project
 // named by -p or COMPOSE_PROJECT_NAME fails when <dir>/fail-down lists it; otherwise it prints compose's `Removed`
-// line for each of the project's containers and drops them from ps.json. `info` prints an engine version. `compose
+// line for each of the project's containers and drops them from ps.json. `info` prints an engine version, but `info
+// --format {{.Swarm.LocalNodeState}}` prints the swarm state in <dir>/swarm (default inactive); `swarm leave` makes it
+// inactive, or fails while <dir>/fail-swarm-leave exists. `plugin ls -q` prints the plugin ids in <dir>/plugins, one per line, and `plugin rm` drops those it names. `compose
 // version` prints the Compose version in <dir>/compose-version (default 2.32.4), or fails as docker does without the
 // Compose plugin when that file is empty. The daemon a call reaches is the -H (--host) it gives, else $DOCKER_HOST, else
 // unix:///var/run/docker.sock: it appends `<daemon>|<arguments>` to <dir>/hosts, and fails the call as docker does
 // when its daemon is down when <dir>/refuse lists that daemon, but for `compose version`, which asks no daemon. `run ... sh -c <script>` does nothing unless
 // <dir>/writes exists, and then creates, outside, each file the script's `touch /host<path>` names, as a container
-// that may write through its mount of / would.
+// that may write through its mount of / would. While <dir>/respawn holds a count above 0, each `rm` lowers it by one
+// and adds a container `respawned-<count>` to ps.json, as a container replacing itself through the daemon's socket would.
 import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 
@@ -28,7 +32,22 @@ if (existsSync(join(dir, 'unavailable')) || refused) {
 const psFile = join(dir, 'ps.json');
 const containers = existsSync(psFile) ? JSON.parse(readFileSync(psFile, 'utf8')) : [];
 const composeFile = join(dir, 'compose-version');
-if (args[0] === 'info') {
+const swarmFile = join(dir, 'swarm');
+const pluginsFile = join(dir, 'plugins');
+const plugins = existsSync(pluginsFile) ? readFileSync(pluginsFile, 'utf8').split('\n').filter(Boolean) : [];
+if (args[0] === 'info' && args.includes('{{.Swarm.LocalNodeState}}')) {
+  console.log(existsSync(swarmFile) ? readFileSync(swarmFile, 'utf8').trim() : 'inactive');
+} else if (args[0] === 'swarm' && args[1] === 'leave') {
+  if (existsSync(join(dir, 'fail-swarm-leave'))) {
+    console.error('Error response from daemon: context deadline exceeded');
+    process.exit(1);
+  }
+  writeFileSync(swarmFile, 'inactive');
+} else if (args[0] === 'plugin' && args[1] === 'ls') {
+  for (const plugin of plugins) console.log(plugin);
+} else if (args[0] === 'plugin' && args[1] === 'rm') {
+  writeFileSync(pluginsFile, plugins.filter(plugin => !args.includes(plugin)).join('\n'));
+} else if (args[0] === 'info') {
   console.log('28.0.1');
 } else if (args[0] === 'compose' && args[1] === 'version') {
   const version = existsSync(composeFile) ? readFileSync(composeFile, 'utf8') : '2.32.4';
@@ -42,6 +61,17 @@ if (args[0] === 'info') {
   if (existsSync(join(dir, 'writes'))) {
     for (const [, path] of script.matchAll(/touch "?\/host(\/[^"\s]+)/g)) writeFileSync(path, '');
   }
+} else if (args[0] === 'ps' && args.includes('-aq')) {
+  for (const [project] of containers) console.log(`${project}-db-1`);
+} else if (args[0] === 'rm') {
+  const left = containers.filter(([project]) => !args.includes(`${project}-db-1`));
+  const respawnFile = join(dir, 'respawn');
+  const respawns = existsSync(respawnFile) ? Number(readFileSync(respawnFile, 'utf8')) : 0;
+  if (respawns > 0) {
+    writeFileSync(respawnFile, String(respawns - 1));
+    left.push([`respawned-${respawns}`, '']);
+  }
+  writeFileSync(psFile, JSON.stringify(left));
 } else if (args[0] === 'ps') {
   for (const [project, workingDir] of containers) console.log(`${project}\t${workingDir}`);
 } else if (args[0] === 'compose' && args.includes('down')) {

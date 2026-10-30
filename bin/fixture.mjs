@@ -188,7 +188,7 @@ export function fakeGh(dir, routes = {}) {
 // lists ([project, working_dir] pairs), `unavailable` makes every call fail, `failDown` makes `compose down` of the
 // projects named fail, `compose` sets the version `compose version` reports (null: no Compose plugin), `refuse` makes
 // every call to the daemons named (unix://<path>) fail, `writes` makes `docker run` create the files its `touch /host<path>`
-// names, `calls` lists `<COMPOSE_PROJECT_NAME>|<arguments>` per call and `hosts` `<daemon>|<arguments>`.
+// names, `respawn` makes each of the next `n` `docker rm` calls add a new container, `calls` lists `<COMPOSE_PROJECT_NAME>|<arguments>` per call and `hosts` `<daemon>|<arguments>`.
 export function fakeDocker(dir, bin) {
   mkdirSync(dir, {recursive: true});
   fakeCommand(bin, 'docker', dir);
@@ -197,6 +197,7 @@ export function fakeDocker(dir, bin) {
     unavailable: () => writeFileSync(join(dir, 'unavailable'), ''),
     refuse: (...daemons) => writeFileSync(join(dir, 'refuse'), daemons.join('\n')),
     writes: () => writeFileSync(join(dir, 'writes'), ''),
+    respawn: n => writeFileSync(join(dir, 'respawn'), String(n)),
     hosts: () => lines(join(dir, 'hosts')),
     failDown: (...projects) => writeFileSync(join(dir, 'fail-down'), projects.join('\n')),
     compose: version => writeFileSync(join(dir, 'compose-version'), version ?? ''),

@@ -95,3 +95,12 @@ A mount over a file holds that file's inode, not its name. When something outsid
 - Is there a test that recreates the file, and one that creates it, during the run?
 
 Found in: a sandbox that covered a daemon's socket with an empty file, which a daemon restart made reachable again.
+
+## 14. Boundary claims that skip a path
+
+A doc or threat-model line that narrows a "Not covered" item, or says a boundary now holds, is true only if the change closes every path across it, not just the one it fixes.
+
+- List what the actor can still reach (each file, home, config, unit or service it may write). Does the change reset or block each one, or does the claim say which it leaves?
+- Does a qualifier added to a Not covered item ("while the session runs", "until the next sweep") hold for every item it now covers?
+
+Found in: a Docker daemon sweep whose docs said a session's daemon writes ended with the session, when its container could still write the daemon user's home, unit and daemon config.

@@ -125,7 +125,7 @@ test('the demo is published before a run that progressed removes its clone', t =
   assert.equal(existsSync(r.worktree), false);
 });
 
-test('a run that progressed stops its database before it removes its clone', t => {
+test('a run that progressed stops its database before it removes its clone, on the daemon swept after the session', t => {
   const r = ticketSetup(t);
   const project = localDb(r.worktree);
   writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[project, join(r.worktree, 'database')]]));  // local-db.sh up
@@ -133,7 +133,9 @@ test('a run that progressed stops its database before it removes its clone', t =
   r.tick();
   assert.ok(r.docker.calls().some(call => call.startsWith(`${project}|compose --file `) && call.endsWith(' down --volumes --remove-orphans')));
   assert.ok(r.docker.hosts().some(call => call.startsWith(`${r.dockerHost}|compose --file `)), 'the teardown gets the rootless daemon');
-  assert.match(r.log(), new RegExp(`tore down ${r.worktree}:  Container ${project}-db-1  Removed\n`));
+  const log = r.log();
+  assert.ok(log.indexOf('after the session: removed 1 container ') < log.indexOf('run 1 finished'), log);
+  assert.doesNotMatch(log, /teardown failed/, 'a teardown on the swept daemon still works');
   assert.equal(existsSync(r.worktree), false);
 });
 
@@ -719,6 +721,129 @@ test('a project that declares Docker starts no session on a machine whose machin
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'the run is not counted');
 });
 
+// The calls of the daemon sweep (sweep_daemon) on the project's daemon, and the session's `docker info` that marks where
+// the session ran.
+const daemonSweep = r => r.docker.hosts().filter(call => /\|(info|swarm |plugin |ps -aq|rm |volume prune|network prune|image prune|builder prune)/.test(call));
+const swarmState = host => `${host}|info --format {{.Swarm.LocalNodeState}}`;
+const prunes = host => [`${host}|volume prune -af`, `${host}|network prune -f`, `${host}|image prune -af`, `${host}|builder prune -af`];
+
+test("the project's own Docker daemon is swept clean right before the session and again right after it", t => {
+  const r = ticketSetup(t);
+  const db = localDb(r.worktree);
+  r.docker.containers([['left-behind', '']]);  // a container an earlier session started, not a database of the sweep's
+  writeFileSync(join(r.root, 'session-db.json'), JSON.stringify([[db, join(r.worktree, 'database')]]));  // local-db.sh up
+  const during = join(r.root, 'during.sh');
+  writeFileSync(during, '#!/bin/sh\ndocker info >/dev/null\n', {mode: 0o755});
+  r.tick({DURING_SESSION: during});
+  assert.equal(r.ran(), true);
+  const h = r.dockerHost;
+  assert.deepEqual(daemonSweep(r), [
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`, `${h}|ps -aq`,
+    ...prunes(h), `${h}|ps -aq`,
+    `${h}|info`,
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes ${db}-db-1`, `${h}|ps -aq`,
+    ...prunes(h), `${h}|ps -aq`,
+  ]);
+  assert.equal(readFileSync(join(r.root, 'docker/ps.json'), 'utf8'), '[]', 'no container is left');
+  const log = r.log();
+  assert.match(log, /ticket #7: swept the project's Docker daemon before the session: removed 1 container and pruned the volumes, networks, images and build cache\n.*ticket #7: run 1 of 3 starting/);
+  assert.match(log, /ticket #7: swept the project's Docker daemon after the session: removed 1 container and pruned/);
+});
+
+test('the daemon sweep leaves a swarm and removes every plugin before it removes the containers', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['service-task', '']]);  // a task of a service a session started
+  writeFileSync(join(r.root, 'docker/swarm'), 'active');
+  writeFileSync(join(r.root, 'docker/plugins'), 'plugin-a\nplugin-b\n');
+  r.tick();
+  assert.equal(r.ran(), true);
+  const h = r.dockerHost;
+  assert.deepEqual(daemonSweep(r), [
+    swarmState(h), `${h}|swarm leave --force`, `${h}|plugin ls -q`, `${h}|plugin rm -f plugin-a plugin-b`,
+    `${h}|ps -aq`, `${h}|rm -f --volumes service-task-db-1`, `${h}|ps -aq`, ...prunes(h), `${h}|ps -aq`,
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, ...prunes(h), `${h}|ps -aq`,
+  ]);
+  assert.equal(readFileSync(join(r.root, 'docker/plugins'), 'utf8'), '', 'no plugin is left');
+});
+
+test('the daemon sweep removes the containers again until none is left, counting each', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['left-behind', '']]);
+  r.docker.respawn(1);  // removing it starts a replacement once
+  r.tick();
+  assert.equal(r.ran(), true);
+  const h = r.dockerHost;
+  assert.deepEqual(daemonSweep(r).slice(0, 7), [
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`,
+    `${h}|ps -aq`, `${h}|rm -f --volumes respawned-1-db-1`, `${h}|ps -aq`,
+  ]);
+  assert.match(r.log(), /ticket #7: swept the project's Docker daemon before the session: removed 2 containers and pruned/);
+});
+
+test('a daemon sweep that leaves a container on the daemon starts no session and is not counted', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['left-behind', '']]);
+  r.docker.respawn(99);  // every removal starts a replacement
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  const h = r.dockerHost;
+  assert.equal(daemonSweep(r).filter(call => call.startsWith(`${h}|rm `)).length, 5, 'five rounds of removal');
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: 1 container is still on the daemon after its removal and the prunes\n/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
+  assert.deepEqual(r.tokenCalls(), []);
+});
+
+test('a daemon sweep after the session that leaves a container on the daemon is logged', t => {
+  const r = ticketSetup(t);
+  const during = join(r.root, 'during.sh');  // the session leaves a container that replaces itself
+  writeFileSync(during, `#!/bin/sh\nprintf '[["left-behind",""]]' > "$PROBE/docker/ps.json"\nprintf 99 > "$PROBE/docker/respawn"\n`, {mode: 0o755});
+  r.tick({DURING_SESSION: during});
+  assert.equal(r.ran(), true);
+  const log = r.log();
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: 1 container is still on the daemon after its removal and the prunes\n/);
+});
+
+test('a daemon sweep whose swarm leave fails starts no session', t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'docker/swarm'), 'error');
+  writeFileSync(join(r.root, 'docker/fail-swarm-leave'), '');
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker swarm leave --force failed: Error response from daemon: context deadline exceeded\n/);
+});
+
+test('a project whose machine file names no rootless daemon of its own gets no daemon sweep and no docker call', t => {
+  const r = ticketSetup(t);
+  r.noRootlessDaemon();
+  r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'});
+  assert.equal(r.ran(), true);
+  assert.deepEqual(r.docker.calls(), []);
+  assert.doesNotMatch(r.log(), /swept|sweep the project's Docker daemon/);
+});
+
+test('a daemon sweep that fails before the session starts no session, mints no token and is not counted', t => {
+  const r = ticketSetup(t);
+  r.docker.refuse(r.dockerHost);
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker info failed: Cannot connect to the Docker daemon at unix:\/\/.*\. Is the docker daemon running\?\n/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
+  assert.deepEqual(r.tokenCalls(), []);
+});
+
+test('a daemon sweep that fails after the session is logged and the run still finishes', t => {
+  const r = ticketSetup(t);
+  const during = join(r.root, 'during.sh');  // the daemon goes down during the session
+  writeFileSync(during, `#!/bin/sh\nprintf '%s' '${r.dockerHost}' > "$PROBE/docker/refuse"\n`, {mode: 0o755});
+  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
+  r.tick({DURING_SESSION: during});
+  assert.equal(r.ran(), true);
+  const log = r.log();
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: docker info failed: Cannot connect to the Docker daemon/);
+  assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
+  assert.equal(existsSync(r.worktree), false, "the run's clone is still removed");
+});
+
 test('a project file whose docker is not true or false stops the tick', t => {
   const r = ticketSetup(t, [issue(7)], {project: project({docker: 'yes'})});
   assert.throws(() => r.tick(), error => error.status === 2
@@ -1263,7 +1388,6 @@ test('a run left behind, by a run without progress or a killed tick, is removed 
   r.gh.json('issues.json', [recentUpkeep, closed(7)]);
   r.tick();
   assert.ok(r.docker.calls().some(call => call.startsWith(`${db}|compose --file `) && call.endsWith(' down --volumes --remove-orphans')));
-  assert.match(r.log(), new RegExp(`tore down ${r.worktree}:  Container ${db}-db-1  Removed\n`));
   assert.match(r.log(), new RegExp(`removed run directory ${r.worktree} \\(issue #7 is closed\\)\n`));
   assert.equal(existsSync(r.worktree), false);
 });
@@ -1328,13 +1452,16 @@ test('on a machine whose machine file names no rootless daemon the database swee
   assert.deepEqual(r.docker.calls(), []);
 });
 
-test('with Docker unavailable the database sweep is skipped with one log line and the tick carries on', t => {
+test('with Docker unavailable the database sweep is skipped with one log line, and the daemon sweep starts no session', t => {
   const r = ticketSetup(t);
   r.docker.unavailable();
-  r.tick();
+  assert.throws(() => r.tick(), error => error.status === 1);
   const log = r.log();
   assert.equal(log.match(/database sweep skipped: docker is unavailable/g).length, 1);
-  assert.equal(r.ran(), true);
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker info failed: Cannot connect to the Docker daemon/);
+  assert.equal(r.ran(), false);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
+  assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);
 });
 
 test('--prune-dry-run prints what the sweep would remove, changes nothing and runs nothing', t => {
