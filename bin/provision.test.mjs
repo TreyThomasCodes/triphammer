@@ -62,11 +62,11 @@ test('on a fresh machine it installs everything but a project, and a second run 
   for (const kind of ['uid', 'gid']) {
     assert.equal(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), 'triphammer-docker:100000:65536\n', kind);
   }
-  // Its socket's directory: the daemon's user's, mode 700, which the service user may only search; the unit gives the
-  // service user the socket itself.
+  // Its socket's directory: the daemon's user's, mode 700, which the service user may only search (the group bits are
+  // the ACL's mask, --x); the unit gives the service user the socket itself.
   const socketDir = join(m.sys, 'var/lib/triphammer-docker');
   const socket = join(socketDir, 'docker.sock');
-  assert.equal(statSync(socketDir).mode & 0o777, 0o700);
+  assert.equal(statSync(socketDir).mode & 0o777, 0o710);
   assert.ok(m.calls().some(call => call.join(' ') === `chown -- triphammer-docker: ${socketDir}`), 'the socket directory is not the daemon user\'s');
   assert.deepEqual(acls, {[socketDir]: ['user:triphammer:--x']});
   const unit = readFileSync(join(dockerHome, '.config/systemd/user/docker.service'), 'utf8');
@@ -154,6 +154,25 @@ test('on a fresh machine it installs everything but a project, and a second run 
   const third = m.provision(...at(m, tri));
   assert.equal(third.status, 0, third.output);
   assert.equal(readFileSync(command, 'utf8'), readFileSync(join(here, 'triphammer'), 'utf8'));
+});
+
+test('a rerun keeps the service user\'s search on the socket\'s directory in effect, and gives it back once a chmod masks it', t => {
+  const m = machine(t, {'example/triphammer': triphammerFiles});
+  const socketDir = join(m.sys, 'var/lib/triphammer-docker');
+  // The service user's entry as getfacl writes it with each entry's effective rights, which the ACL's mask limits.
+  const entry = () => run('getfacl', ['-cp', '--', socketDir], {env: m.env}).split('\n').find(line => line.startsWith('user:triphammer:'));
+  for (const name of ['first', 'second']) {
+    const result = m.provision(...at(m, tri));
+    assert.equal(result.status, 0, result.output);
+    assert.equal(entry(), 'user:triphammer:--x', `after the ${name} run`);
+  }
+
+  chmodSync(socketDir, 0o700);
+  assert.equal(entry(), 'user:triphammer:--x\t#effective:---');
+  const repair = m.provision(...at(m, tri));
+  assert.equal(repair.status, 0, repair.output);
+  assert.equal(entry(), 'user:triphammer:--x');
+  assert.equal(statSync(socketDir).mode & 0o777, 0o710);
 });
 
 test('a private repository: the first run creates the App\'s directory and stops at the clone, and once the owner places the App\'s files the next run clones with its token', t => {

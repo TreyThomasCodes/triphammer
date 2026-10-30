@@ -241,7 +241,9 @@ for kind in uid gid; do
     usermod "--add-sub${kind}s" "$start-$((start + 65535))" "$docker_user" || fail "usermod could not add $docker_user's sub${kind}s"
 done
 
-if [ ! -d "$docker_dir" ] || [ -L "$docker_dir" ] || [ "$(stat -c '%u %a' -- "$docker_dir")" != "$(id -u "$docker_user" 2>/dev/null) 700" ]; then
+# Its group bits are the ACL's mask, --x once the grant below is in, so a mode of 700 or 710 is as asked.
+if [ ! -d "$docker_dir" ] || [ -L "$docker_dir" ] \
+  || [[ "$(stat -c '%u %a' -- "$docker_dir")" != "$(id -u "$docker_user" 2>/dev/null) 7"[01]0 ]]; then
   change "create $docker_dir, mode 700, for $docker_user's socket" \
     sh -c 'mkdir -p -- "$1" && chmod 700 -- "$1" && chown -- "$2:" "$1"' sh "$docker_dir" "$docker_user" \
     || fail "could not create $docker_dir"

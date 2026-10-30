@@ -240,12 +240,14 @@ as_docker() {
   local user="$docker_user" home="$docker_home"
   "$@"
 }
-# acl <path> <entry...>: adds each ACL entry (in getfacl's form, such as user:<name>:r-x) that <path> lacks.
+# acl <path> <entry...>: adds each ACL entry (in getfacl's form, such as user:<name>:r-x) that <path> lacks or whose
+# rights the mask cuts (a chmod sets the mask), which getfacl marks with #effective after the entry; setfacl -m
+# recalculates the mask.
 acl() {
   local path="$1" entry missing=()
   shift
   for entry; do
-    getfacl -cpE -- "$path" 2>/dev/null | grep -qxF -- "$entry" || missing+=("$entry")
+    getfacl -cp -- "$path" 2>/dev/null | grep -qxF -- "$entry" || missing+=("$entry")
   done
   [ ${#missing[@]} -eq 0 ] && return 0
   local IFS=,

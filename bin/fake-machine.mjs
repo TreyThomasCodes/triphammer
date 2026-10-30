@@ -11,8 +11,11 @@
 //   <name>:<first>:<count> to <sys>/etc/subuid or subgid, getent passwd <name> and id -u [<name>] / id -nG <name> report
 //   them (id -u alone is root's 0; a user's uid is its `uid`, by default the caller's own, so the files the tests write
 //   are the user's);
-// - setfacl -m <entry>[,<entry>...] [--] <path> adds the entries (as getfacl writes them) to `acls[path]`, and
-//   getfacl ... <path> prints them, one per line;
+// - setfacl -m <entry>[,<entry>...] [--] <path> adds the entries (as getfacl writes them) to `acls[path]` and, as
+//   setfacl recalculates the mask, sets the file's group bits, which are the mask on a file with named entries, to
+//   them joined with each named entry's rights (so the real chmod lowers the mask, as it does); getfacl ... <path>
+//   prints the entries, one per line, a named one whose rights the mask cuts followed, unless -E is given, by
+//   `\t#effective:<rights>`;
 // - loginctl enable-linger <name> and loginctl show-user <name> --property=Linger --value;
 // - systemctl --machine=<name>@ --user link <path> links the unit into the user's ~/.config/systemd/user, enable
 //   [--now] <unit...> adds the units to `enabled`, is-enabled [--quiet] [--] <unit> succeeds for one in it, and any
@@ -27,7 +30,7 @@
 //   `git`;
 // - chown only records.
 import {spawnSync} from 'node:child_process';
-import {appendFileSync, copyFileSync, mkdirSync, readFileSync, symlinkSync, writeFileSync} from 'node:fs';
+import {appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join} from 'node:path';
 
 const [dir, ...args] = process.argv.slice(2);
@@ -43,6 +46,11 @@ const done = (stdout = '', exit = 0, stderr = '') => {
   process.exit(exit);
 };
 const option = name => args[args.indexOf(name) + 1];
+// An ACL entry's rights as bits, those bits as getfacl writes them, and whether the entry is a named user's or group's
+// entry of the access ACL, the kind the mask limits.
+const rights = entry => [...entry.split(':').at(-1)].reduce((bits, char, i) => bits | (char === '-' ? 0 : 4 >> i), 0);
+const text = bits => ['r', 'w', 'x'].map((char, i) => bits & (4 >> i) ? char : '-').join('');
+const named = entry => /^(user|group):[^:]+:/.test(entry);
 
 switch (command) {
   case 'apt-get': {
@@ -84,11 +92,20 @@ switch (command) {
   case 'setfacl': {
     const entries = state.acls[args.at(-1)] ??= [];
     entries.push(...option('-m').split(',').filter(entry => !entries.includes(entry)));
+    const mode = statSync(args.at(-1)).mode & 0o777;
+    const mask = entries.filter(named).reduce((bits, entry) => bits | rights(entry), (mode >> 3) & 7);
+    chmodSync(args.at(-1), (mode & 0o707) | (mask << 3));
     save();
     done();
   }
-  case 'getfacl':
-    done((state.acls[args.at(-1)] ?? []).map(entry => `${entry}\n`).join(''));
+  case 'getfacl': {
+    const mask = existsSync(args.at(-1)) ? (statSync(args.at(-1)).mode >> 3) & 7 : 7;
+    const effectiveShown = !args.some(arg => /^-[a-zA-Z]*E/.test(arg));
+    done((state.acls[args.at(-1)] ?? []).map(entry => {
+      const effective = rights(entry) & mask;
+      return named(entry) && effectiveShown && effective !== rights(entry) ? `${entry}\t#effective:${text(effective)}\n` : `${entry}\n`;
+    }).join(''));
+  }
   case 'getent': {
     const user = state.users[args[1]];
     done(user ? `${args[1]}:x:1001:1001::${user.home}:/bin/bash\n` : '', user ? 0 : 2);
