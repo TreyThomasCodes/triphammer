@@ -446,8 +446,7 @@ def literal_path(word, cwd):
 
 
 class Findings:
-    def __init__(self, cwd):
-        self.cwd = cwd
+    def __init__(self):
         self.writes = []  # (absolute path, whether every file under it, whether it removes the name, an edit)
         self.units = []  # systemctl --user invocations that change Triphammer's units, as their text
         self.kills = []  # (pkill or pgrep, pattern)
@@ -805,7 +804,7 @@ def listed(items, limit=3, separator="; "):
 
 def decide(cmd, cwd):
     cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
-    findings = Findings(cwd)
+    findings = Findings()
     walk(cmd, cwd, findings)
     persistence = findings.units + persistence_changes(findings.writes)
     if persistence:
