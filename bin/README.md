@@ -231,8 +231,9 @@ so it cannot hold the others back. `ticket-runner --plan` reads none of this and
 Each project that declares `"docker": true` has a rootless Docker daemon of its own (On a machine of its own, The
 rootless Docker daemon), so no session of one project reaches another's containers, images, volumes, networks or build
 cache; the sessions of one project share its daemon, one at a time, and the runner sweeps it clean right before each
-session starts and right after it ends, so no session finds what an earlier one left there (Run clones and databases
-nothing uses). Each tick's database sweep prunes the Compose projects its
+session starts and right after it ends, so no session finds the containers, images, volumes, networks, build cache,
+plugins or swarm an earlier one left there (Run clones and databases nothing uses); what an earlier one wrote to the
+daemon user's home stays (The write limit, Not covered). Each tick's database sweep prunes the Compose projects its
 `composeProjectPattern` matches whose run directory is gone, and asks only the project's own daemon, so it never
 prunes another project's containers; `triphammer doctor` still reports two projects whose patterns can match the same
 Compose project name (Doctor, Compose names).
@@ -416,7 +417,9 @@ tool (Edit and Write go through permission rules alone), and the model can ask t
 covered: for a project that declares `"docker": true`, what its rootless daemon's user can do, as a container a
 session starts through it, privileged or mounting `/` or not, acts as that user on the machine: it reads what is
 world-readable there and the project's run clones in `<checkout>/.worktrees`, which the session can read already, and
-writes what that user may (its own home, and whatever on the machine is world-writable), while the session runs; what
+writes what that user may (its own home, its daemon's unit `~/.config/systemd/user/docker.service` and config
+`~/.config/docker/daemon.json` among it, and whatever on the machine is world-writable), which outlives the session,
+as the runner's daemon sweep (Run clones and databases nothing uses) resets none of it; what
 a session leaves on the daemon (a container run detached or with a restart policy, an image, such as one re-tagged
 under a name a later session runs or builds from, a volume, a network, the build cache) when the runner is stopped
 during the session or its sweep after the session fails (Run clones and databases nothing uses), which lasts, a
@@ -568,7 +571,9 @@ tick or a killed gate run never stops them. So:
   skipped: the machine file names no rootless Docker daemon of this project (run sudo triphammer update)`.
 - A failed removal is logged (`could not remove run directory ...`, `could not prune database ...`) and the tick carries on.
 - Right before a session starts and right after it ends, when the machine file names a rootless Docker daemon of the
-  project, the runner sweeps that daemon clean, with `DOCKER_HOST` naming its socket: `docker rm -f --volumes` on
+  project, the runner sweeps that daemon clean, with `DOCKER_HOST` naming its socket: `docker swarm leave --force`
+  when `docker info` says the daemon is in a swarm (whose orchestrator would start a removed service's tasks again),
+  `docker plugin rm -f` on every plugin `docker plugin ls -q` lists, `docker rm -f --volumes` on
   every container `docker ps -aq` lists, running or stopped, then `docker volume prune -af` (named volumes too),
   `docker network prune -f`, `docker image prune -af` and `docker builder prune -af` (the build cache). A session's
   containers are children of the daemon, not of the session, so ending the session stops none of them. Only the

@@ -28,9 +28,11 @@ What must hold even then. A way around one of these is a finding:
 
 1. Code outside the session: nothing a session writes runs outside its write limit, or in a later session, unless it
    goes through a merged commit. This covers the runner, the units, `update-checkout`, `land-pr`, `merge-when-ready`,
-   the teardown, git's configs and hooks, the guard hooks, and the caches and state that later sessions read. What a
-   session leaves on its project's rootless Docker daemon is swept before and after each session (`sweep_daemon` in
-   `bin/ticket-runner`; `bin/README.md`, Run clones and databases nothing uses).
+   the teardown, git's configs and hooks, the guard hooks, and the caches and state that later sessions read. Before and
+   after each session the runner removes the swarm membership, plugins, containers, volumes, networks, images and
+   build cache of its project's rootless Docker daemon (`sweep_daemon` in `bin/ticket-runner`; `bin/README.md`, Run
+   clones and databases nothing uses). It does not reset the daemon user's home or the daemon's config and unit there,
+   which a session's container can write (`bin/README.md`, Not covered).
 2. Merges: a pull request merges only at the tier that the base branch's classifier and rules give it, and an
    escalated one only with the owner's approval of its current head.
 3. Brakes: a brake set by anyone other than the App stops the runner and `merge-when-ready` until someone other than

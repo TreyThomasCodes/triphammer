@@ -297,6 +297,21 @@ sweep_daemon() {
   [ -n "$docker_host" ] || return 0
   local -x DOCKER_HOST="$docker_host"
   if ! command -v docker >/dev/null 2>&1; then echo "docker is not installed"; return 1; fi
+  # A swarm's orchestrator would start a removed service's tasks again, and plugins are not containers.
+  if ! out="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>&1)"; then
+    echo "docker info failed: $(tail -n 1 <<< "$out")"
+    return 1
+  fi
+  if [ "$out" != inactive ] && ! out="$(docker swarm leave --force 2>&1)"; then
+    echo "docker swarm leave --force failed: $(tail -n 1 <<< "$out")"
+    return 1
+  fi
+  if ! ids="$(docker plugin ls -q 2>&1)"; then echo "docker plugin ls -q failed: $(tail -n 1 <<< "$ids")"; return 1; fi
+  # shellcheck disable=SC2086  # one plugin id per word
+  if [ -n "$ids" ] && ! out="$(docker plugin rm -f $ids 2>&1)"; then
+    echo "docker plugin rm -f failed: $(tail -n 1 <<< "$out")"
+    return 1
+  fi
   if ! ids="$(docker ps -aq 2>&1)"; then echo "docker ps -aq failed: $(tail -n 1 <<< "$ids")"; return 1; fi
   # shellcheck disable=SC2086  # one container id per word
   if [ -n "$ids" ] && ! out="$(docker rm -f --volumes $ids 2>&1)"; then

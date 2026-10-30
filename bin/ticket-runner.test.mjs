@@ -723,7 +723,8 @@ test('a project that declares Docker starts no session on a machine whose machin
 
 // The calls of the daemon sweep (sweep_daemon) on the project's daemon, and the session's `docker info` that marks where
 // the session ran.
-const daemonSweep = r => r.docker.hosts().filter(call => /\|(ps -aq|rm |volume prune|network prune|image prune|builder prune|info)/.test(call));
+const daemonSweep = r => r.docker.hosts().filter(call => /\|(info|swarm |plugin |ps -aq|rm |volume prune|network prune|image prune|builder prune)/.test(call));
+const swarmState = host => `${host}|info --format {{.Swarm.LocalNodeState}}`;
 const prunes = host => [`${host}|volume prune -af`, `${host}|network prune -f`, `${host}|image prune -af`, `${host}|builder prune -af`];
 
 test("the project's own Docker daemon is swept clean right before the session and again right after it", t => {
@@ -737,14 +738,39 @@ test("the project's own Docker daemon is swept clean right before the session an
   assert.equal(r.ran(), true);
   const h = r.dockerHost;
   assert.deepEqual(daemonSweep(r), [
-    `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`, ...prunes(h),
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`, ...prunes(h),
     `${h}|info`,
-    `${h}|ps -aq`, `${h}|rm -f --volumes ${db}-db-1`, ...prunes(h),
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes ${db}-db-1`, ...prunes(h),
   ]);
   assert.equal(readFileSync(join(r.root, 'docker/ps.json'), 'utf8'), '[]', 'no container is left');
   const log = r.log();
   assert.match(log, /ticket #7: swept the project's Docker daemon before the session: removed 1 container and pruned the volumes, networks, images and build cache\n.*ticket #7: run 1 of 3 starting/);
   assert.match(log, /ticket #7: swept the project's Docker daemon after the session: removed 1 container and pruned/);
+});
+
+test('the daemon sweep leaves a swarm and removes every plugin before it removes the containers', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['service-task', '']]);  // a task of a service a session started
+  writeFileSync(join(r.root, 'docker/swarm'), 'active');
+  writeFileSync(join(r.root, 'docker/plugins'), 'plugin-a\nplugin-b\n');
+  r.tick();
+  assert.equal(r.ran(), true);
+  const h = r.dockerHost;
+  assert.deepEqual(daemonSweep(r), [
+    swarmState(h), `${h}|swarm leave --force`, `${h}|plugin ls -q`, `${h}|plugin rm -f plugin-a plugin-b`,
+    `${h}|ps -aq`, `${h}|rm -f --volumes service-task-db-1`, ...prunes(h),
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, ...prunes(h),
+  ]);
+  assert.equal(readFileSync(join(r.root, 'docker/plugins'), 'utf8'), '', 'no plugin is left');
+});
+
+test('a daemon sweep whose swarm leave fails starts no session', t => {
+  const r = ticketSetup(t);
+  writeFileSync(join(r.root, 'docker/swarm'), 'error');
+  writeFileSync(join(r.root, 'docker/fail-swarm-leave'), '');
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker swarm leave --force failed: Error response from daemon: context deadline exceeded\n/);
 });
 
 test('a project whose machine file names no rootless daemon of its own gets no daemon sweep and no docker call', t => {
@@ -761,7 +787,7 @@ test('a daemon sweep that fails before the session starts no session, mints no t
   r.docker.refuse(r.dockerHost);
   assert.throws(() => r.tick(), error => error.status === 1);
   assert.equal(r.ran(), false);
-  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker ps -aq failed: Cannot connect to the Docker daemon at unix:\/\/.*\. Is the docker daemon running\?\n/);
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker info failed: Cannot connect to the Docker daemon at unix:\/\/.*\. Is the docker daemon running\?\n/);
   assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
   assert.deepEqual(r.tokenCalls(), []);
 });
@@ -774,7 +800,7 @@ test('a daemon sweep that fails after the session is logged and the run still fi
   r.tick({DURING_SESSION: during});
   assert.equal(r.ran(), true);
   const log = r.log();
-  assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: docker ps -aq failed: Cannot connect to the Docker daemon/);
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: docker info failed: Cannot connect to the Docker daemon/);
   assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
   assert.equal(existsSync(r.worktree), false, "the run's clone is still removed");
 });
@@ -1393,7 +1419,7 @@ test('with Docker unavailable the database sweep is skipped with one log line, a
   assert.throws(() => r.tick(), error => error.status === 1);
   const log = r.log();
   assert.equal(log.match(/database sweep skipped: docker is unavailable/g).length, 1);
-  assert.match(log, /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker ps -aq failed: Cannot connect to the Docker daemon/);
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: docker info failed: Cannot connect to the Docker daemon/);
   assert.equal(r.ran(), false);
   assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
   assert.deepEqual(labelCalls(r.ghCalls()).slice(-1), [`issue edit 7 -R ${repo} --remove-label agent-working`]);

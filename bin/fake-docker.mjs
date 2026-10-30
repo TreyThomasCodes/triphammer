@@ -4,7 +4,9 @@
 // [project, working_dir]) as tab-separated lines, whatever the --format asks, but `ps -aq` prints each container's id,
 // <project>-db-1; `rm` drops the containers whose ids it names from ps.json. `compose ... down` for the project
 // named by -p or COMPOSE_PROJECT_NAME fails when <dir>/fail-down lists it; otherwise it prints compose's `Removed`
-// line for each of the project's containers and drops them from ps.json. `info` prints an engine version. `compose
+// line for each of the project's containers and drops them from ps.json. `info` prints an engine version, but `info
+// --format {{.Swarm.LocalNodeState}}` prints the swarm state in <dir>/swarm (default inactive); `swarm leave` makes it
+// inactive, or fails while <dir>/fail-swarm-leave exists. `plugin ls -q` prints the plugin ids in <dir>/plugins, one per line, and `plugin rm` drops those it names. `compose
 // version` prints the Compose version in <dir>/compose-version (default 2.32.4), or fails as docker does without the
 // Compose plugin when that file is empty. The daemon a call reaches is the -H (--host) it gives, else $DOCKER_HOST, else
 // unix:///var/run/docker.sock: it appends `<daemon>|<arguments>` to <dir>/hosts, and fails the call as docker does
@@ -29,7 +31,22 @@ if (existsSync(join(dir, 'unavailable')) || refused) {
 const psFile = join(dir, 'ps.json');
 const containers = existsSync(psFile) ? JSON.parse(readFileSync(psFile, 'utf8')) : [];
 const composeFile = join(dir, 'compose-version');
-if (args[0] === 'info') {
+const swarmFile = join(dir, 'swarm');
+const pluginsFile = join(dir, 'plugins');
+const plugins = existsSync(pluginsFile) ? readFileSync(pluginsFile, 'utf8').split('\n').filter(Boolean) : [];
+if (args[0] === 'info' && args.includes('{{.Swarm.LocalNodeState}}')) {
+  console.log(existsSync(swarmFile) ? readFileSync(swarmFile, 'utf8').trim() : 'inactive');
+} else if (args[0] === 'swarm' && args[1] === 'leave') {
+  if (existsSync(join(dir, 'fail-swarm-leave'))) {
+    console.error('Error response from daemon: context deadline exceeded');
+    process.exit(1);
+  }
+  writeFileSync(swarmFile, 'inactive');
+} else if (args[0] === 'plugin' && args[1] === 'ls') {
+  for (const plugin of plugins) console.log(plugin);
+} else if (args[0] === 'plugin' && args[1] === 'rm') {
+  writeFileSync(pluginsFile, plugins.filter(plugin => !args.includes(plugin)).join('\n'));
+} else if (args[0] === 'info') {
   console.log('28.0.1');
 } else if (args[0] === 'compose' && args[1] === 'version') {
   const version = existsSync(composeFile) ? readFileSync(composeFile, 'utf8') : '2.32.4';
