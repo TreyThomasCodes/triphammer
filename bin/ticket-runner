@@ -92,10 +92,11 @@ source "$bin/labels.sh"
 load_config ticket-runner "$bin/.."
 repo="$cfg_repo" checkout="$cfg_checkout" app_author="$cfg_app_author" state="$cfg_state_dir"
 project="$cfg_project" shared="$cfg_shared_dir"
-# The rootless Docker daemon's socket the machine file names (rootless_docker_host in config.sh), as DOCKER_HOST, or
-# nothing. Every session's write limit and teardown gets it: a project that declares Docker reaches that daemon and no
-# other, and the limit hides it from any other project. The database sweep talks to it too.
-docker_host="$(rootless_docker_host)"
+# The socket of this project's own rootless Docker daemon, which the machine file names (rootless_docker_host in
+# config.sh), as DOCKER_HOST, or nothing. Every session's write limit and teardown gets it: a project that declares
+# Docker reaches that daemon and no other, and the limit hides every other project's daemon (bin/session-sandbox). The
+# database sweep talks to it too.
+docker_host="$(rootless_docker_host "$project")"
 # The App's login in the issue events API, which the owner's brakes read (owner_brake in bin/labels.sh).
 app_login="$(event_login "$app_author")"
 # The project's cache directory (bin/README.md, The write limit): one per project in the shared directory's caches,
@@ -250,14 +251,14 @@ prune_runs() {
 
 # Removes every compose project whose name matches the project's composeProjectPattern and whose working directory,
 # <run directory>/database, and that directory are gone. A project any of whose containers names a directory that exists, or
-# names none, is never touched. Without a pattern it does nothing, not even ask Docker. It asks the rootless daemon,
-# the one sessions reach, and skips when the machine file names none.
+# names none, is never touched. Without a pattern it does nothing, not even ask Docker. It asks the project's own
+# rootless daemon, the one its sessions reach, and skips when the machine file names none.
 prune_databases() {
   local rows project dir out why
   local -A keep=() gone=()
   [ -n "$compose_pattern" ] || return 0
   if [ -z "$docker_host" ]; then
-    say "database sweep skipped: the machine file names no rootless Docker daemon (run bin/provision)"
+    say "database sweep skipped: the machine file names no rootless Docker daemon of this project (run sudo triphammer update)"
     return 0
   fi
   local -x DOCKER_HOST="$docker_host"
@@ -451,7 +452,7 @@ fi
 # A project that declares Docker reaches only the rootless daemon, so on a machine whose machine file names none, as
 # before bin/provision set one up, none of its sessions starts.
 if [ -n "$docker" ] && [ -z "$docker_host" ]; then
-  log "$kind${number:+ #$number}: this project declares \"docker\": true, but the machine file names no rootless Docker daemon, so no session starts (run bin/provision; ticket-runner --doctor names the fix)"
+  log "$kind${number:+ #$number}: this project declares \"docker\": true, but the machine file names no rootless Docker daemon of this project, so no session starts (run sudo triphammer update, whose provision-project sets it up; ticket-runner --doctor names the fix)"
   exit 1
 fi
 # Every session runs under the write limit (bin/session-sandbox; bin/README.md, The write limit). A machine where it
@@ -935,8 +936,8 @@ rm -f "$brake_file"
 # file, which its gh and git read through github-app-token. The session and everything it starts run under the write
 # limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories, the project's cache
 # directory (TRIPHAMMER_CACHE_DIR, which the dry run above created) and little else, and read no token but that file;
-# a project that declares Docker reaches the rootless daemon DOCKER_HOST names and no other, and any other project no
-# Docker socket at all (TRIPHAMMER_DOCKER, load_project; docker_host).
+# a project that declares Docker reaches its own rootless daemon, which DOCKER_HOST names, and no other, and any other
+# project no Docker socket at all (TRIPHAMMER_DOCKER, load_project; docker_host).
 (cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" DOCKER_HOST="$docker_host" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!

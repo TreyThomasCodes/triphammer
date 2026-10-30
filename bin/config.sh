@@ -34,7 +34,7 @@
 # other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
 #
 # machine_get <KEY>: prints the value of the machine file ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf gives KEY
-# (bin/provision writes it, one KEY=VALUE per line; bin/provision-lib.sh), as it stands after the `=`, from the last
+# (bin/provision and bin/provision-project write it, one KEY=VALUE per line; bin/provision-lib.sh), as it stands after the `=`, from the last
 # line that gives it, or nothing when the file is missing or unreadable or gives no KEY. It checks no value: each
 # caller checks its own. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
 machine_get() {
@@ -46,14 +46,47 @@ machine_get() {
   printf '%s' "$value"
 }
 
-# rootless_docker_host: prints unix://<path> for the rootless Docker daemon's socket that the machine file names
-# (machine_get TRIPHAMMER_DOCKER_SOCKET, which bin/provision writes), or nothing when the file is missing or names no
-# absolute path of the plain characters provision writes.
+# Each project that declares "docker": true has a rootless Docker daemon of its own, which bin/provision-project sets
+# up and names in the machine file under two keys that end in the project's docker_key: TRIPHAMMER_DOCKER_USER_<key>,
+# its user, and TRIPHAMMER_DOCKER_SOCKET_<key>, the absolute path of its socket.
+#
+# docker_key <project>: prints the project's name in capitals with each - made _ (example-project gives
+# EXAMPLE_PROJECT), or fails for a name of anything but lower-case letters, digits and dashes, starting with a letter
+# or a digit: those are the names no other name maps onto.
+docker_key() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+  local key="${1^^}"
+  printf '%s\n' "${key//-/_}"
+}
+# plain_socket <path>: succeeds for an absolute path of the plain characters provision-project writes.
+plain_socket() {
+  [[ "$1" =~ ^(/[A-Za-z0-9._-]+)+$ && "$1/" != */./* && "$1/" != */../* ]]
+}
+# rootless_docker_host <project>: prints unix://<path> for the socket of the project's own rootless Docker daemon
+# (machine_get TRIPHAMMER_DOCKER_SOCKET_<key>), or nothing when the project's name has no key or the machine file is
+# missing or names no plain absolute path (plain_socket) for it.
 rootless_docker_host() {
-  local socket
-  socket="$(machine_get TRIPHAMMER_DOCKER_SOCKET)"
-  [[ "$socket" =~ ^(/[A-Za-z0-9._-]+)+$ && "$socket/" != */./* && "$socket/" != */../* ]] || return 0
+  local key socket
+  key="$(docker_key "$1")" || return 0
+  socket="$(machine_get "TRIPHAMMER_DOCKER_SOCKET_$key")"
+  plain_socket "$socket" || return 0
   printf 'unix://%s\n' "$socket"
+}
+# rootless_docker_sockets: prints, one per line, the socket of every rootless Docker daemon the machine file names
+# (machine_get TRIPHAMMER_DOCKER_SOCKET_<key> for each key it gives), and the one TRIPHAMMER_DOCKER_SOCKET names, the
+# daemon every Docker project shared before each had its own, each only when it is a plain absolute path.
+rootless_docker_sockets() {
+  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line key socket
+  local -A seen=()
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^(TRIPHAMMER_DOCKER_SOCKET(_[A-Z0-9_]+)?)= ]] || continue
+    key="${BASH_REMATCH[1]}"
+    [ -z "${seen[$key]:-}" ] || continue
+    seen[$key]=1
+    socket="$(machine_get "$key")"
+    ! plain_socket "$socket" || printf '%s\n' "$socket"
+  done < "$file"
 }
 
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which

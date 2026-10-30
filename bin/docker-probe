@@ -1,41 +1,46 @@
 #!/usr/bin/env bash
 # The owner's probe of what a Docker project's session can do through Docker (bin/README.md, The rootless Docker
-# daemon). Run it as the service user once bin/provision has set the rootless daemon up:
+# daemon). Run it as the service user, for a project that declares "docker": true, once bin/provision-project has set
+# that project's own rootless daemon up:
 #
-#   sudo -iu <service user> <Triphammer's checkout>/bin/docker-probe
+#   sudo -iu <service user> <Triphammer's checkout>/bin/docker-probe <project>
 #
-# Each check runs as a session's would, under the write limit (bin/session-sandbox) in a throwaway git repository in
-# a temporary directory, with TRIPHAMMER_DOCKER=1 and DOCKER_HOST naming the rootless daemon's socket that the machine
-# file names, as ticket-runner sets them for a project that declares "docker": true. First `docker run --rm busybox
-# true` must work, so a refusal below is the daemon's and not a missing image or daemon. Then a container that mounts
-# / (`docker run --rm -v /:/host busybox sh -c 'touch /host<home>/docker-probe-...'`), and the same one privileged,
-# must not create the file in the service user's home ($HOME), and `docker -H unix:///var/run/docker.sock info`, the
-# rootful daemon, must fail, both inside the limit and outside it. It prints PASS or FAIL for each, removes any file
-# a container created, and exits 0 when every check passes and 1 otherwise. It pulls busybox into the rootless
-# daemon's images when it lacks it.
+# Each check runs as a session of the project would, under the write limit (bin/session-sandbox) in a throwaway git
+# repository in a temporary directory, with TRIPHAMMER_DOCKER=1 and DOCKER_HOST naming the socket of the project's
+# rootless daemon that the machine file names (rootless_docker_host in config.sh), as ticket-runner sets them. First
+# `docker run --rm busybox true` must work, so a refusal below is the daemon's and not a missing image or daemon. Then
+# a container that mounts / (`docker run --rm -v /:/host busybox sh -c 'touch /host<home>/docker-probe-...'`), and the
+# same one privileged, must not create the file in the service user's home ($HOME); `docker -H <socket> info` must
+# fail under the write limit for each other rootless daemon's socket the machine file names (rootless_docker_sockets:
+# the other Docker projects', and the one they all shared before each had its own); and `docker -H
+# unix:///var/run/docker.sock info`, the rootful daemon, must fail, both inside the limit and outside it. It prints
+# PASS or FAIL for each, removes any file a container created, and exits 0 when every check passes, 1 otherwise and 2
+# without a project. It pulls busybox into the project's daemon's images when they lack it.
 set -euo pipefail
 
 bin="$(dirname "$(readlink -f "$0")")"
 # shellcheck source=bin/config.sh
 source "$bin/config.sh"
+[ $# -eq 1 ] || { echo "usage: docker-probe <project>" >&2; exit 2; }
+project="$1"
 image=busybox
 rootful=unix:///var/run/docker.sock
-docker_host="$(rootless_docker_host)"
+docker_host="$(rootless_docker_host "$project")"
 if [ -z "$docker_host" ]; then
-  echo "FAIL: the machine file names no rootless Docker daemon; run sudo bin/provision first"
+  echo "FAIL: the machine file names no rootless Docker daemon of $project; run sudo triphammer update, whose bin/provision-project sets it up"
   exit 1
 fi
 tmp="$(mktemp -d)"
 made=()
 trap 'rm -rf -- "$tmp" "${made[@]}"' EXIT
 git init -q -- "$tmp/run"
-# inside <command...>: runs the command under the write limit as a Docker project's session.
+# inside <command...>: runs the command under the write limit as a session of the project.
 inside() { TRIPHAMMER_DOCKER=1 DOCKER_HOST="$docker_host" "$bin/session-sandbox" "$tmp/run" "$@"; }
 failed=0
 check() { if [ "$1" = pass ]; then echo "PASS: $2"; else echo "FAIL: $2"; failed=1; fi; }
 
 if ! out="$(inside docker run --rm "$image" true 2>&1)"; then
-  echo "FAIL: the rootless daemon at ${docker_host#unix://} could not run $image under the write limit: $(tail -n 1 <<< "$out")"
+  echo "FAIL: the rootless daemon of $project at ${docker_host#unix://} could not run $image under the write limit: $(tail -n 1 <<< "$out")"
   exit 1
 fi
 for kind in mount privileged; do
@@ -50,6 +55,14 @@ for kind in mount privileged; do
     check pass "a ${extra[*]:+privileged }container that mounts / cannot write in $HOME"
   fi
 done
+while IFS= read -r socket; do
+  [ "unix://$socket" != "$docker_host" ] || continue
+  if inside docker -H "unix://$socket" info >/dev/null 2>&1; then
+    check fail "another rootless daemon at $socket answers under the write limit"
+  else
+    check pass "another rootless daemon at $socket does not answer under the write limit"
+  fi
+done < <(rootless_docker_sockets)
 if inside docker -H "$rootful" info >/dev/null 2>&1; then
   check fail "the rootful daemon at ${rootful#unix://} answers under the write limit"
 else

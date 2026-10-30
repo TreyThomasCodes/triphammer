@@ -18,10 +18,9 @@
 # It installs, each only when it is not there already: git, jq, Python 3, curl, bubblewrap and the like from Ubuntu's
 # archive;
 # Docker Engine with Compose v2 and the GitHub CLI from their vendors' apt repositories, or Ubuntu's own packages when
-# a vendor's repository does not serve this release (it says which); the service user (default `triphammer`) with
-# lingering on, out of the docker group; a rootless Docker daemon under a user of its own, `<user>-docker`, with its
-# packages, subordinate ids, lingering and user unit, and its socket where the service user alone can connect; the
-# AppArmor profile /etc/apparmor.d/bwrap that lets bwrap, the sessions' write
+# a vendor's repository does not serve this release (it says which); the packages a rootless Docker daemon needs, which
+# provision-project sets up for each project that declares "docker": true; the service user (default `triphammer`) with
+# lingering on, out of the docker group; the AppArmor profile /etc/apparmor.d/bwrap that lets bwrap, the sessions' write
 # limit, create user namespaces; Triphammer's checkout, cloned as that user; Node from nodejs.org at the version the
 # checkout's .node-version pins; Claude Code through its installer. It links the units and scripts as the README's
 # Install section does, installs the Triphammer plugin and the humanizer plugin (from the blader/humanizer
@@ -37,7 +36,9 @@
 # that fails exits 1 naming it, and a later run carries on from there. --dry-run prints each change it would make
 # (`would: ...`) and makes none.
 #
-# It leaves the rootful Docker Engine installed and running; only root and the docker group reach its socket.
+# It leaves the rootful Docker Engine installed and running; only root and the docker group reach its socket. It leaves
+# alone the one rootless daemon, `<user>-docker`, that every Docker project shared before each had its own: its user,
+# unit and socket stay, and no project uses it (bin/README.md says how the owner removes it).
 #
 # Tests (provision.test.mjs) run it with fakes of the package and account tools first on PATH (bin/provision-lib.sh).
 # shellcheck disable=SC2016  # the sh -c and bash -c scripts expand their own arguments, not this shell's
@@ -90,9 +91,6 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$tri_repo" ] || usage_error "--triphammer is missing"
 [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || usage_error "--user must be a user name (lower-case letters, digits, _ and -), not $user"
-docker_user="$user-docker"
-[[ "$docker_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] \
-  || usage_error "--user $user is too long: the rootless Docker daemon's user, $docker_user, must be a user name too"
 [ -z "$home" ] || [[ "$home" == /* ]] || usage_error "--home must be an absolute path, not $home"
 check_place --triphammer "$tri_repo" "$tri_checkout"
 [ -n "$home" ] || home="/home/$user"
@@ -149,16 +147,15 @@ else
   apt_install docker.io docker-compose-v2
   engine=docker.io
 fi
-# What the rootless daemon below needs: its scripts and RootlessKit (docker-ce-rootless-extras with Docker's packages;
-# with Ubuntu's, docker.io ships the scripts under /usr/share/docker.io/contrib and RootlessKit is its own package),
-# newuidmap and newgidmap (uidmap), slirp4netns for its network, the user's D-Bus that the unit requires, and setfacl
-# (acl). Ubuntu's apparmor package holds the profile that lets /usr/bin/rootlesskit create user namespaces.
+# What the rootless daemon of each Docker project (docker_daemon in bin/provision-lib.sh, which provision-project
+# runs) needs: its scripts and RootlessKit (docker-ce-rootless-extras with Docker's packages; with Ubuntu's, docker.io
+# ships the scripts under /usr/share/docker.io/contrib and RootlessKit is its own package), newuidmap and newgidmap
+# (uidmap), slirp4netns for its network, the user's D-Bus that the unit requires, and setfacl (acl). Ubuntu's apparmor
+# package holds the profile that lets /usr/bin/rootlesskit create user namespaces.
 if [ "$engine" = docker-ce ]; then
   apt_install docker-ce-rootless-extras uidmap slirp4netns dbus-user-session acl
-  rootless_sh=/usr/bin/dockerd-rootless.sh
 else
   apt_install rootlesskit uidmap slirp4netns dbus-user-session acl
-  rootless_sh=/usr/share/docker.io/contrib/dockerd-rootless.sh
 fi
 
 if installed gh; then
@@ -178,24 +175,9 @@ else
   apt_install gh
 fi
 
-# in_group <user> <group>: succeeds when the user is a member of the group.
-in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qxF -- "$2"; }
-# linger <user>: lingering on for the user, so its user units run without a login.
-linger() {
-  if [ "$(loginctl show-user "$1" --property=Linger --value 2>/dev/null)" != yes ]; then
-    change "turn lingering on for $1, so its user units run without a login" loginctl enable-linger "$1" \
-      || fail "loginctl enable-linger failed"
-  fi
-}
-# leave_group <user> <group>: takes the user out of the group when it is in it.
-leave_group() {
-  in_group "$1" "$2" || return 0
-  change "remove $1 from the $2 group" gpasswd -d "$1" "$2" || fail "gpasswd could not remove $1 from $2"
-}
-
 # The service user: its own group, a login shell for the owner's sudo -iu, lingering on, and not in the docker group,
-# whose socket is the rootful daemon's and so root's; its sessions reach the rootless daemon below instead. The
-# processes it runs keep the group until its user manager restarts.
+# whose socket is the rootful daemon's and so root's; the sessions of a Docker project reach its own rootless daemon
+# instead (provision-project). The processes it runs keep the group until its user manager restarts.
 if ! user_exists; then
   change "create the user $user with the home $home" \
     useradd --create-home --home-dir "$home" --shell /bin/bash --user-group "$user" || fail "useradd failed"
@@ -205,93 +187,6 @@ if in_group "$user" docker; then
   note "Docker: $user's running processes keep the docker group until its user manager restarts (sudo systemctl restart user@$(id -u "$user").service, which stops its units) or the machine reboots"
 fi
 linger "$user"
-
-# The rootless Docker daemon, which the sessions of a project that declares "docker": true use, runs as a user of its
-# own, <user>-docker, in a user namespace on that user's subordinate ids, so a container that mounts / or runs
-# privileged acts as that user on the machine, and that user may read only the run clones of the Docker projects
-# (docker_reads in bin/provision-lib.sh, which provision-project runs). It is in neither the service user's group nor
-# the docker group. Its home holds the images and volumes (~/.local/share/docker).
-#
-# The socket: dockerd, started with --host, makes it at $docker_socket, in a directory of its own that the daemon's
-# user owns with mode 700, outside /run, which RootlessKit replaces in the daemon's mount namespace with a copy. The
-# directory's ACL lets the service user search it (--x) and nothing more, and the unit's ExecStartPost gives the
-# service user rw- on the socket once the daemon is ready, whatever mode and group dockerd gave it; connecting to a
-# socket takes write on it and search on its directory. No other user but root can reach it.
-docker_home="$(dirname "$home")/$docker_user"
-docker_dir="$root/var/lib/$docker_user"
-docker_socket="$docker_dir/docker.sock"
-if getent passwd "$docker_user" >/dev/null 2>&1; then
-  docker_home="$(getent passwd "$docker_user" | cut -d: -f6)"
-else
-  change "create the user $docker_user with the home $docker_home, for the rootless Docker daemon" \
-    useradd --create-home --home-dir "$docker_home" --shell /usr/sbin/nologin --user-group "$docker_user" \
-    || fail "useradd failed"
-fi
-leave_group "$docker_user" "$user"
-leave_group "$docker_user" docker
-linger "$docker_user"
-
-# Its subordinate uids and gids, 65536 of each, from the first id (at least 100000) past every range /etc/subuid, or
-# /etc/subgid, holds; Ubuntu's useradd gives a new user them itself, which leaves nothing to do here.
-for kind in uid gid; do
-  grep -q "^$docker_user:" "$root/etc/sub$kind" 2>/dev/null && continue
-  start="$({ cat -- "$root/etc/sub$kind" 2>/dev/null || true; } \
-    | awk -F: 'BEGIN { end = 100000 } NF >= 3 && $2 + $3 > end { end = $2 + $3 } END { print end }')"
-  change "give $docker_user the subordinate ${kind}s $start-$((start + 65535))" \
-    usermod "--add-sub${kind}s" "$start-$((start + 65535))" "$docker_user" || fail "usermod could not add $docker_user's sub${kind}s"
-done
-
-# Its group bits are the ACL's mask, --x once the grant below is in, so a mode of 700 or 710 is as asked.
-if [ ! -d "$docker_dir" ] || [ -L "$docker_dir" ] \
-  || [[ "$(stat -c '%u %a' -- "$docker_dir")" != "$(id -u "$docker_user" 2>/dev/null) 7"[01]0 ]]; then
-  change "create $docker_dir, mode 700, for $docker_user's socket" \
-    sh -c 'mkdir -p -- "$1" && chmod 700 -- "$1" && chown -- "$2:" "$1"' sh "$docker_dir" "$docker_user" \
-    || fail "could not create $docker_dir"
-fi
-acl "$docker_dir" "user:$user:--x"
-
-# The daemon's user unit, as dockerd-rootless-setuptool.sh install writes it, with the socket's path and its grant.
-before="$changes"
-as_docker user_file "$docker_home/.config/systemd/user/docker.service" 644 "# Written by Triphammer's bin/provision: the rootless Docker daemon whose socket $user reaches (bin/README.md).
-[Unit]
-Description=Docker Application Container Engine (Rootless), for $user
-Documentation=https://docs.docker.com/go/rootless/
-Requires=dbus.socket
-
-[Service]
-Environment=PATH=/usr/bin:/sbin:/usr/sbin:/bin
-ExecStart=$rootless_sh --host=unix://$docker_socket
-ExecStartPost=/usr/bin/setfacl -m user:$user:rw- $docker_socket
-ExecReload=/bin/kill -s HUP \$MAINPID
-TimeoutSec=0
-RestartSec=2
-Restart=always
-StartLimitBurst=3
-StartLimitInterval=60s
-LimitNOFILE=infinity
-LimitNPROC=infinity
-LimitCORE=infinity
-TasksMax=infinity
-Delegate=yes
-Type=notify
-NotifyAccess=all
-KillMode=mixed
-
-[Install]
-WantedBy=default.target
-"
-if [ "$changes" -ne "$before" ]; then
-  as_docker reload_units
-  if as_docker user_enabled docker.service; then
-    change "restart $docker_user's docker.service, whose unit changed" systemctl --machine="$docker_user@" --user restart docker.service \
-      || fail "systemctl could not restart $docker_user's docker.service"
-  fi
-fi
-if ! as_docker user_enabled docker.service; then
-  change "enable and start $docker_user's docker.service, the rootless Docker daemon" \
-    systemctl --machine="$docker_user@" --user enable --now docker.service \
-    || fail "systemctl could not start $docker_user's docker.service; journalctl --machine=$docker_user@ --user -u docker.service says why"
-fi
 
 # bwrap's user namespaces, for the sessions' write limit (bin/session-sandbox) and Codex's sandbox: Ubuntu restricts
 # them with AppArmor, which this profile lifts for /usr/bin/bwrap alone. A profile at that path that is not this
@@ -431,9 +326,12 @@ if cloned "$tri_repo" "$tri_checkout"; then
 fi
 user_plugin humanizer blader/humanizer humanizer
 
-# The machine file, for provision-project and the triphammer command, and the command itself: a copy of this script's
-# own bin/triphammer that root owns, never a link into the checkout the service user may write.
-root_file "$machine_file" 644 "$(machine_text "$tri_repo" "$tri_checkout" "$user" "$home" "$docker_user" "$docker_socket")"$'\n'
+# The machine file, for provision-project and the triphammer command, with every line it does not set kept (the Docker
+# projects' daemons provision-project names, and the TRIPHAMMER_DOCKER_USER and TRIPHAMMER_DOCKER_SOCKET of the daemon
+# every Docker project shared before each had its own, whose socket the write limit hides), and the command itself: a
+# copy of this script's own bin/triphammer that root owns, never a link into the checkout the service user may write.
+root_file "$machine_file" 644 "$(machine_with "TRIPHAMMER_REPO=$tri_repo" "TRIPHAMMER_CHECKOUT=$tri_checkout" \
+  "TRIPHAMMER_USER=$user" "TRIPHAMMER_HOME=$home")"$'\n'
 root_file "$node_bin/triphammer" 755 "$(cat "$here/triphammer")"$'\n'
 
 summary

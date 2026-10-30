@@ -3,14 +3,16 @@
 # messages), `here` (their directory) and `usage`, and before they set `user`, `home` and `dry_run`. Nothing here
 # changes the machine until a script calls it.
 # shellcheck disable=SC2154  # prog, here, user, home and dry_run are the sourcing script's
-# shellcheck disable=SC2034  # codename, arch, node_arch, node_bin and docker_socket are for the sourcing script
+# shellcheck disable=SC2034  # codename, arch, node_arch and node_bin are for the sourcing script
 # shellcheck disable=SC2016  # the sh -c scripts expand their own arguments, not this shell's
 #
 # The machine file, $root/etc/triphammer.conf, is how provision-project, the triphammer command and the service user's
-# scripts find what provision set up: Triphammer's repository and checkout (TRIPHAMMER_REPO, TRIPHAMMER_CHECKOUT), the
-# service user and its home (TRIPHAMMER_USER, TRIPHAMMER_HOME), and the rootless Docker daemon's user and the absolute
-# path of its socket (TRIPHAMMER_DOCKER_USER, TRIPHAMMER_DOCKER_SOCKET). provision writes it as root, mode 644, one
-# KEY=VALUE per line.
+# scripts find what provision set up: Triphammer's repository and checkout (TRIPHAMMER_REPO, TRIPHAMMER_CHECKOUT) and
+# the service user and its home (TRIPHAMMER_USER, TRIPHAMMER_HOME), which provision writes, and, for each project that
+# declares "docker": true, its own rootless Docker daemon's user and the absolute path of its socket
+# (TRIPHAMMER_DOCKER_USER_<key>, TRIPHAMMER_DOCKER_SOCKET_<key>, with docker_key in config.sh), which provision-project
+# writes. Both write it as root, mode 644, one KEY=VALUE per line, and each keeps every line it does not set
+# (machine_with).
 #
 # Tests run the scripts with fakes of the package and account tools first on PATH, and two variables meant for them
 # only: TRIPHAMMER_PROVISION_ROOT, a directory the system paths the scripts write (/etc, /usr/local, /tmp) and read
@@ -42,24 +44,34 @@ check_place() {
     || usage_error "$1 $2: the checkout must be an absolute path without . or .. parts or a trailing /, not $3"
 }
 
-# machine_text <repo> <checkout> <user> <home> <docker user> <docker socket>: the machine file's content.
-machine_text() {
-  printf '# Written by bin/provision: Triphammer on this machine (bin/README.md, On a machine of its own).\n'
-  printf 'TRIPHAMMER_REPO=%s\nTRIPHAMMER_CHECKOUT=%s\nTRIPHAMMER_USER=%s\nTRIPHAMMER_HOME=%s\n' "$1" "$2" "$3" "$4"
-  printf 'TRIPHAMMER_DOCKER_USER=%s\nTRIPHAMMER_DOCKER_SOCKET=%s\n' "$5" "$6"
+# machine_with <KEY=VALUE>...: the machine file's content with each KEY given its VALUE, in the place of the first line
+# that gives KEY, whose later lines are dropped, or else at the end, in the order given; every other line stays as it
+# is. A missing or empty file starts with a line saying what it is.
+machine_with() {
+  local line key pair
+  local -A want=() set=()
+  for pair; do want[${pair%%=*}]="${pair#*=}"; done
+  if [ -s "$machine_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      key="${line%%=*}"
+      if [[ "$line" =~ ^[A-Z][A-Z0-9_]*= && -n "${want[$key]+set}" ]]; then
+        [ -z "${set[$key]:-}" ] || continue
+        line="$key=${want[$key]}" set[$key]=1
+      fi
+      printf '%s\n' "$line"
+    done < "$machine_file"
+  else
+    printf '# Written by bin/provision and bin/provision-project: Triphammer on this machine (bin/README.md, On a machine of its own).\n'
+  fi
+  for pair; do [ -n "${set[${pair%%=*}]:-}" ] || printf '%s\n' "$pair"; done
 }
-# read_machine: sets tri_repo, tri_checkout, user and home from the machine file, or exits 1 naming what is wrong, and
-# docker_user and docker_socket, which are empty in the file of a provision from before the rootless daemon.
+# read_machine: sets tri_repo, tri_checkout, user and home from the machine file, or exits 1 naming what is wrong.
 read_machine() {
   [ -r "$machine_file" ] || fail "$machine_file is missing; set the machine up first (install.sh, or bin/provision)"
   tri_repo="$(machine_get TRIPHAMMER_REPO)" tri_checkout="$(machine_get TRIPHAMMER_CHECKOUT)"
   user="$(machine_get TRIPHAMMER_USER)" home="$(machine_get TRIPHAMMER_HOME)"
-  docker_user="$(machine_get TRIPHAMMER_DOCKER_USER)" docker_socket="$(machine_get TRIPHAMMER_DOCKER_SOCKET)"
   [[ "$tri_repo" =~ $repo_pattern && "$tri_checkout" == /* && "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$home" == /* ]] \
     || fail "$machine_file does not name Triphammer's repository, checkout, user and home; run bin/provision again"
-  [ -z "$docker_user$docker_socket" ] \
-    || [[ "$docker_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$docker_socket" == /* ]] \
-    || fail "$machine_file does not name the rootless Docker daemon's user and socket; run bin/provision again"
 }
 
 # check_ubuntu: run as root on Ubuntu, amd64 or arm64; sets codename, arch and node_arch.
@@ -234,7 +246,22 @@ user_enabled() {
   user_exists && systemctl --machine="$user@" --user is-enabled --quiet -- "$1" >/dev/null 2>&1
 }
 
-# as_docker <command...>: runs one of the functions above (as_user, user_file, reload_units, ...) for the rootless
+# in_group <user> <group>: succeeds when the user is a member of the group.
+in_group() { id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qxF -- "$2"; }
+# linger <user>: lingering on for the user, so its user units run without a login.
+linger() {
+  if [ "$(loginctl show-user "$1" --property=Linger --value 2>/dev/null)" != yes ]; then
+    change "turn lingering on for $1, so its user units run without a login" loginctl enable-linger "$1" \
+      || fail "loginctl enable-linger failed"
+  fi
+}
+# leave_group <user> <group>: takes the user out of the group when it is in it.
+leave_group() {
+  in_group "$1" "$2" || return 0
+  change "remove $1 from the $2 group" gpasswd -d "$1" "$2" || fail "gpasswd could not remove $1 from $2"
+}
+
+# as_docker <command...>: runs one of the functions above (as_user, user_file, reload_units, ...) for a rootless
 # Docker daemon's user, docker_user with its home docker_home, in place of the service user.
 as_docker() {
   local user="$docker_user" home="$docker_home"
@@ -253,7 +280,7 @@ acl() {
   local IFS=,
   change "grant ${missing[*]} on $path" setfacl -m "${missing[*]}" -- "$path" || fail "setfacl could not change $path"
 }
-# docker_reads <checkout>: lets the rootless Docker daemon's user read the run clones in <checkout>/.worktrees, which
+# docker_reads <checkout>: lets a project's rootless Docker daemon's user read the run clones in <checkout>/.worktrees, which
 # a project's Compose files bind-mount, and nothing else of the service user's: read and search on .worktrees, with a
 # default entry so each clone a run makes there inherits both, and search alone (--x, which lists nothing) on the
 # checkout and each directory above it that the service user owns. It creates .worktrees as the user when it is
@@ -269,6 +296,114 @@ docker_reads() {
     [ "$(stat -c %u -- "$dir" 2>/dev/null)" != "$uid" ] || acl "$dir" "user:$docker_user:--x"
     dir="${dir%/*}"
   done
+}
+
+# docker_daemon <project> <checkout>: the rootless Docker daemon of one project that declares "docker": true, which its
+# sessions alone reach, so no other project's session reaches its containers, images, volumes, networks or build
+# cache. It runs as a user of its own, <user>-docker-<project>, in a user namespace on that user's subordinate ids, so
+# a container that mounts / or runs privileged acts as that user on the machine, and that user may read only the
+# project's run clones (docker_reads). It is in neither the service user's group nor the docker group. Its home, beside
+# the service user's, holds the images and volumes (~/.local/share/docker). A project whose name has no docker_key
+# (config.sh), or whose user's name would be longer than the 32 characters useradd takes, stops the run: a shortened
+# name could be another project's.
+#
+# The socket: dockerd, started with --host, makes it at /var/lib/<daemon user>/docker.sock, in a directory of its own
+# that the daemon's user owns with mode 700, outside /run, which RootlessKit replaces in the daemon's mount namespace
+# with a copy. The directory's ACL lets the service user search it (--x) and nothing more, and the unit's
+# ExecStartPost gives the service user rw- on the socket once the daemon is ready, whatever mode and group dockerd gave
+# it; connecting to a socket takes write on it and search on its directory. No other user but root can reach it, and
+# the write limit hides it from every other project's session (bin/session-sandbox). Last, the machine file names the
+# user and the socket under the project's keys.
+docker_daemon() {
+  local project="$1" key script kind start before
+  key="$(docker_key "$project")" \
+    || fail "the project $project declares \"docker\": true, and its name cannot name a rootless Docker daemon: rename the project to lower-case letters, digits and dashes, starting with a letter or a digit"
+  docker_user="$user-docker-$project"
+  [[ "$docker_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] \
+    || fail "the rootless Docker daemon of $project would run as $docker_user, ${#docker_user} characters, and a user name has at most 32; give the project a shorter name"
+  if installed docker-ce-rootless-extras; then script=/usr/bin/dockerd-rootless.sh
+  elif installed docker.io && installed rootlesskit; then script=/usr/share/docker.io/contrib/dockerd-rootless.sh
+  else fail "the rootless Docker daemon's packages are missing; run triphammer update (or bin/provision) first"
+  fi
+  local docker_dir="$root/var/lib/$docker_user"
+  local docker_socket="$docker_dir/docker.sock"
+  docker_home="$(dirname "$home")/$docker_user"
+  if getent passwd "$docker_user" >/dev/null 2>&1; then
+    docker_home="$(getent passwd "$docker_user" | cut -d: -f6)"
+  else
+    change "create the user $docker_user with the home $docker_home, for the rootless Docker daemon of $project" \
+      useradd --create-home --home-dir "$docker_home" --shell /usr/sbin/nologin --user-group "$docker_user" \
+      || fail "useradd failed"
+  fi
+  leave_group "$docker_user" "$user"
+  leave_group "$docker_user" docker
+  linger "$docker_user"
+
+  # Its subordinate uids and gids, 65536 of each, from the first id (at least 100000) past every range /etc/subuid, or
+  # /etc/subgid, holds; Ubuntu's useradd gives a new user them itself, which leaves nothing to do here.
+  for kind in uid gid; do
+    grep -q "^$docker_user:" "$root/etc/sub$kind" 2>/dev/null && continue
+    start="$({ cat -- "$root/etc/sub$kind" 2>/dev/null || true; } \
+      | awk -F: 'BEGIN { end = 100000 } NF >= 3 && $2 + $3 > end { end = $2 + $3 } END { print end }')"
+    change "give $docker_user the subordinate ${kind}s $start-$((start + 65535))" \
+      usermod "--add-sub${kind}s" "$start-$((start + 65535))" "$docker_user" || fail "usermod could not add $docker_user's sub${kind}s"
+  done
+
+  # Its group bits are the ACL's mask, --x once the grant below is in, so a mode of 700 or 710 is as asked.
+  if [ ! -d "$docker_dir" ] || [ -L "$docker_dir" ] \
+    || [[ "$(stat -c '%u %a' -- "$docker_dir")" != "$(id -u "$docker_user" 2>/dev/null) 7"[01]0 ]]; then
+    change "create $docker_dir, mode 700, for $docker_user's socket" \
+      sh -c 'mkdir -p -- "$1" && chmod 700 -- "$1" && chown -- "$2:" "$1"' sh "$docker_dir" "$docker_user" \
+      || fail "could not create $docker_dir"
+  fi
+  acl "$docker_dir" "user:$user:--x"
+
+  # The daemon's user unit, as dockerd-rootless-setuptool.sh install writes it, with the socket's path and its grant.
+  before="$changes"
+  as_docker user_file "$docker_home/.config/systemd/user/docker.service" 644 "# Written by Triphammer's bin/provision-project: the rootless Docker daemon of the project $project, whose socket $user reaches (bin/README.md).
+[Unit]
+Description=Docker Application Container Engine (Rootless), for $user's project $project
+Documentation=https://docs.docker.com/go/rootless/
+Requires=dbus.socket
+
+[Service]
+Environment=PATH=/usr/bin:/sbin:/usr/sbin:/bin
+ExecStart=$script --host=unix://$docker_socket
+ExecStartPost=/usr/bin/setfacl -m user:$user:rw- $docker_socket
+ExecReload=/bin/kill -s HUP \$MAINPID
+TimeoutSec=0
+RestartSec=2
+Restart=always
+StartLimitBurst=3
+StartLimitInterval=60s
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Delegate=yes
+Type=notify
+NotifyAccess=all
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
+"
+  if [ "$changes" -ne "$before" ]; then
+    as_docker reload_units
+    if as_docker user_enabled docker.service; then
+      change "restart $docker_user's docker.service, whose unit changed" systemctl --machine="$docker_user@" --user restart docker.service \
+        || fail "systemctl could not restart $docker_user's docker.service"
+    fi
+  fi
+  if ! as_docker user_enabled docker.service; then
+    change "enable and start $docker_user's docker.service, the rootless Docker daemon of $project" \
+      systemctl --machine="$docker_user@" --user enable --now docker.service \
+      || fail "systemctl could not start $docker_user's docker.service; journalctl --machine=$docker_user@ --user -u docker.service says why"
+  fi
+
+  docker_reads "$2"
+  root_file "$machine_file" 644 \
+    "$(machine_with "TRIPHAMMER_DOCKER_USER_$key=$docker_user" "TRIPHAMMER_DOCKER_SOCKET_$key=$docker_socket")"$'\n'
 }
 
 # owner_steps: what is left for the owner, numbered, each with its fix, or one line saying the machine is ready. It

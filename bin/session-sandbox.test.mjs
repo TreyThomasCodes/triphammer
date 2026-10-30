@@ -12,7 +12,7 @@ const skip = userns ? false : 'bwrap is missing or cannot create a user namespac
 // A rig outside /tmp, which the limit leaves writable: in the repository, which this test may write in a session too.
 // It holds a bare origin, a main checkout cloned from it, a run's clone `.worktrees/issue-1` of that origin on ticket/1
 // that reads the main checkout's objects through an alternate, as ticket-runner makes it, a separate Triphammer
-// checkout holding this branch's session-sandbox, and a home directory with a Claude Code directory whose
+// checkout holding this branch's session-sandbox and the config.sh it sources, and a home directory with a Claude Code directory whose
 // settings.json and skills are there, a Codex directory with its config.toml and rules, local-audit's
 // codex-settings, and NuGet's NuGet.Config. `inside` runs a shell command under the limit in the run's clone, as the
 // runner does, with `env` added to its environment, and returns its exit status and output.
@@ -34,6 +34,7 @@ function sandboxRig(t) {
   git(worktree, 'checkout', '-q', '-b', 'ticket/1');
   mkdirSync(join(triphammer, 'bin'), {recursive: true});
   copyFileSync(join(here, 'session-sandbox'), join(triphammer, 'bin/session-sandbox'));
+  copyFileSync(join(here, 'config.sh'), join(triphammer, 'bin/config.sh'));
   git(triphammer, 'init', '-q', '-b', 'main');
   git(triphammer, 'add', '.');
   git(triphammer, 'commit', '-q', '-m', 'first');
@@ -626,6 +627,28 @@ test("a project with Docker reaches the Docker socket DOCKER_HOST names outside 
     const machine = r.inside(findSockets, {DOCKER_HOST: host, TRIPHAMMER_DOCKER: '1'});
     assert.equal(machine.output, machineSockets.map(path => `${path} none\n`).join(''), host);
   }
+});
+
+test("a project with Docker reaches its own rootless daemon's socket and no other the machine file names", {skip}, async t => {
+  const r = sandboxRig(t);
+  const machine = join(r.root, 'machine');
+  mkdirSync(join(machine, 'etc'), {recursive: true});
+  const sockets = {own: join(r.root, 'example-docker-own/docker.sock'), other: join(r.root, 'example-docker-other/docker.sock'),
+    shared: join(r.root, 'example-docker/docker.sock')};
+  for (const path of Object.values(sockets)) {
+    mkdirSync(dirname(path), {recursive: true});
+    await listenUnix(t, path);
+  }
+  writeFileSync(join(machine, 'etc/triphammer.conf'), `TRIPHAMMER_USER=example\nTRIPHAMMER_DOCKER_SOCKET=${sockets.shared}\n`
+    + `TRIPHAMMER_DOCKER_SOCKET_OWN=${sockets.own}\nTRIPHAMMER_DOCKER_SOCKET_OTHER=${sockets.other}\n`);
+  const env = {TRIPHAMMER_PROVISION_ROOT: machine, DOCKER_HOST: `unix://${sockets.own}`};
+  const reached = docker => Object.entries(sockets).map(([name, path]) => {
+    const {output} = r.inside(connect(path), {...env, ...docker});
+    return `${name} ${/^connected /m.test(output) ? 'connected' : /FileNotFoundError/.test(output) ? 'hidden' : output}`;
+  });
+  assert.deepEqual(reached({TRIPHAMMER_DOCKER: '1'}), ['own connected', 'other hidden', 'shared hidden']);
+  assert.deepEqual(reached({}), ['own hidden', 'other hidden', 'shared hidden']);
+  for (const path of Object.values(sockets)) assert.ok(isSocket(path), `${path} outside is untouched`);
 });
 
 test('a project without Docker cannot reach a Docker socket the daemon deletes and makes again while the command runs', {skip}, async t => {
