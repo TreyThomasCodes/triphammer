@@ -166,3 +166,47 @@ test('a real heredoc body is text and the lines after its terminator are command
     assertShellEditDenied(decide(`${heredoc}\n${edit}`, dir), 'src/x.cs');
   }
 });
+
+// Python and node scripts that open a tracked file for writing.
+
+for (const [name, command, file] of [
+  ['a python heredoc', `python3 - <<'EOF'\nopen("src/x.cs", "w").write("class Z {}\\n")\nEOF`, 'src/x.cs'],
+  ['a python heredoc without -', `python3 <<EOF\nwith open('src/App/Y.cs', mode='a') as f:\n    f.write('x')\nEOF`,
+    'src/App/Y.cs'],
+  ['python -c', `python3 -c 'open("src/x.cs", "wb").write(b"x")'`, 'src/x.cs'],
+  ['python -c in a group', `python -Ic "open('src/x.cs', 'r+').write('x')"`, 'src/x.cs'],
+  ['write_text', `python3 -c 'from pathlib import Path; Path("tests/App.Tests/X.cs").write_text("x")'`,
+    'tests/App.Tests/X.cs'],
+  ['write_bytes', `python3.12 - <<'EOF'\nimport pathlib\npathlib.Path('src/x.cs').write_bytes(b'x')\nEOF`, 'src/x.cs'],
+  ['node writeFileSync', `node -e 'require("fs").writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node appendFile in a heredoc', `node - <<'EOF'\nfs.appendFile('src/x.cs', 'x', () => {})\nEOF`, 'src/x.cs'],
+  ['python -W before a heredoc', `python3 -W ignore <<'EOF'\nopen("src/x.cs", "w")\nEOF`, 'src/x.cs'],
+  ['python --check-hash-based-pycs before -c', `python3 --check-hash-based-pycs never -c 'open("src/x.cs", "a")'`,
+    'src/x.cs'],
+  ['node -r before --eval', `node -r ./setup.js --eval 'fs.writeFileSync("src/x.cs", "x")'`, 'src/x.cs'],
+  ['node --require before a heredoc', `node --require ./setup.js <<'EOF'\nfs.writeFileSync("src/x.cs", "x")\nEOF`,
+    'src/x.cs'],
+]) {
+  test(`a script write through ${name} is refused`, t => {
+    const {dir} = repo(t);
+    assertShellEditDenied(decide(command, dir), file);
+  });
+}
+
+test('scripts that read a tracked file, or write elsewhere or an untracked file, are allowed', t => {
+  const {dir} = repo(t);
+  for (const command of [
+    `python3 - <<'EOF'\nprint(open("src/x.cs").read())\nEOF`,
+    `python3 -c 'print(open("src/x.cs", "r").read())'`,
+    `python3 -c 'print(open("src/x.cs", "rb").read())'`,
+    `python3 -c 'open("src/untracked.cs", "w").write("x")'`,
+    `python3 -c 'open("docs/notes.md", "w").write("x")'`,
+    `python3 -c 'open("/tmp/out.cs", "w").write("x")'`,
+    `node -e 'console.log(require("fs").readFileSync("src/x.cs", "utf8"))'`,
+    `python3 tool.py <<'EOF'\nopen("src/x.cs", "w")\nEOF`,
+    `cat <<'EOF'\nopen("src/x.cs", "w")\nEOF`,
+    `cd src && python3 -c 'open("x.cs", "w").write("x")'`,
+  ]) {
+    assert.equal(decide(command, dir), null, command);
+  }
+});

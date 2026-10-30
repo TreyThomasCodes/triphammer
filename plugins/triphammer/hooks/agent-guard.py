@@ -16,7 +16,9 @@
 #               the STATE_DIR each Triphammer config sets, and the shared directory ($TRIPHAMMER_SHARED_DIR, else
 #               ${XDG_STATE_HOME:-~/.local/state}/triphammer), as written or with symlinks resolved.
 #   shell-edit  a plain writer other than rm and ln rewriting a git-tracked file under a `shellEditRoots` path of the
-#               .triphammer/project.json of the repository the command runs in.
+#               .triphammer/project.json of the repository the command runs in, or a python or node script given by
+#               -c, -e or a heredoc that opens such a file for writing by a literal path: open(path, mode) with w, a, x
+#               or + in the mode, Path(path).write_text or write_bytes, or fs.writeFile, appendFile and their Sync forms.
 #   self-kill   pkill -f or pgrep -f with a pattern not in '[p]attern' form, and kill of $$, $PPID or the PID of the
 #               session or one of its parents.
 # In a session Triphammer started, whose environment or a parent's holds $TRIPHAMMER_SESSION (the run's clone):
@@ -90,6 +92,20 @@ MARKER = re.compile(r"\x00(\d+)\x00$")
 PATH_VARIABLES = ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TRIPHAMMER_SHARED_DIR")
 # Files a write may always name: they hold nothing.
 DEVICES = re.compile(r"/dev/(?:null|zero|full|stdout|stderr|tty|fd/\d+)|/proc/self/fd/\d+")
+# Interpreters whose script, from -c or -e or a heredoc on stdin, the shell-edit rule reads: the option letters that
+# give the script, the other letters that take a value, and the long options that take the next word as a value (node's
+# common ones; the rest written with `=` cost nothing).
+INTERPRETERS = {
+    "python": ("c", "mWX", {"--check-hash-based-pycs"}),
+    "node": ("ep", "rC", {"--require", "--import", "--loader", "--experimental-loader", "--conditions", "--input-type",
+                          "--env-file", "--env-file-if-exists", "--title", "--disable-warning", "--redirect-warnings"}),
+}
+# A script's writes to a literal path: open(path, mode) with a writing mode, Path(path).write_text or write_bytes, and
+# node's fs.writeFile and appendFile (also Sync).
+SCRIPT_WRITES = re.compile(
+    r"\bopen\(\s*(['\"])([^'\"]+)\1\s*,\s*(?:mode\s*=\s*)?['\"][^'\"]*[wax+]"
+    r"|\bPath\(\s*(['\"])([^'\"]+)\3\s*\)\s*\.\s*write_(?:text|bytes)\b"
+    r"|\b(?:write|append)File(?:Sync)?\(\s*(['\"`])([^'\"`]+)\5")
 
 # Triphammer's systemd units, their @<project> instances and template unit files, by name or by path.
 TRIPHAMMER_UNIT = re.compile(r"(?:ticket-runner|merge-when-ready|triphammer-status)(?:@[^/]*)?"
@@ -453,6 +469,7 @@ class Findings:
         self.signals = []  # (kill operand, the process it names)
         self.schedules = []  # crontab, at, batch and systemd-run invocations, as their text
         self.label_removals = []  # gh commands that take needs-owner off, as their text
+        self.script_edits = []  # absolute paths a python or node script opens for writing
 
     def write(self, word, cwd, tree=False, removal=False, edit=True):
         path = literal_path(word, cwd)
@@ -462,7 +479,7 @@ class Findings:
 
 def walk(cmd, cwd, findings):
     """Judges every command of the shell text. A relative path after a cd, pushd or popd is not judged."""
-    text, _ = strip_heredocs(cmd)
+    text, bodies = strip_heredocs(cmd)
     try:
         tokens = tokenize(text)
     except Unbalanced as error:
@@ -473,13 +490,13 @@ def walk(cmd, cwd, findings):
             return
     for pipeline, _ in pipelines(tokens):
         for command in pipeline:
-            words = analyze(command, cwd, findings)
+            words = analyze(command, cwd, findings, bodies)
             if words and words[0].value in ("cd", "pushd", "popd"):
                 cwd = None
 
 
-def analyze(command, cwd, findings):
-    """Judges one command; returns its words from the command name on."""
+def analyze(command, cwd, findings, bodies):
+    """Judges one command, whose heredocs are among bodies; returns its words from the command name on."""
     for target in command.write_targets:
         findings.write(target, cwd)
     words = strip_prefix(command.words)
@@ -512,7 +529,41 @@ def analyze(command, cwd, findings):
         analyze_kill(name, args, findings)
     elif name == "kill":
         analyze_signal(args, findings)
+    elif (kind := re.sub(r"[\d.]*$", "", name)) in INTERPRETERS:
+        for script in interpreter_scripts(kind, args, [bodies[i] for i in command.heredocs if i < len(bodies)]):
+            for match in SCRIPT_WRITES.finditer(script):
+                path = literal_path(Word(match.group(2) or match.group(4) or match.group(6), dynamic=True), cwd)
+                if path is not None:
+                    findings.script_edits.append(path)
     return words
+
+
+def interpreter_scripts(kind, args, heredocs):
+    """The script texts a python or node command runs: its -c or -e value, else its heredocs when it reads the script
+    from stdin (no script file named, or `-`)."""
+    script_letters, value_letters, long_values = INTERPRETERS[kind]
+    i = 0
+    while i < len(args):
+        v, i = args[i].value, i + 1
+        if v == "-" or not v.startswith("-"):
+            return heredocs if v == "-" else []
+        if v.startswith("--"):
+            name, eq, attached = v.partition("=")
+            if kind == "node" and name in ("--eval", "--print"):
+                return [attached] if eq else [args[i].value] if i < len(args) else []
+            i += not eq and name in long_values
+            continue
+        end = value_letter(v, script_letters + value_letters)
+        if end is None:
+            continue
+        value = v[end + 1:]
+        if not value and i < len(args):
+            value, i = args[i].value, i + 1
+        if v[end] in script_letters:
+            return [value]
+        if v[end] == "m":
+            return []
+    return heredocs
 
 
 def analyze_copy(name, args, cwd, findings):
@@ -841,7 +892,7 @@ def decide(cmd, cwd):
         return (f"agent-guard self-kill rule: `kill {target}` signals {process}, so it ends the command or the "
                 f"session itself. Kill the PID you saved when you started the process (`kill \"$pid\"`), or use "
                 f"`kill %1` for a job this shell started.")
-    files = tracked_edits([path for path, _, _, edit in findings.writes if edit], cwd)
+    files = tracked_edits([path for path, _, _, edit in findings.writes if edit] + findings.script_edits, cwd)
     if files:
         return (f"{SHELL_EDIT_RULE}: this command rewrites git-tracked {listed(files, 5, ', ')} through the "
                 f"shell. Make the change with Edit (or Write for a new or wholly replaced file), so the language "
