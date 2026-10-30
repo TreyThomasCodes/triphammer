@@ -389,16 +389,20 @@ directory, `/run/user/<uid>`, and `$XDG_RUNTIME_DIR` when it names another, are 
 the session may write, so neither the user manager (`systemctl --user`, `systemd-run --user`), the session bus nor an
 `ssh-agent` or `gpg-agent` socket there is reachable, and `DBUS_SESSION_BUS_ADDRESS`, `SSH_AUTH_SOCK` and
 `GPG_AGENT_INFO` are unset. For a project whose project file declares `"docker": true`, a rootless Docker socket there
-that `DOCKER_HOST` (`unix://<path>`) names is mounted back. A session of any other project gets no Docker socket: an
-empty read-only file covers each of `/var/run/docker.sock`, `/run/docker.sock` and a socket that `DOCKER_HOST`
-(`unix://<path>`) names outside the runtime directories, so it can neither connect to one nor find one there. The
-runner tells the limit which applies (`TRIPHAMMER_DOCKER=1` for a project that declares it).
+that `DOCKER_HOST` (`unix://<path>`) names is mounted back. A session of any other project gets no Docker socket: the
+directory of each of `/var/run/docker.sock`, `/run/docker.sock` and a socket that `DOCKER_HOST` (`unix://<path>`) names
+outside the runtime directories becomes an empty tmpfs holding each of its entries but the socket's name, mounted back
+as before, so the session can neither connect to one nor find one there, even when the daemon deletes and makes its
+socket again or makes it only after the session starts. What the machine adds to such a directory later, such as a
+new entry directly in `/run`, does not show inside. The runner tells the limit which applies (`TRIPHAMMER_DOCKER=1`
+for a project that declares it).
 
 The limit is bubblewrap around the whole session, not Claude Code's own Bash sandbox: that one covers only the Bash
 tool (Edit and Write go through permission rules alone), and the model can ask to run a command outside it. Not
 covered: for a project that declares `"docker": true`, the Docker socket, which its checks use, so a container a
 session starts can still write anywhere on the machine; for another project, a Docker daemon it reaches some other way
-than the sockets above (a socket elsewhere, a Docker context, TCP); abstract Unix sockets, services listening on the machine's localhost, such as another project's
+than the sockets above (a socket elsewhere, a Docker context, TCP), or a `DOCKER_HOST` socket whose directory is
+deleted and made again during the session, or that lies directly in `/`; abstract Unix sockets, services listening on the machine's localhost, such as another project's
 containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
 which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache

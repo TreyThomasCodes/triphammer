@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {exampleProject, git, here, lines, manyLabels, projectJson, realCommand, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
@@ -665,8 +665,8 @@ for (const [kind, setup, worktree] of [['ticket', ticketSetup, 'issue-7'], ['rep
   });
 }
 
-// The paths a bwrap call's `--ro-bind-data` arguments cover with a file.
-const covered = call => call.flatMap((arg, i) => arg === '--ro-bind-data' ? [call[i + 2]] : []);
+// Whether a bwrap call hides `path`: an empty tmpfs over its directory, and no mount of the path itself.
+const hides = (call, path) => call.some((arg, i) => arg === '--tmpfs' && call[i + 1] === dirname(path)) && !call.includes(path);
 
 for (const [declared, docker, hidden] of [['without docker', undefined, true], ['with "docker": false', false, true],
   ['with "docker": true', true, false]]) {
@@ -680,7 +680,7 @@ for (const [declared, docker, hidden] of [['without docker', undefined, true], [
     assert.equal(r.ran(), true);
     const calls = r.bwrapCalls();
     assert.equal(calls.length, 2, JSON.stringify(calls));
-    for (const call of calls) assert.equal(covered(call).includes(realpathSync(socket)), hidden, JSON.stringify(call));
+    for (const call of calls) assert.equal(hides(call, realpathSync(socket)), hidden, JSON.stringify(call));
   });
 }
 

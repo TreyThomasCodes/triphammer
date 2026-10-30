@@ -86,3 +86,12 @@ A brake that one kind of event sets and another lifts (a label and a close, a cl
 - Is there a test where the lifting event comes before the setting one, and does the brake still hold?
 
 Found in: a stop-agents brake that read "labelled, and not closed" from separate last events, so an owner's close before the owner's label lifted the label.
+
+## 13. Paths hidden as they were at setup
+
+A mount over a file holds that file's inode, not its name. When something outside deletes the file and makes it again, the mount goes away inside and the new file shows; a file first made after setup was never hidden at all.
+
+- Does a sandbox or namespace hide a path by mounting over it, or only when it exists at setup? What happens when the file outside is deleted and made again, or made only later, while the command runs?
+- Is there a test that recreates the file, and one that creates it, during the run?
+
+Found in: a sandbox that covered a daemon's socket with an empty file, which a daemon restart made reachable again.
