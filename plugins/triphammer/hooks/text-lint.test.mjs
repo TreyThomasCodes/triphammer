@@ -80,13 +80,12 @@ test('a description in the repository form is allowed', t => {
 test('a body with the Claude Code footer is refused', t => {
   const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
   const body = GOOD.replace('\n\nCloses', `\n\n${footer}\n\nCloses`);
-  assertRefused(bash(humanized(t), prCreate(body)), 'FOOTER');
+  assertRefused(bash(humanized(t), prCreate(body)), "FOOTER: remove the 'Generated with Claude Code' line.");
 });
 
 test('a body with a Co-Authored-By line is refused', t => {
   const body = `${GOOD}\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`;
-  const reason = bash(humanized(t), prCreate(body));
-  assertRefused(reason, 'CO-AUTHORED-BY');
+  assertRefused(bash(humanized(t), prCreate(body)), 'CO-AUTHORED-BY: remove the Co-Authored-By line from the description.');
 });
 
 test('Checks, Decisions for the owner, Reviewer notes and Evidence sections, as headings or bold labels, are refused', t => {
