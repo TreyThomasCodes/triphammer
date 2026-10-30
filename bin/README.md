@@ -424,9 +424,13 @@ tool (Edit and Write go through permission rules alone), and the model can ask t
 covered: for a project that declares `"docker": true`, what its rootless daemon's user can do, as a container a
 session starts through it, privileged or mounting `/` or not, acts as that user on the machine: it reads what is
 world-readable there and the project's run clones in `<checkout>/.worktrees`, which the session can read already, and
-writes what that user may (its own home, its daemon's unit `~/.config/systemd/user/docker.service` and config
-`~/.config/docker/daemon.json` among it, and whatever on the machine is world-writable), which outlives the session,
-as the runner's daemon sweep (Run clones and databases nothing uses) resets none of it; what
+writes what that user may (the daemon's data-root `~/.local/share/docker`, the one part of its home that is not root's
+(On a machine of its own, The rootless Docker daemon), where what the runner's daemon sweep (Run clones and databases
+nothing uses) does not remove through Docker's API outlasts the session, its runtime directory `/run/user/<uid>`, a
+tmpfs, whose user bus and runtime unit directories let a container start a unit or a transient unit as that user that
+runs until the machine reboots, the socket's directory `/var/lib/<user>-docker-<project>`, where a socket of its own
+in the place of the daemon's answers the project's later sessions until the daemon restarts, and whatever on the
+machine is world-writable); what
 a session leaves on the daemon (a container run detached or with a restart policy, an image, such as one re-tagged
 under a name a later session runs or builds from, a volume, a network, the build cache) when the runner is stopped
 during the session or its sweep after the session fails (Run clones and databases nothing uses), which lasts, a
@@ -937,7 +941,7 @@ triphammer start <project> enables` before its last line; any other argument exi
 | One project | `${XDG_CONFIG_HOME:-~/.config}/triphammer` holds at most one `*.conf`, as a machine serves one project (Several projects). More is a problem naming each config's project, whose fix is moving all but one of them to machines of their own. |
 | .NET SDK | `dotnet --list-sdks` lists an SDK the checkout's `global.json` accepts: with `rollForward` `disable` the pinned version only; `patch`, `latestPatch` or none, the same feature band at or after it; `feature` or `latestFeature`, the same major.minor; `minor` or `latestMinor`, the same major; `major` or `latestMajor`, any later one. A prerelease counts only with `allowPrerelease` true. A checkout without `global.json` is not checked. |
 | Node | `node --version` is within the checkout's `package.json` `engines.node` when its comparators are `>=`, `>`, `<=`, `<`, `=` or bare versions of one to three parts, blank-separated; other forms (`^`, `~`, `\|\|`) only need `node` to run. A partial version is a range as in semver: `24` is `24.x`, `<=24` is `<25.0.0`, `>24` is `>=25.0.0`, `<24` is `<24.0.0`, and `24.1` is `24.1.x`. |
-| Docker | Checked only when the project's `.triphammer/project.json` declares `"docker": true`, or cannot be read. The project's name has a key (lower-case letters, digits and dashes), the machine file names the socket of the project's own rootless Docker daemon and names it for no other daemon, `docker info` with `DOCKER_HOST` naming it answers the user running the doctor, `docker -H unix:///var/run/docker.sock info`, the rootful daemon, does not (when it does, the user is still in the `docker` group, and `provision` takes it out), and `docker compose version` is 2 or later. |
+| Docker | Checked only when the project's `.triphammer/project.json` declares `"docker": true`, or cannot be read. The project's name has a key (lower-case letters, digits and dashes), the machine file names the socket of the project's own rootless Docker daemon and names it for no other daemon, `docker info` with `DOCKER_HOST` naming it answers the user running the doctor, `docker -H unix:///var/run/docker.sock info`, the rootful daemon, does not (when it does, the user is still in the `docker` group, and `provision` takes it out), the home of the daemon's user, whom the machine file names, has the shape `provision-project` gives it (On a machine of its own, The rootless Docker daemon): root owns the home, `~/.config`, `~/.config/systemd`, `~/.config/systemd/user` with its `default.target.wants`, `~/.local` and `~/.local/share`, each mode 755 and holding only what `provision-project` puts there, and `docker.service`, mode 644, which `default.target.wants` links, with one problem naming each path that differs, and a user the machine lacks or a directory the doctor cannot list counting as one, and `docker compose version` is 2 or later. |
 | Compose names | Checked only when the project's `.triphammer/project.json` gives a `composeProjectPattern`. For each other project with a config in `${XDG_CONFIG_HOME:-~/.config}/triphammer` whose project file gives one too, the two patterns can match no common Compose project name, so neither project's database sweep prunes the other's containers (Several projects). Two patterns count as disjoint only when each starts with `^` and a literal prefix, has no `\|` outside parentheses, and neither prefix starts the other; any other pair is a problem. An other project whose project file is missing or malformed runs no sweep and is left out. |
 | Playwright | Checked only when the checkout pins Playwright as `provision-project` reads it: a `package.json` that `git ls-files` lists names `@playwright/test` or `playwright` in `dependencies` or `devDependencies`. When the doctor cannot tell (no `jq`, no git checkout, a `package.json` that is not JSON), it checks. `${PLAYWRIGHT_BROWSERS_PATH:-~/.cache/ms-playwright}` holds a Chromium, and the newest revision of each kind there (`chromium-*/chrome-linux*/chrome` and `chromium_headless_shell-*/chrome-*/chrome-headless-shell`) prints a blank page with `--headless --no-sandbox --dump-dom about:blank` within 60 seconds, as Playwright starts it; one that cannot lacks its system libraries. Which revision the project's Playwright wants is left to the web tests. |
 | Git identity | `git config user.name` and `user.email` are set for the user running the doctor (in the checkout, so any scope counts); git refuses to commit without them on a machine whose host name has no domain. Only whether they are set is checked, not their values. |
@@ -1142,8 +1146,7 @@ which its sessions alone reach, so no session of one project reaches another's c
 or build cache. Keeping projects apart is no security boundary, as a machine serves one project (Several projects).
 `provision-project` sets it up (`docker_daemon` in `bin/provision-lib.sh`) once the project is cloned.
 It runs as a user of its own, `<user>-docker-<project>` (`triphammer-docker-web-app` for a project named
-`web-app`), with its home beside the service user's, holding its images and volumes, and in neither the
-service user's group nor `docker`. The daemon runs in a user namespace on that user's subordinate ids, so a container
+`web-app`), with its home beside the service user's, and in neither the service user's group nor `docker`. The daemon runs in a user namespace on that user's subordinate ids, so a container
 that mounts `/` or runs privileged acts as that user on the machine. A project whose name is anything but lower-case
 letters, digits and dashes, starting with a letter or a digit, or whose daemon user's name would be longer than the 32
 characters `useradd` takes (with the default service user, a project name of at most 14 characters), stops
@@ -1153,9 +1156,30 @@ project's. `provision` installs what every daemon needs (`docker-ce-rootless-ext
 and `acl`), and `provision-project` stops when they are missing. For each Docker project it creates the user, gives it
 65536 subordinate uids and gids in `/etc/subuid` and `/etc/subgid` past every range there unless it has some, turns
 lingering on, and writes and enables its user unit `docker.service`, as `dockerd-rootless-setuptool.sh install`
-would, with the socket at `/var/lib/<user>-docker-<project>/docker.sock`. That directory is the daemon user's, mode
-700, and its ACL lets the service user search it and nothing more; the unit's `ExecStartPost` gives the service user
-`rw-` on the socket once the daemon is up. No other user but root can connect, and the write limit hides the socket
+would, with the socket at `/var/lib/<user>-docker-<project>/docker.sock`.
+
+Root owns the daemon user's home and the parts of it that its user manager, its user bus and `dockerd` read code or
+config from, so neither that user nor a container on its daemon can plant a unit, a drop-in, a D-Bus service, an
+`environment.d` file or a `daemon.json` there. The home, `~/.config`, `~/.config/systemd`, `~/.config/systemd/user`
+with its `default.target.wants`, `~/.local` and `~/.local/share` are root's, mode 755, and hold nothing else: the home
+holds `.config` and `.local`, each the one directory on the way down, `~/.config/systemd/user` holds `docker.service`,
+which root writes with mode 644, and `default.target.wants`, which holds the link to it that `systemctl --user enable`
+would make, made by root; then `provision-project` reloads the user's units and starts the daemon. The daemon's
+data-root, `~/.local/share/docker`, is the one directory there the daemon's user owns (mode 700 when
+`provision-project` makes it): `dockerd-rootless.sh` needs only that the home exists, and rootless `dockerd` writes its
+images, containers, volumes and plugins there and its runtime state under `$XDG_RUNTIME_DIR`, `/run/user/<uid>`, and
+reads `~/.config/docker/daemon.json` only when it exists. `provision-project` takes over a home its user owns the same
+way, making each of those directories root's from the home down. A symlink or
+another file where one of those directories, the data-root, the unit or its link belongs, and any entry those
+directories hold besides the ones named above (such as Ubuntu's `/etc/skel` files `.bashrc`, `.bash_logout` and
+`.profile`, which a home `useradd` made holds, another unit, a drop-in directory `docker.service.d`, or
+`~/.local/share/dbus-1`), stops `provision-project` with exit 1, naming each, once the directories are root's: the
+daemon's user may have planted it, so the owner looks at it and removes it, and `provision-project` deletes nothing
+there. The doctor checks the same shape (Doctor).
+
+The socket's directory, `/var/lib/<user>-docker-<project>`, is the daemon user's, mode 700, and its ACL lets the
+service user search it and nothing more; the unit's `ExecStartPost` gives the service user `rw-` on the socket once the
+daemon is up. No other user but root can connect, and the write limit hides the socket
 from every other project's session (The write limit). A unit that differs from provision-project's is rewritten and
 the daemon restarted. Ubuntu's `apparmor` package holds the profile that lets `/usr/bin/rootlesskit` create user
 namespaces. The daemon's user may read the project's run clones, which its Compose files bind-mount, and nothing else

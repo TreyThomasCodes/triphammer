@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {git, lines, run} from './fixture.mjs';
 import {changingCalls, machine, projectFiles, readdir, triphammerFiles} from './provision-fixture.mjs';
@@ -208,10 +208,30 @@ function dockerReady(t, options = {}) {
   const daemon = name => {
     const user = `triphammer-docker-${name}`;
     const dir = join(m.sys, 'var/lib', user);
-    return {user, home: join(m.root, 'home', user), dir, socket: join(dir, 'docker.sock'),
-      unit: join(m.root, 'home', user, '.config/systemd/user/docker.service'), checkout: join(m.root, 'srv', name)};
+    const home = join(m.root, 'home', user);
+    const units = join(home, '.config/systemd/user');
+    return {user, home, dir, socket: join(dir, 'docker.sock'), unit: join(units, 'docker.service'),
+      link: join(units, 'default.target.wants/docker.service'), data: join(home, '.local/share/docker'),
+      rootDirs: ['', '.config', '.config/systemd', '.config/systemd/user', '.config/systemd/user/default.target.wants', '.local',
+        '.local/share'].map(dir => join(home, dir)),
+      checkout: join(m.root, 'srv', name)};
   };
   return {...m, daemon, add: name => m.project(`example/${name}`, daemon(name).checkout)};
+}
+// Asserts that the daemon's home is as provision-project makes it: root owns each directory but the data-root, mode
+// 755, and the unit, mode 644, and the daemon's user the data-root, mode 700, and the unit is linked into
+// default.target.wants.
+function assertDaemonHome(m, d) {
+  const {owners} = m.machine();
+  for (const dir of d.rootDirs) {
+    assert.equal(owners[dir], 0, `${dir} is not root's`);
+    assert.equal(statSync(dir).mode & 0o777, 0o755, dir);
+  }
+  assert.equal(owners[d.unit], 0, `${d.unit} is not root's`);
+  assert.equal(statSync(d.unit).mode & 0o777, 0o644);
+  assert.equal(readlinkSync(d.link), d.unit);
+  assert.equal(owners[d.data], process.getuid(), `${d.data} is not the daemon user's`);
+  assert.equal(statSync(d.data).mode & 0o777, 0o700);
 }
 
 test('each project that declares "docker": true gets a rootless daemon of its own, which reads its run clones alone, and a second run changes nothing', t => {
@@ -223,14 +243,16 @@ test('each project that declares "docker": true gets a rootless daemon of its ow
     const result = m.add(name);
     assert.equal(result.status, 0, result.output);
   }
-  const {users, linger, enabled, acls} = m.machine();
+  const {users, linger, acls} = m.machine();
   const [compose, web] = [m.daemon('compose'), m.daemon('web-app')];
   for (const [d, range] of [[compose, '100000'], [web, '165536']]) {
-    // Its user: a home of its own, beside the service user's, in no group of the service user's.
+    // Its user: a home of its own, beside the service user's, in no group of the service user's, which root owns but
+    // for the daemon's data-root, with the unit root wrote enabled and started.
     assert.deepEqual(users[d.user], {home: d.home, groups: [d.user]});
     assert.ok(linger.includes(d.user), d.user);
-    assert.ok(enabled.includes(`${d.user}:docker.service`), d.user);
-    assert.ok(m.calls().some(call => call.join(' ') === `systemctl --machine=${d.user}@ --user enable --now docker.service`));
+    assertDaemonHome(m, d);
+    assert.deepEqual(readdir(d.home), ['.config', '.local']);
+    assert.ok(m.calls().some(call => call.join(' ') === `systemctl --machine=${d.user}@ --user start docker.service`));
     for (const kind of ['uid', 'gid']) {
       assert.match(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), new RegExp(`^${d.user}:${range}:65536$`, 'm'), kind);
     }
@@ -301,8 +323,10 @@ test('--dry-run of a cloned Docker project whose daemon is missing lists it and 
   const result = m.project('example/compose', d.checkout, '--dry-run');
   assert.equal(result.status, 0, result.output);
   for (const line of [`create the user ${d.user} with the home ${d.home}, for the rootless Docker daemon of compose`,
-    `turn lingering on for ${d.user}, so its user units run without a login`, `write ${d.unit}`,
-    `enable and start ${d.user}'s docker.service, the rootless Docker daemon of compose`, `write ${file}`]) {
+    `make ${d.home} root's, mode 755, so ${d.user} cannot change what it holds`,
+    `turn lingering on for ${d.user}, so its user units run without a login`, `write ${d.unit}, root's`,
+    `enable ${d.user}'s docker.service, the rootless Docker daemon of compose: link ${d.link} to it`,
+    `start ${d.user}'s docker.service`, `write ${file}`]) {
     assert.ok(result.stdout.includes(`would: ${line}\n`), `${line}\n${result.stdout}`);
   }
   assert.deepEqual(changingCalls(result.calls), []);
@@ -396,6 +420,57 @@ test('a daemon unit that is not provision-project\'s is rewritten, and the runni
   assert.deepEqual(changingCalls(result.calls).filter(([command]) => command === 'systemctl').map(call => call.join(' ')),
     [`systemctl --machine=${user}@ --user daemon-reload`, `systemctl --machine=${user}@ --user restart docker.service`]);
 });
+
+test('a rerun takes over a daemon home its user owns, without restarting the daemon', t => {
+  const m = dockerReady(t);
+  assert.equal(m.add('compose').status, 0);
+  const d = m.daemon('compose');
+  // The home as the daemon's user wrote it: each directory its own, mode 700, and the unit its own.
+  const state = m.machine();
+  state.owners = Object.fromEntries(Object.entries(state.owners)
+    .filter(([path]) => path === d.data || !`${path}/`.startsWith(`${d.home}/`)));
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+  for (const dir of d.rootDirs) chmodSync(dir, 0o700);
+  const result = m.add('compose');
+  assert.equal(result.status, 0, result.output);
+  for (const dir of d.rootDirs) assert.ok(result.stdout.includes(`+ make ${dir} root's, mode 755, so ${d.user} cannot change what it holds\n`), dir);
+  assert.ok(result.stdout.includes(`+ make ${d.unit} root's\n`), result.stdout);
+  assertDaemonHome(m, d);
+  assert.deepEqual(changingCalls(result.calls).filter(([command]) => command === 'systemctl'), []);
+  const again = m.add('compose');
+  assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+});
+
+for (const [what, plant, message] of [
+  ['a symlink in the place of its unit directory', d => {
+    rmSync(join(d.home, '.config/systemd/user'), {recursive: true});
+    symlinkSync(d.data, join(d.home, '.config/systemd/user'));
+  }, d => `${join(d.home, '.config/systemd/user')} is a symlink or not a directory, where ${d.user}'s home needs a directory root owns`],
+  ['a symlink in the place of its data-root', d => {
+    rmSync(d.data, {recursive: true});
+    symlinkSync('/tmp', d.data);
+  }, d => `${d.data} is a symlink or not a directory, where the daemon's data-root belongs`],
+  ['a unit, a drop-in and a D-Bus service it did not write', d => {
+    writeFileSync(join(d.home, '.config/systemd/user/other.service'), '[Service]\nExecStart=/bin/true\n');
+    mkdirSync(join(d.home, '.config/systemd/user/docker.service.d'));
+    mkdirSync(join(d.home, '.local/share/dbus-1/services'), {recursive: true});
+  }, d => `${d.user}'s home holds ${join(d.home, '.config/systemd/user/docker.service.d')} ${join(d.home, '.config/systemd/user/other.service')} `
+    + `${join(d.home, '.local/share/dbus-1')}, which provision-project did not write`],
+]) {
+  test(`${what} in a daemon's home stops provision-project with exit 1, naming it, and nothing is removed`, t => {
+    const m = dockerReady(t);
+    assert.equal(m.add('compose').status, 0);
+    const d = m.daemon('compose');
+    plant(d);
+    const before = run('find', [d.home]);
+    const result = m.add('compose');
+    assert.equal(result.status, 1, result.output);
+    assert.ok(result.stderr.includes(message(d)), result.stderr);
+    assert.match(result.stderr, /look at (it|each), remove it, then run provision-project again/);
+    assert.equal(run('find', [d.home]), before);
+    assert.deepEqual(changingCalls(result.calls).filter(([command]) => command === 'systemctl'), []);
+  });
+}
 
 test("a private project clones with the App's token, and the token never reaches the output", t => {
   const m = ready(t, {'example/example-project': projectFiles('example-project')}, {privateOrigins: true});

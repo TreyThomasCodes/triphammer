@@ -88,6 +88,19 @@ rootless_docker_sockets() {
     ! plain_socket "$socket" || printf '%s\n' "$socket"
   done < "$file"
 }
+# The directories of a rootless Docker daemon's user's home that root owns with mode 755, from the home (.) down, each
+# followed by the only entries it may hold: provision-project makes them (docker_home in bin/provision-lib.sh) and the
+# doctor checks them (docker_home_problem).
+# shellcheck disable=SC2034  # read by the scripts that source this file
+docker_home_shape=(
+  ". .config .local"
+  ".config systemd"
+  ".config/systemd user"
+  ".config/systemd/user docker.service default.target.wants"
+  ".config/systemd/user/default.target.wants docker.service"
+  ".local share"
+  ".local/share docker"
+)
 
 # How a project's checkout pins Playwright, for provision-project, which installs its Chromium, and the doctor, which
 # checks for it: each file `git ls-files -- "$playwright_manifests"` lists in the checkout names the version it asks
