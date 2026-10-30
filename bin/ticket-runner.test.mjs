@@ -738,9 +738,11 @@ test("the project's own Docker daemon is swept clean right before the session an
   assert.equal(r.ran(), true);
   const h = r.dockerHost;
   assert.deepEqual(daemonSweep(r), [
-    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`, ...prunes(h),
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`, `${h}|ps -aq`,
+    ...prunes(h), `${h}|ps -aq`,
     `${h}|info`,
-    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes ${db}-db-1`, ...prunes(h),
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes ${db}-db-1`, `${h}|ps -aq`,
+    ...prunes(h), `${h}|ps -aq`,
   ]);
   assert.equal(readFileSync(join(r.root, 'docker/ps.json'), 'utf8'), '[]', 'no container is left');
   const log = r.log();
@@ -758,10 +760,47 @@ test('the daemon sweep leaves a swarm and removes every plugin before it removes
   const h = r.dockerHost;
   assert.deepEqual(daemonSweep(r), [
     swarmState(h), `${h}|swarm leave --force`, `${h}|plugin ls -q`, `${h}|plugin rm -f plugin-a plugin-b`,
-    `${h}|ps -aq`, `${h}|rm -f --volumes service-task-db-1`, ...prunes(h),
-    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, ...prunes(h),
+    `${h}|ps -aq`, `${h}|rm -f --volumes service-task-db-1`, `${h}|ps -aq`, ...prunes(h), `${h}|ps -aq`,
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, ...prunes(h), `${h}|ps -aq`,
   ]);
   assert.equal(readFileSync(join(r.root, 'docker/plugins'), 'utf8'), '', 'no plugin is left');
+});
+
+test('the daemon sweep removes the containers again until none is left, counting each', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['left-behind', '']]);
+  r.docker.respawn(1);  // removing it starts a replacement once
+  r.tick();
+  assert.equal(r.ran(), true);
+  const h = r.dockerHost;
+  assert.deepEqual(daemonSweep(r).slice(0, 7), [
+    swarmState(h), `${h}|plugin ls -q`, `${h}|ps -aq`, `${h}|rm -f --volumes left-behind-db-1`,
+    `${h}|ps -aq`, `${h}|rm -f --volumes respawned-1-db-1`, `${h}|ps -aq`,
+  ]);
+  assert.match(r.log(), /ticket #7: swept the project's Docker daemon before the session: removed 2 containers and pruned/);
+});
+
+test('a daemon sweep that leaves a container on the daemon starts no session and is not counted', t => {
+  const r = ticketSetup(t);
+  r.docker.containers([['left-behind', '']]);
+  r.docker.respawn(99);  // every removal starts a replacement
+  assert.throws(() => r.tick(), error => error.status === 1);
+  assert.equal(r.ran(), false);
+  const h = r.dockerHost;
+  assert.equal(daemonSweep(r).filter(call => call.startsWith(`${h}|rm `)).length, 5, 'five rounds of removal');
+  assert.match(r.log(), /ticket #7: could not sweep the project's Docker daemon clean, so no session starts; not counted: 1 container is still on the daemon after its removal and the prunes\n/);
+  assert.equal(readFileSync(join(r.root, 'state/ticket-runner/attempts/ticket-7'), 'utf8').trim(), '0');
+  assert.deepEqual(r.tokenCalls(), []);
+});
+
+test('a daemon sweep after the session that leaves a container on the daemon is logged', t => {
+  const r = ticketSetup(t);
+  const during = join(r.root, 'during.sh');  // the session leaves a container that replaces itself
+  writeFileSync(during, `#!/bin/sh\nprintf '[["left-behind",""]]' > "$PROBE/docker/ps.json"\nprintf 99 > "$PROBE/docker/respawn"\n`, {mode: 0o755});
+  r.tick({DURING_SESSION: during});
+  assert.equal(r.ran(), true);
+  const log = r.log();
+  assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: 1 container is still on the daemon after its removal and the prunes\n/);
 });
 
 test('a daemon sweep whose swarm leave fails starts no session', t => {

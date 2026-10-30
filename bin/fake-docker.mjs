@@ -12,7 +12,8 @@
 // unix:///var/run/docker.sock: it appends `<daemon>|<arguments>` to <dir>/hosts, and fails the call as docker does
 // when its daemon is down when <dir>/refuse lists that daemon, but for `compose version`, which asks no daemon. `run ... sh -c <script>` does nothing unless
 // <dir>/writes exists, and then creates, outside, each file the script's `touch /host<path>` names, as a container
-// that may write through its mount of / would.
+// that may write through its mount of / would. While <dir>/respawn holds a count above 0, each `rm` lowers it by one
+// and adds a container `respawned-<count>` to ps.json, as a container replacing itself through the daemon's socket would.
 import {appendFileSync, existsSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 
@@ -76,4 +77,10 @@ if (args[0] === 'info' && args.includes('{{.Swarm.LocalNodeState}}')) {
   }
   for (const [name] of containers.filter(([name]) => name === project)) console.error(` Container ${name}-db-1  Removed`);
   writeFileSync(psFile, JSON.stringify(containers.filter(([name]) => name !== project)));
+}
+const respawnFile = join(dir, 'respawn');
+const respawns = existsSync(respawnFile) ? Number(readFileSync(respawnFile, 'utf8')) : 0;
+if (args[0] === 'rm' && respawns > 0) {
+  writeFileSync(respawnFile, String(respawns - 1));
+  writeFileSync(psFile, JSON.stringify([...JSON.parse(readFileSync(psFile, 'utf8')), [`respawned-${respawns}`, '']]));
 }

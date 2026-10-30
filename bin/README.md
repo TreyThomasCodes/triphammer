@@ -574,14 +574,16 @@ tick or a killed gate run never stops them. So:
   project, the runner sweeps that daemon clean, with `DOCKER_HOST` naming its socket: `docker swarm leave --force`
   when `docker info` says the daemon is in a swarm (whose orchestrator would start a removed service's tasks again),
   `docker plugin rm -f` on every plugin `docker plugin ls -q` lists, `docker rm -f --volumes` on
-  every container `docker ps -aq` lists, running or stopped, then `docker volume prune -af` (named volumes too),
-  `docker network prune -f`, `docker image prune -af` and `docker builder prune -af` (the build cache). A session's
+  every container `docker ps -aq` lists, running or stopped, again until `docker ps -aq` lists none (at most 5 rounds,
+  since a container that reaches the daemon's socket can start another while it is removed), then `docker volume
+  prune -af` (named volumes too), `docker network prune -f`, `docker image prune -af` and `docker builder prune -af`
+  (the build cache), and a last `docker ps -aq` that must list no container. A session's
   containers are children of the daemon, not of the session, so ending the session stops none of them. Only the
   project's sessions reach the daemon and its lock lets one run at a time, so nothing another run or project uses
   goes. It logs `<action>: swept the project's Docker daemon before the session: removed <n> containers and pruned the
   volumes, networks, images and build cache`, and `after the session` the second time. A sweep that fails before the
   session logs `<action>: could not sweep the project's Docker daemon clean, so no session starts; not counted: <the
-  docker command that failed and its last line>`, starts no session and does not count the run. One that fails after
+  docker command that failed and its last line, or how many containers are still on the daemon>`, starts no session and does not count the run. One that fails after
   the session logs `<action>: could not sweep the project's Docker daemon after the session: ...` and the run goes on;
   the next session's sweep removes what it left. A run's database is therefore gone once its session ends, even when
   the run keeps its clone for the next one, and the clone's teardown runs on the swept daemon.

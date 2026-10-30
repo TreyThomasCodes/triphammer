@@ -296,14 +296,16 @@ sweep_docker() {
 }
 
 # Sweeps the project's own rootless Docker daemon clean: removes every container on it, running or not, with its
-# anonymous volumes, then every volume (-a: named ones too), every network Docker did not create, every image and the
-# build cache, so nothing a session started or left there runs on or carries over into a later session. Only this
-# project's sessions reach that daemon, and its lock (fd 9) lets one run at a time, so nothing else's is removed. It
-# runs right before each session starts and right after it ends. On success it prints what it did, on failure the
-# command that failed and docker's last line; with no rootless daemon of this project in the machine file it prints
-# nothing and asks Docker nothing.
+# anonymous volumes, listing them again and removing what it lists until none is left (at most 5 rounds, since a
+# container that reaches the daemon's socket can start another while it is removed), then every volume (-a: named ones
+# too), every network Docker did not create, every image and the build cache, so nothing a session started or left
+# there runs on or carries over into a later session. It fails when a container is still on the daemon after that.
+# Only this project's sessions reach that daemon, and its lock (fd 9) lets one run at a time, so nothing else's is
+# removed. It runs right before each session starts and right after it ends. On success it prints what it did, on
+# failure the command that failed and docker's last line, or how many containers are left; with no rootless daemon of
+# this project in the machine file it prints nothing and asks Docker nothing.
 sweep_daemon() {
-  local ids out step count
+  local out step count=0 left
   [ -n "$docker_host" ] || return 0
   local -x DOCKER_HOST="$docker_host"
   if ! command -v docker >/dev/null 2>&1; then echo "docker is not installed"; return 1; fi
@@ -313,14 +315,22 @@ sweep_daemon() {
   sweep_docker 'plugin ls -q' || return 1
   # shellcheck disable=SC2086  # one plugin id per word
   [ -z "$out" ] || sweep_docker 'plugin rm -f' $out || return 1
-  sweep_docker 'ps -aq' || return 1
-  ids="$out"
-  # shellcheck disable=SC2086  # one container id per word
-  [ -z "$ids" ] || sweep_docker 'rm -f --volumes' $ids || return 1
+  for _ in 1 2 3 4 5; do
+    sweep_docker 'ps -aq' || return 1
+    [ -n "$out" ] || break
+    count=$((count + $(wc -w <<< "$out")))
+    # shellcheck disable=SC2086  # one container id per word
+    sweep_docker 'rm -f --volumes' $out || return 1
+  done
   for step in 'volume prune -af' 'network prune -f' 'image prune -af' 'builder prune -af'; do
     sweep_docker "$step" || return 1
   done
-  count="$(wc -w <<< "$ids")"
+  sweep_docker 'ps -aq' || return 1
+  if [ -n "$out" ]; then
+    left="$(wc -w <<< "$out")"
+    echo "$left container$([ "$left" = 1 ] && echo ' is' || echo 's are') still on the daemon after its removal and the prunes"
+    return 1
+  fi
   echo "removed $count container$([ "$count" = 1 ] || echo s) and pruned the volumes, networks, images and build cache"
 }
 
