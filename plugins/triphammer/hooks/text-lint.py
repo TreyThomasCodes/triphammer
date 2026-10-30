@@ -5,7 +5,7 @@
 # PreToolUse on Bash: checks `gh pr create|new|edit`, `gh issue create|new|edit` (and glab's mr/issue
 # create|new|edit|update) and `git commit`. Each command of a list, pipeline, subshell or substitution is found by its
 # words, parsed by agent-guard.py's shell parsing (loaded from beside this file): after variable assignments and the
-# wrappers it strips (env with its options, command, sudo, time, nohup, exec, nice, stdbuf, timeout, builtin), named
+# wrappers it strips (sudo, env, command, nohup, time and timeout, with their options), named
 # by its name or any path to it, quoted or escaped, with gh's -R/--repo and git's options (-C, -c, --no-pager...)
 # before the subcommand. The text comes from --title/-t and --body/-b (glab: --description/-d), git's -m/--message,
 # a heredoc the command reads, or a --body-file/-F file; a value may be the next word, attached (`-b'text'`, `-am msg`)
@@ -30,7 +30,7 @@
 #
 # Code spans and fenced blocks are not prose. `gh pr comment` and issue comments are not checked.
 # `# text-lint-override: <reason>` anywhere in the command lets that one command through. Anything else the hook cannot
-# work out (malformed input, an exception, agent-guard.py missing or its parse out of time) allows the command: it
+# work out (malformed input, an exception, agent-guard.py missing) allows the command: it
 # never blocks on its own failure, except that the humanizer gate refuses when it cannot read its state.
 #
 # PostToolUse on Skill: records a run of the humanizer skill for the session_id in the state directory,
@@ -88,6 +88,9 @@ TOOLS = {"gh": GH, "glab": GLAB}
 COMMIT_OPTIONS = ("mFcCt", {"--message", "--file", "--author", "--date", "--cleanup", "--trailer", "--fixup",
                             "--squash", "--reuse-message", "--reedit-message", "--template", "--pathspec-from-file"})
 ATTACHED_ONLY = {"git": "Su"}
+# git's options before the subcommand that take the next word as their value.
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix",
+                     "--attr-source", "--list-cmds"}
 # git commit --amend --no-edit keeps the commit's message unless one of these gives another.
 MESSAGE_SOURCES = {"-m", "--message", "-F", "--file", "-c", "-C", "--reuse-message", "--reedit-message"}
 MARKER = re.compile(r"\x00(\d+)\x00")  # agent-guard's mark of a heredoc body, also inside a word: "$(cat <<EOF ...)"
@@ -244,7 +247,7 @@ def posting_commands(cmd, cwd):
                     value = args[i].value
                     if value == "-C" and i + 1 < len(args) and isinstance(directory, str):
                         directory = os.path.join(directory, os.path.expanduser(args[i + 1].value))
-                    i += 2 if value in guard.GIT_VALUE_OPTIONS else 1
+                    i += 2 if value in GIT_VALUE_OPTIONS else 1
                 if i >= len(args) or args[i].value != "commit":
                     continue
                 amend_as_is = {"--amend", "--no-edit"} <= {w.value for w in args[i + 1:]}
