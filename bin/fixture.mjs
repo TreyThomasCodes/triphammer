@@ -103,6 +103,13 @@ export function freePort() {
     });
   });
 }
+// A Unix socket listening at `path` for the rest of the test, which closes every connection; resolves to its server.
+export async function listenUnix(t, path) {
+  const server = net.createServer(connection => connection.destroy());
+  await new Promise((resolve, reject) => server.once('error', reject).listen(path, resolve));
+  t.after(() => server.close());
+  return server;
+}
 // Sets the test process's umask, which the scripts inherit, for one test.
 export function withUmask(t, mask) {
   const before = process.umask(mask);

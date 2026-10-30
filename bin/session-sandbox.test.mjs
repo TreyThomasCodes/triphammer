@@ -2,9 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
-import {createServer} from 'node:net';
 import {delimiter, dirname, join} from 'node:path';
-import {fakeAnswers, fakeDocker, git, gitEnv, here, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
+import {fakeAnswers, fakeDocker, git, gitEnv, here, listenUnix, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
@@ -561,11 +560,7 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
   mkdirSync(join(runtime, 'gnupg'), {recursive: true, mode: 0o700});
   const sockets = {bus: join(runtime, 'bus'), agent: join(runtime, 'openssh_agent'),
     gpg: join(runtime, 'gnupg/S.gpg-agent'), docker: join(runtime, 'docker.sock')};
-  for (const path of Object.values(sockets)) {
-    const server = createServer(socket => socket.destroy());
-    await new Promise((resolve, reject) => server.once('error', reject).listen(path, resolve));
-    t.after(() => server.close());
-  }
+  for (const path of Object.values(sockets)) await listenUnix(t, path);
   const env = {XDG_RUNTIME_DIR: runtime, DBUS_SESSION_BUS_ADDRESS: `unix:path=${sockets.bus}`,
     SSH_AUTH_SOCK: sockets.agent, GPG_AGENT_INFO: `${sockets.gpg}:0:1`, DOCKER_HOST: `unix://${sockets.docker}`,
     TRIPHAMMER_DOCKER: '1'};
@@ -591,9 +586,7 @@ test("under the limit, the runtime directory's bus and agent sockets cannot be r
 
 // A Docker socket outside the limit that DOCKER_HOST names, listening, and the machine's own Docker sockets.
 async function dockerSocket(t, r, socket = join(r.root, 'docker.sock')) {
-  const server = createServer(connection => connection.destroy());
-  await new Promise((resolve, reject) => server.once('error', reject).listen(socket, resolve));
-  t.after(() => server.close());
+  const server = await listenUnix(t, socket);
   return {socket, server, env: {DOCKER_HOST: `unix://${socket}`}};
 }
 // What a daemon restart does to its socket: closes it, deletes it and listens at the same path again.

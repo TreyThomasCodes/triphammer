@@ -1,10 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync} from 'node:fs';
-import {createServer} from 'node:net';
 import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
-import {exampleProject, git, here, lines, manyLabels, projectJson, realCommand, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
+import {exampleProject, git, here, lines, listenUnix, manyLabels, projectJson, realCommand, run, runClone, runnerSetup, withUmask, writeConfig} from './fixture.mjs';
 
 const repo = 'Example-Owner/example-project';
 // The issues' author, in the shape `gh issue list --json author` returns for the App.
@@ -673,9 +672,7 @@ for (const [declared, docker, hidden] of [['without docker', undefined, true], [
   test(`a project's Docker setting reaches the write limit: a project ${declared} ${hidden ? 'gets no' : 'keeps its'} Docker socket`, async t => {
     const r = ticketSetup(t, [issue(7)], {project: docker === undefined ? projectJson : `${JSON.stringify({...example, docker})}\n`});
     const socket = join(r.root, 'docker.sock');
-    const server = createServer(connection => connection.destroy());
-    await new Promise((resolve, reject) => server.once('error', reject).listen(socket, resolve));
-    t.after(() => server.close());
+    await listenUnix(t, socket);
     r.tick({DOCKER_HOST: `unix://${socket}`});
     assert.equal(r.ran(), true);
     const calls = r.bwrapCalls();
