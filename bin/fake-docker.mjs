@@ -64,7 +64,14 @@ if (args[0] === 'info' && args.includes('{{.Swarm.LocalNodeState}}')) {
 } else if (args[0] === 'ps' && args.includes('-aq')) {
   for (const [project] of containers) console.log(`${project}-db-1`);
 } else if (args[0] === 'rm') {
-  writeFileSync(psFile, JSON.stringify(containers.filter(([project]) => !args.includes(`${project}-db-1`))));
+  const left = containers.filter(([project]) => !args.includes(`${project}-db-1`));
+  const respawnFile = join(dir, 'respawn');
+  const respawns = existsSync(respawnFile) ? Number(readFileSync(respawnFile, 'utf8')) : 0;
+  if (respawns > 0) {
+    writeFileSync(respawnFile, String(respawns - 1));
+    left.push([`respawned-${respawns}`, '']);
+  }
+  writeFileSync(psFile, JSON.stringify(left));
 } else if (args[0] === 'ps') {
   for (const [project, workingDir] of containers) console.log(`${project}\t${workingDir}`);
 } else if (args[0] === 'compose' && args.includes('down')) {
@@ -77,10 +84,4 @@ if (args[0] === 'info' && args.includes('{{.Swarm.LocalNodeState}}')) {
   }
   for (const [name] of containers.filter(([name]) => name === project)) console.error(` Container ${name}-db-1  Removed`);
   writeFileSync(psFile, JSON.stringify(containers.filter(([name]) => name !== project)));
-}
-const respawnFile = join(dir, 'respawn');
-const respawns = existsSync(respawnFile) ? Number(readFileSync(respawnFile, 'utf8')) : 0;
-if (args[0] === 'rm' && respawns > 0) {
-  writeFileSync(respawnFile, String(respawns - 1));
-  writeFileSync(psFile, JSON.stringify([...JSON.parse(readFileSync(psFile, 'utf8')), [`respawned-${respawns}`, '']]));
 }
