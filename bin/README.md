@@ -229,7 +229,7 @@ project can take that one, so no project yields. An older mark, from a project t
 so it cannot hold the others back. `ticket-runner --plan` reads none of this and writes nothing.
 
 Sessions of several projects that declare `"docker": true` running at once share the machine's rootless Docker daemon,
-its containers and volumes included. Each tick's database sweep prunes the Compose
+its containers, images, volumes, networks and build cache included. Each tick's database sweep prunes the Compose
 projects its `composeProjectPattern` matches whose run directory is gone, so when two projects' patterns can match the same
 Compose project name, one project's sweep could prune the other's containers while both run; `triphammer doctor`
 warns about such a pair.
@@ -412,12 +412,13 @@ world-readable there and the run clones in `<checkout>/.worktrees`, which the se
 what that user may (its own home, and whatever on the machine is world-writable), and it reaches the containers,
 images, volumes, networks and build cache of every project that declares Docker, which share the daemon; what a
 session starts or leaves on the daemon (a container run detached or with a restart policy, an image, such as one
-re-tagged under a name a later session pulls, a volume) outlives the session, a container running on through later
-sessions and reboots, and is there for later sessions of every project that declares Docker; a Docker daemon a session
-reaches some other way than the sockets above (a socket elsewhere, a Docker context, TCP), or, for a project that does
-not declare Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the session, or that lies directly in
-`/`; abstract Unix sockets, services listening on the machine's localhost, such as another project's
-containers, as the network is shared, and the system bus; a NuGet user config, or a part of `~/.claude` or `~/.codex`, that is a symlink into a writable path,
+re-tagged under a name a later session runs or builds from, a volume) outlives the session, a container running on
+through later sessions and reboots, and is there for later sessions of every project that declares Docker; a Docker
+daemon a session reaches some other way than the sockets above (a socket elsewhere, a Docker context, TCP), or, for a
+project that does not declare Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the
+session, or that lies directly in `/`; abstract Unix sockets, services listening on the machine's localhost, such as
+another project's containers, as the network is shared, and the system bus; a NuGet user config, or a part of
+`~/.claude` or `~/.codex`, that is a symlink into a writable path,
 which the session writes through; memory a session writes in another project's directory under `~/.claude/projects`,
 which a Claude Code run outside the limit would load for that project; what a session writes to its project's cache
 directory, which a later session of the same project reads and runs, such as a package in `nuget/packages` whose

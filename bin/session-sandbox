@@ -101,12 +101,12 @@
 # <checkout>/.worktrees, which the command could read already, and writes what that user may (its own home, and
 # whatever on the machine is world-writable), and the containers, images, volumes, networks and build cache of every
 # project that declares Docker, which share that daemon; what the command starts or leaves on that daemon (a container
-# run detached or with a restart policy, an image, such as one re-tagged under a name a later session pulls, a volume)
-# outlives the session, a container running on through later sessions and reboots, and is there for later sessions
-# of every project that declares Docker; a Docker daemon reached some other way than the sockets above (a socket
-# elsewhere, a Docker context, TCP), a DOCKER_HOST socket whose directory is deleted and made again while the command
-# runs, or one directly in /; and abstract Unix sockets, services listening on the machine's localhost, as the network
-# is shared, and the system bus, which the command can reach too.
+# run detached or with a restart policy, an image, such as one re-tagged under a name a later session runs or builds
+# from, a volume) outlives the session, a container running on through later sessions and reboots, and is there for
+# later sessions of every project that declares Docker; a Docker daemon reached some other way than the sockets above
+# (a socket elsewhere, a Docker context, TCP), a DOCKER_HOST socket whose directory is deleted and made again while the
+# command runs, or one directly in /; and abstract Unix sockets, services listening on the machine's localhost, as the
+# network is shared, and the system bus, which the command can reach too.
 #
 # Exit status: the command's, or 2 for bad arguments, or 1 when the run directory is no git checkout, its git directory
 # lies outside it, TRIPHAMMER_TOKEN_FILE lies elsewhere than in a directory of the tokens directory,
