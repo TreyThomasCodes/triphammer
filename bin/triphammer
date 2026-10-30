@@ -54,6 +54,7 @@ set -euo pipefail
 
 root="${TRIPHAMMER_PROVISION_ROOT:-}"
 git_base="${TRIPHAMMER_PROVISION_GIT_BASE:-https://github.com/}"
+# The machine file's path, as machine_path in config.sh names it: root runs this script and must not source config.sh.
 machine_file="$root/etc/triphammer.conf"
 
 usage() {
