@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {git, lines, run} from './fixture.mjs';
 import {changingCalls, machine, projectFiles, readdir, triphammerFiles} from './provision-fixture.mjs';
@@ -198,48 +198,203 @@ test('two projects, with their modules, get one config and their own extras each
   }
 });
 
-test('a project that declares "docker": true lets the rootless daemon\'s user read its run clones alone, and a second run changes nothing', t => {
-  const m = ready(t, {
-    'example/compose': {'.triphammer/project.json': JSON.stringify({name: 'compose', docker: true})},
-    'example/other': {'.triphammer/project.json': JSON.stringify({name: 'other', docker: false})},
-  });
-  const checkout = join(m.root, 'srv/compose');
+// The origin of a project named `name` whose project file declares `docker`.
+const dockerProject = (name, docker = true) => ({'.triphammer/project.json': JSON.stringify({name, docker})});
+// A machine provision has set up with the Docker projects compose and web-app and the project other without Docker,
+// each checked out under <root>/srv; `daemon(name)` is the paths of a Docker project's daemon.
+function dockerReady(t, options = {}) {
+  const m = ready(t, {'example/compose': dockerProject('compose'), 'example/web-app': dockerProject('web-app'),
+    'example/other': dockerProject('other', false)}, options);
+  const daemon = name => {
+    const user = `triphammer-docker-${name}`;
+    const dir = join(m.sys, 'var/lib', user);
+    return {user, home: join(m.root, 'home', user), dir, socket: join(dir, 'docker.sock'),
+      unit: join(m.root, 'home', user, '.config/systemd/user/docker.service'), checkout: join(m.root, 'srv', name)};
+  };
+  return {...m, daemon, add: name => m.project(`example/${name}`, daemon(name).checkout)};
+}
+
+test('each project that declares "docker": true gets a rootless daemon of its own, which reads its run clones alone, and a second run changes nothing', t => {
+  const m = dockerReady(t);
+  const machineFile = join(m.sys, 'etc/triphammer.conf');
+  const provisioned = readFileSync(machineFile, 'utf8');
   const before = m.machine().acls;
-  const first = m.project('example/compose', checkout);
-  assert.equal(first.status, 0, first.output);
-  const worktrees = join(checkout, '.worktrees');
-  assert.ok(statSync(worktrees).isDirectory());
-  // Read and search on .worktrees, inherited by each clone made there; search alone on the directories above that are
-  // the service user's (on the fake machine, those the caller owns, from the checkout up past the temporary directory).
-  const {[worktrees]: clones, ...added} = Object.fromEntries(Object.entries(m.machine().acls).filter(([path]) => !before[path]));
-  assert.deepEqual(clones, ['user:triphammer-docker:r-x', 'default:user:triphammer-docker:r-x']);
-  for (const dir of [checkout, join(m.root, 'srv'), m.root]) assert.ok(added[dir], dir);
-  for (const [dir, entries] of Object.entries(added)) {
-    assert.ok(`${checkout}/`.startsWith(`${dir}/`), `${dir} is not above the checkout`);
-    assert.deepEqual(entries, ['user:triphammer-docker:--x'], dir);
+  for (const name of ['compose', 'web-app']) {
+    const result = m.add(name);
+    assert.equal(result.status, 0, result.output);
   }
-  assert.ok(!Object.keys(added).some(path => path.startsWith(m.home)), 'the daemon\'s user may reach the service user\'s home');
+  const {users, linger, enabled, acls} = m.machine();
+  const [compose, web] = [m.daemon('compose'), m.daemon('web-app')];
+  for (const [d, range] of [[compose, '100000'], [web, '165536']]) {
+    // Its user: a home of its own, beside the service user's, in no group of the service user's.
+    assert.deepEqual(users[d.user], {home: d.home, groups: [d.user]});
+    assert.ok(linger.includes(d.user), d.user);
+    assert.ok(enabled.includes(`${d.user}:docker.service`), d.user);
+    assert.ok(m.calls().some(call => call.join(' ') === `systemctl --machine=${d.user}@ --user enable --now docker.service`));
+    for (const kind of ['uid', 'gid']) {
+      assert.match(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), new RegExp(`^${d.user}:${range}:65536$`, 'm'), kind);
+    }
+    // Its socket's directory: the daemon's user's, mode 700, which the service user may only search (the group bits are
+    // the ACL's mask, --x); the unit gives the service user the socket itself.
+    assert.equal(statSync(d.dir).mode & 0o777, 0o710);
+    assert.ok(m.calls().some(call => call.join(' ') === `chown -- ${d.user}: ${d.dir}`), `${d.dir} is not the daemon user's`);
+    assert.deepEqual(acls[d.dir], ['user:triphammer:--x']);
+    const unit = readFileSync(d.unit, 'utf8');
+    assert.match(unit, new RegExp(`^ExecStart=/usr/bin/dockerd-rootless\\.sh --host=unix://${d.socket}$`, 'm'));
+    assert.match(unit, new RegExp(`^ExecStartPost=/usr/bin/setfacl -m user:triphammer:rw- ${d.socket}$`, 'm'));
+    assert.match(unit, /^Type=notify$/m);
+    assert.match(unit, /^WantedBy=default\.target$/m);
+    // Read and search on its own project's .worktrees alone, inherited by each clone made there.
+    const worktrees = join(d.checkout, '.worktrees');
+    assert.ok(statSync(worktrees).isDirectory());
+    assert.deepEqual(acls[worktrees], [`user:${d.user}:r-x`, `default:user:${d.user}:r-x`]);
+  }
+  assert.ok(!users['triphammer-docker'], 'a shared daemon user was made');
+  // Search alone on the directories above each checkout that are the service user's (on the fake machine, those the
+  // caller owns, from the checkout up past the temporary directory), and nothing on the other project's checkout.
+  const added = Object.fromEntries(Object.entries(acls).filter(([path]) => !before[path] && !path.startsWith(join(m.sys, 'var/lib'))
+    && !path.endsWith('/.worktrees')));
+  for (const dir of [compose.checkout, web.checkout, join(m.root, 'srv'), m.root]) assert.ok(added[dir], dir);
+  for (const [dir, entries] of Object.entries(added)) {
+    const users = [compose, web].filter(d => `${d.checkout}/`.startsWith(`${dir}/`)).map(d => `user:${d.user}:--x`);
+    assert.ok(users.length, `${dir} is above neither checkout`);
+    assert.deepEqual(entries, users, dir);
+  }
+  assert.ok(!Object.keys(acls).some(path => path.startsWith(m.home)), 'a daemon\'s user may reach the service user\'s home');
+  // The machine file: what provision wrote, then each project's user and socket.
+  assert.equal(readFileSync(machineFile, 'utf8'), `${provisioned}TRIPHAMMER_DOCKER_USER_COMPOSE=${compose.user}\n`
+    + `TRIPHAMMER_DOCKER_SOCKET_COMPOSE=${compose.socket}\nTRIPHAMMER_DOCKER_USER_WEB_APP=${web.user}\n`
+    + `TRIPHAMMER_DOCKER_SOCKET_WEB_APP=${web.socket}\n`);
+  assert.equal(statSync(machineFile).mode & 0o777, 0o644);
 
-  const again = m.project('example/compose', checkout);
-  assert.equal(again.status, 0, again.output);
-  assert.deepEqual(changingCalls(again.calls), []);
-
-  // A project without Docker gives the daemon's user nothing.
-  const acls = m.machine().acls;
-  const other = m.project('example/other', join(m.root, 'other'));
+  const machineText = readFileSync(machineFile, 'utf8');
+  for (const name of ['compose', 'web-app']) {
+    const again = m.add(name);
+    assert.equal(again.status, 0, again.output);
+    assert.match(again.stdout, /^Nothing to change: the machine is as asked\.$/m);
+    assert.deepEqual(changingCalls(again.calls), []);
+  }
+  // A project without Docker gets no daemon, and gives no daemon's user anything.
+  const state = m.machine();
+  const other = m.add('other');
   assert.equal(other.status, 0, other.output);
-  assert.deepEqual(m.machine().acls, acls);
-  assert.ok(!existsSync(join(m.root, 'other/.worktrees')));
+  assert.deepEqual(m.machine().acls, state.acls);
+  assert.deepEqual(Object.keys(m.machine().users), Object.keys(state.users));
+  assert.ok(!existsSync(join(m.daemon('other').checkout, '.worktrees')));
+  assert.equal(readFileSync(machineFile, 'utf8'), machineText);
+  // provision again keeps the projects' keys.
+  assert.equal(m.provision('--triphammer', 'example/triphammer', join(m.root, 'triphammer'), '--home', m.home).status, 0);
+  assert.equal(readFileSync(machineFile, 'utf8'), machineText);
 });
 
-test('a Docker project on a machine whose file names no rootless daemon stops provision-project with exit 1', t => {
-  const m = ready(t, {'example/compose': {'.triphammer/project.json': JSON.stringify({name: 'compose', docker: true})}});
+test('--dry-run of a cloned Docker project whose daemon is missing lists it and changes nothing', t => {
+  const m = dockerReady(t);
+  assert.equal(m.add('compose').status, 0);
+  const d = m.daemon('compose');
+  const state = m.machine();
+  const {[d.user]: _, ...users} = state.users;
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify({...state, users, enabled: [], linger: ['triphammer']}));
+  rmSync(d.home, {recursive: true});
   const file = join(m.sys, 'etc/triphammer.conf');
-  writeFileSync(file, readFileSync(file, 'utf8').split('\n').filter(line => !line.startsWith('TRIPHAMMER_DOCKER_')).join('\n'));
-  const result = m.project('example/compose', join(m.root, 'compose'));
+  const text = readFileSync(file, 'utf8');
+  writeFileSync(file, text.split('\n').filter(line => !line.startsWith('TRIPHAMMER_DOCKER_')).join('\n'));
+  const result = m.project('example/compose', d.checkout, '--dry-run');
+  assert.equal(result.status, 0, result.output);
+  for (const line of [`create the user ${d.user} with the home ${d.home}, for the rootless Docker daemon of compose`,
+    `turn lingering on for ${d.user}, so its user units run without a login`, `write ${d.unit}`,
+    `enable and start ${d.user}'s docker.service, the rootless Docker daemon of compose`, `write ${file}`]) {
+    assert.ok(result.stdout.includes(`would: ${line}\n`), `${line}\n${result.stdout}`);
+  }
+  assert.deepEqual(changingCalls(result.calls), []);
+  assert.ok(!existsSync(d.home));
+});
+
+for (const [what, name, message] of [
+  ['is too long for a user name', 'a-project-name-too-long', /the rootless Docker daemon of a-project-name-too-long would run as triphammer-docker-a-project-name-too-long, 41 characters, and a user name has at most 32; give the project a shorter name/],
+  ['cannot name a daemon', 'Compose_App', /the project Compose_App declares "docker": true, and its name cannot name a rootless Docker daemon: rename the project/],
+]) {
+  test(`a Docker project whose name ${what} stops provision-project with exit 1 before its daemon or config is made`, t => {
+    const m = ready(t, {'example/compose': dockerProject(name)});
+    const machineText = readFileSync(join(m.sys, 'etc/triphammer.conf'), 'utf8');
+    const result = m.project('example/compose', join(m.root, 'srv/compose'));
+    assert.equal(result.status, 1, result.output);
+    assert.match(result.stderr, message);
+    assert.ok(!changingCalls(result.calls).some(([command]) => ['useradd', 'setfacl', 'systemctl', 'usermod'].includes(command)));
+    assert.equal(readFileSync(join(m.sys, 'etc/triphammer.conf'), 'utf8'), machineText);
+    assert.ok(!existsSync(join(m.home, `.config/triphammer/${name}.conf`)), 'the config was written');
+  });
+}
+// The longest name that fits: 14 characters, 32 with the service user's prefix triphammer-docker-.
+test('a Docker project whose daemon user has 32 characters gets its daemon', t => {
+  const m = ready(t, {'example/compose': dockerProject('a-name-of-four')});
+  const result = m.project('example/compose', join(m.root, 'srv/compose'));
+  assert.equal(result.status, 0, result.output);
+  assert.ok(m.machine().users['triphammer-docker-a-name-of-four'], JSON.stringify(m.machine().users));
+});
+
+test('a Docker project on a machine without the rootless daemon\'s packages stops provision-project with exit 1', t => {
+  const m = ready(t, {'example/compose': dockerProject('compose')});
+  const state = m.machine();
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify({...state,
+    packages: state.packages.filter(name => name !== 'docker-ce-rootless-extras')}));
+  const result = m.project('example/compose', join(m.root, 'srv/compose'));
   assert.equal(result.status, 1, result.output);
-  assert.match(result.stderr, /declares "docker": true, and .*triphammer\.conf names no rootless Docker daemon's user that exists; run triphammer update/);
-  assert.ok(!changingCalls(result.calls).some(([command]) => command === 'setfacl'));
+  assert.match(result.stderr, /the rootless Docker daemon's packages are missing; run triphammer update \(or bin\/provision\) first/);
+  assert.ok(!changingCalls(result.calls).some(([command]) => command === 'useradd'));
+});
+
+test("with Ubuntu's Docker packages the daemon runs docker.io's own rootless script", t => {
+  const m = dockerReady(t, {dockerRepo: false});
+  assert.equal(m.add('compose').status, 0);
+  assert.match(readFileSync(m.daemon('compose').unit, 'utf8'),
+    /^ExecStart=\/usr\/share\/docker\.io\/contrib\/dockerd-rootless\.sh --host=unix:\/\//m);
+});
+
+test('a rerun keeps the service user\'s search on the socket\'s directory in effect, and gives it back once a chmod masks it', t => {
+  const m = dockerReady(t);
+  const {dir} = m.daemon('compose');
+  // The service user's entry as getfacl writes it with each entry's effective rights, which the ACL's mask limits.
+  const entry = () => run('getfacl', ['-cp', '--', dir], {env: m.env}).split('\n').find(line => line.startsWith('user:triphammer:'));
+  for (const name of ['first', 'second']) {
+    const result = m.add('compose');
+    assert.equal(result.status, 0, result.output);
+    assert.equal(entry(), 'user:triphammer:--x', `after the ${name} run`);
+  }
+  chmodSync(dir, 0o700);
+  assert.equal(entry(), 'user:triphammer:--x\t#effective:---');
+  const repair = m.add('compose');
+  assert.equal(repair.status, 0, repair.output);
+  assert.equal(entry(), 'user:triphammer:--x');
+  assert.equal(statSync(dir).mode & 0o777, 0o710);
+});
+
+test('a daemon\'s user that is in the service user\'s group or the docker group leaves them, and subordinate ids useradd gave it stay', t => {
+  const m = dockerReady(t);
+  assert.equal(m.add('compose').status, 0);
+  const {user} = m.daemon('compose');
+  const state = m.machine();
+  state.users[user].groups.push('triphammer', 'docker');
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+  for (const kind of ['uid', 'gid']) writeFileSync(join(m.sys, `etc/sub${kind}`), `${user}:300000:65536\n`);
+  const result = m.add('compose');
+  assert.equal(result.status, 0, result.output);
+  assert.deepEqual(changingCalls(result.calls).map(call => call.join(' ')),
+    [`gpasswd -d ${user} triphammer`, `gpasswd -d ${user} docker`]);
+  assert.deepEqual(m.machine().users[user].groups, [user]);
+  for (const kind of ['uid', 'gid']) assert.equal(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), `${user}:300000:65536\n`);
+});
+
+test('a daemon unit that is not provision-project\'s is rewritten, and the running daemon restarted with it', t => {
+  const m = dockerReady(t);
+  assert.equal(m.add('compose').status, 0);
+  const {user, unit} = m.daemon('compose');
+  const ours = readFileSync(unit, 'utf8');
+  writeFileSync(unit, '[Service]\nExecStart=/usr/bin/dockerd-rootless.sh\n');
+  const result = m.add('compose');
+  assert.equal(result.status, 0, result.output);
+  assert.equal(readFileSync(unit, 'utf8'), ours);
+  assert.deepEqual(changingCalls(result.calls).filter(([command]) => command === 'systemctl').map(call => call.join(' ')),
+    [`systemctl --machine=${user}@ --user daemon-reload`, `systemctl --machine=${user}@ --user restart docker.service`]);
 });
 
 test("a private project clones with the App's token, and the token never reaches the output", t => {

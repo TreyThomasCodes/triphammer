@@ -150,24 +150,32 @@ if tool node Node "install Node (https://nodejs.org) $units_path"; then
 fi
 
 # Docker, for a project that declares "docker": true, or whose project file cannot be read: its sessions reach only
-# the rootless daemon whose socket the machine file names (rootless_docker_host in config.sh), so that daemon answers
-# this user, the rootful one at /var/run/docker.sock does not, and Compose is v2 or later.
+# the project's own rootless daemon, whose socket the machine file names (rootless_docker_host in config.sh), so that
+# daemon answers this user, no other project's key names the same socket (rootless_docker_sockets), the rootful one at
+# /var/run/docker.sock does not answer, and Compose is v2 or later.
 docker_project=1
 if check_project doctor "$checkout" >/dev/null 2>&1 && [ "$(project_get "$checkout" docker)" != true ]; then
   docker_project=""
 fi
-docker_host="$(rootless_docker_host)"
+docker_host="$(rootless_docker_host "$project")"
+machine_file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf"
 if [ -z "$docker_project" ]; then
   :
 elif ! command -v docker >/dev/null 2>&1; then
   problem "Docker Engine (docker) is not installed on the units' PATH" "install Docker Engine with the Compose plugin (https://docs.docker.com/engine/install/) $units_path"
 else
-  if [ -z "$docker_host" ]; then
-    problem "The machine file ${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf names no rootless Docker daemon, so no session of this project starts" \
-      "run sudo bin/provision from Triphammer's checkout, which sets the daemon up (bin/README.md, The rootless Docker daemon)"
+  if ! docker_key "$project" >/dev/null; then
+    problem "The project name $project cannot name a rootless Docker daemon of its own, so no session of this project starts" \
+      "rename the project in .triphammer/project.json to lower-case letters, digits and dashes, starting with a letter or a digit, then run sudo triphammer update (bin/README.md, The rootless Docker daemon)"
+  elif [ -z "$docker_host" ]; then
+    problem "The machine file $machine_file names no rootless Docker daemon of this project ($project), so no session of it starts" \
+      "run sudo triphammer update, whose bin/provision-project sets up the daemon of each Docker project (bin/README.md, The rootless Docker daemon)"
+  elif [ "$(rootless_docker_sockets | grep -cxF -- "${docker_host#unix://}")" -gt 1 ]; then
+    problem "The machine file $machine_file names ${docker_host#unix://}, this project's rootless Docker daemon, for another daemon too, so another project's sessions reach this one's containers" \
+      "run sudo triphammer update, which names each Docker project's own daemon (bin/README.md, The rootless Docker daemon)"
   elif ! DOCKER_HOST="$docker_host" docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-    problem "The rootless Docker daemon does not answer this user at ${docker_host#unix://} (docker info fails)" \
-      "start the daemon user's docker.service, or run sudo bin/provision again (bin/README.md, The rootless Docker daemon)"
+    problem "The rootless Docker daemon of this project does not answer this user at ${docker_host#unix://} (docker info fails)" \
+      "start the daemon user's docker.service, or run sudo triphammer update (bin/README.md, The rootless Docker daemon)"
   fi
   if docker -H unix:///var/run/docker.sock info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
     problem "The rootful Docker daemon at /var/run/docker.sock answers this user, so a container it starts can write anywhere on the machine" \

@@ -673,6 +673,7 @@ for (const [declared, docker, hidden] of [['without docker', undefined, true], [
   test(`a project's Docker setting reaches the write limit: a project ${declared} ${hidden ? 'gets no' : 'reaches the rootless'} Docker socket, and none gets the rootful one`, async t => {
     const r = ticketSetup(t, [issue(7)], {project: docker === undefined ? projectJson : `${JSON.stringify({...example, docker})}\n`});
     await listenUnix(t, r.dockerSocket);
+    await listenUnix(t, r.otherDockerSocket);
     // The session's checks run Compose, as a project's gate does; DOCKER_HOST outside the runner is not the one it gets.
     const gate = join(r.root, 'gate.sh');
     writeFileSync(gate, `#!/bin/sh\nprintf '%s' "$DOCKER_HOST" > "$PROBE/session-docker-host"\ndocker compose -p example-gate up -d\n`,
@@ -685,17 +686,35 @@ for (const [declared, docker, hidden] of [['without docker', undefined, true], [
     assert.equal(calls.length, 2, JSON.stringify(calls));
     for (const call of calls) {
       assert.equal(hides(call, realpathSync(r.dockerSocket)), hidden, JSON.stringify(call));
+      assert.ok(hides(call, realpathSync(r.otherDockerSocket)), `another project's daemon is reached: ${JSON.stringify(call)}`);
       assert.ok(hides(call, '/run/docker.sock'), JSON.stringify(call));
     }
   });
 }
+
+test("each Docker project's sessions get its own rootless daemon as DOCKER_HOST, and every other project's daemon hidden", async t => {
+  const r = ticketSetup(t, [issue(7)], {project: `${JSON.stringify({...example, docker: true})}\n`});
+  await listenUnix(t, r.dockerSocket);
+  await listenUnix(t, r.otherDockerSocket);
+  const gate = join(r.root, 'gate.sh');
+  writeFileSync(gate, `#!/bin/sh\nprintf '%s' "$DOCKER_HOST" > "$PROBE/session-docker-host"\n`, {mode: 0o755});
+  r.tick({TRIPHAMMER_PROJECT: 'other-project', DURING_SESSION: gate});
+  assert.equal(r.ran(), true);
+  assert.equal(r.probe('session-docker-host'), `unix://${r.otherDockerSocket}`);
+  const calls = r.bwrapCalls();
+  assert.equal(calls.length, 2, JSON.stringify(calls));
+  for (const call of calls) {
+    assert.ok(hides(call, realpathSync(r.dockerSocket)), JSON.stringify(call));
+    assert.ok(!hides(call, realpathSync(r.otherDockerSocket)), JSON.stringify(call));
+  }
+});
 
 test('a project that declares Docker starts no session on a machine whose machine file names no rootless daemon', t => {
   const r = ticketSetup(t, [issue(7)], {project: `${JSON.stringify({...example, docker: true})}\n`});
   r.noRootlessDaemon();
   assert.throws(() => r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'}), error => error.status === 1);
   assert.equal(r.ran(), false);
-  assert.match(r.log(), /ticket #7: this project declares "docker": true, but the machine file names no rootless Docker daemon, so no session starts/);
+  assert.match(r.log(), /ticket #7: this project declares "docker": true, but the machine file names no rootless Docker daemon of this project, so no session starts \(run sudo triphammer update/);
   assert.deepEqual(r.bwrapCalls(), [], 'not even the dry run of the write limit');
   assert.equal(existsSync(join(r.root, 'state/ticket-runner/attempts/ticket-7')), false, 'the run is not counted');
 });
@@ -1305,7 +1324,7 @@ test('on a machine whose machine file names no rootless daemon the database swee
   r.noRootlessDaemon();
   r.docker.containers([['example-project-local-1', join(r.root, 'issue-561/database')]]);
   r.tick({DOCKER_HOST: 'unix:///var/run/docker.sock'});
-  assert.equal(r.log().match(/database sweep skipped: the machine file names no rootless Docker daemon/g).length, 1);
+  assert.equal(r.log().match(/database sweep skipped: the machine file names no rootless Docker daemon of this project \(run sudo triphammer update\)/g).length, 1);
   assert.deepEqual(r.docker.calls(), []);
 });
 

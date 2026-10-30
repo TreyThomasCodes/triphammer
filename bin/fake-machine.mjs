@@ -18,8 +18,8 @@
 //   `\t#effective:<rights>`;
 // - loginctl enable-linger <name> and loginctl show-user <name> --property=Linger --value;
 // - systemctl --machine=<name>@ --user link <path> links the unit into the user's ~/.config/systemd/user, enable
-//   [--now] <unit...> adds the units to `enabled`, is-enabled [--quiet] [--] <unit> succeeds for one in it, and any
-//   other systemctl call only records;
+//   [--now] <unit...> adds the units to `enabled`, each as <name>:<unit>, is-enabled [--quiet] [--] <unit> succeeds
+//   for one in it for that user, and any other systemctl call only records;
 // - curl [-I] [-o <file>] <url> serves `downloads[url]` (a file's path) to the file or standard output, or fails as a
 //   404 does under -f;
 // - apparmor_parser -r <path> loads the profile named by the file; bwrap --unshare-user succeeds once `bwrap` is loaded;
@@ -134,7 +134,8 @@ switch (command) {
       mkdirSync(units, {recursive: true});
       symlinkSync(args[at + 1], join(units, basename(args[at + 1])));
     }
-    const units = args.filter(arg => !arg.startsWith('-')).slice(1);
+    const owner = args.find(arg => arg.startsWith('--machine='))?.slice('--machine='.length, -1) ?? '';
+    const units = args.filter(arg => !arg.startsWith('-')).slice(1).map(unit => `${owner}:${unit}`);
     if (args.includes('enable')) {
       state.enabled.push(...units.filter(unit => !state.enabled.includes(unit)));
       save();

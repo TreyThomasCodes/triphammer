@@ -213,14 +213,28 @@ test('a rootless Docker daemon that does not answer the user, and Docker without
   assert.equal(r.doctor().status, 0);
   const asked = r.docker.hosts().filter(call => !call.includes('|compose version'));
   assert.deepEqual(asked.map(call => call.slice(0, call.indexOf('|'))), [r.dockerHost, rootful],
-    'the rootless daemon the machine file names, then the rootful one');
+    "the project's own rootless daemon the machine file names, then the rootful one");
   r.docker.compose('1.29.2');
   assertOneProblem(r.doctor(), /^Docker Compose v2 is missing \(docker compose version reports 1\.29\.2\).*Fix: install the docker-compose-plugin/);
   r.docker.compose(null);
   assertOneProblem(r.doctor(), /^Docker Compose v2 is missing \(docker compose version reports nothing\)/);
   r.docker.compose('2.32.4');
   r.docker.refuse(rootful, r.dockerHost);
-  assertOneProblem(r.doctor(), new RegExp(`^The rootless Docker daemon does not answer this user at ${r.dockerSocket} \\(docker info fails\\).*Fix: start the daemon user's docker.service`));
+  assertOneProblem(r.doctor(), new RegExp(`^The rootless Docker daemon of this project does not answer this user at ${r.dockerSocket} \\(docker info fails\\).*Fix: start the daemon user's docker.service`));
+});
+
+test("each project's doctor asks its own rootless daemon, and reports another project's key naming the same socket", t => {
+  const r = doctorSetup(t);
+  // The same machine's doctor for the project other-project asks that project's daemon, not triphammer's.
+  r.docker.refuse(rootful, r.dockerHost);
+  const asOther = r.doctor({TRIPHAMMER_PROJECT: 'other-project'});
+  assert.equal(asOther.status, 0, asOther.output);
+  const asked = r.docker.hosts().filter(call => call.endsWith('info --format {{.ServerVersion}}'));
+  assert.deepEqual(asked.map(call => call.slice(0, call.indexOf('|'))), [`unix://${r.otherDockerSocket}`, rootful]);
+  r.docker.refuse(rootful);
+
+  writeFileSync(r.machineFile, `${readFileSync(r.machineFile, 'utf8')}TRIPHAMMER_DOCKER_SOCKET_THIRD=${r.dockerSocket}\n`);
+  assertOneProblem(r.doctor(), new RegExp(`^The machine file .*/etc/triphammer\\.conf names ${r.dockerSocket}, this project's rootless Docker daemon, for another daemon too.*Fix: run sudo triphammer update`));
 });
 
 test('a rootful Docker daemon that answers the service user is reported', t => {
@@ -232,7 +246,9 @@ test('a rootful Docker daemon that answers the service user is reported', t => {
 test('a machine file that names no rootless Docker daemon is reported for a project that declares Docker', t => {
   const r = doctorSetup(t);
   r.noRootlessDaemon();
-  assertOneProblem(r.doctor(), /^The machine file .*\/etc\/triphammer\.conf names no rootless Docker daemon.*Fix: run sudo bin\/provision/);
+  assertOneProblem(r.doctor(), /^The machine file .*\/etc\/triphammer\.conf names no rootless Docker daemon of this project \(triphammer\), so no session of it starts.*Fix: run sudo triphammer update, whose bin\/provision-project/);
+  assertOneProblem(r.doctor({TRIPHAMMER_PROJECT: 'Example_Project'}),
+    /^The project name Example_Project cannot name a rootless Docker daemon of its own.*Fix: rename the project/);
 });
 
 test('a project that does not declare Docker gets no Docker checks', t => {
@@ -336,6 +352,9 @@ test('tools are looked up on the units\' PATH from ticket-runner@.service, not t
 
 test('the units\' PATH is the last a drop-in sets, by file name, the project\'s own drop-in before the template\'s of that name', t => {
   const r = doctorSetup(t);
+  // The project example-project's own rootless daemon, so the Docker checks find nothing to report.
+  writeFileSync(r.machineFile, readFileSync(r.machineFile, 'utf8').replace(/^TRIPHAMMER_DOCKER_SOCKET_TRIPHAMMER=/m,
+    'TRIPHAMMER_DOCKER_SOCKET_EXAMPLE_PROJECT='));
   const doctor = () => r.doctor({TRIPHAMMER_PROJECT: 'example-project'});
   // A machine whose only SDK is ~/.dotnet's: the system directories on every PATH here can hold one of their own (CI
   // runners have /usr/bin/dotnet), so ~/.local/bin, first on each, finds dotnet only where the PATH reaches ~/.dotnet.

@@ -25,9 +25,10 @@
 # PATH (the README's Install section, A project's toolchain); Playwright's Chromium at the version each package.json
 # pins, with its system libraries from Playwright or else from Ubuntu's archive; Codex with the codex module (its
 # sandbox, bwrap, comes with provision, as the sessions' write limit needs it), and ffmpeg with the demo module. For a
-# project that declares "docker": true, it lets the rootless Docker daemon's user that the machine file names read the
-# run clones in <checkout>/.worktrees and nothing else of the service user's (docker_reads in bin/provision-lib.sh),
-# and stops when the machine file names none. It gives git a commit identity from APP_AUTHOR unless the user has one, and writes the project's config file. Its closing list of
+# project that declares "docker": true, it sets up a rootless Docker daemon of the project's own, under the user
+# <user>-docker-<project>, which may read the run clones in <checkout>/.worktrees and nothing else of the service
+# user's, and names its user and socket in the machine file (docker_daemon in bin/provision-lib.sh); a project whose
+# name cannot name that user stops it. It gives git a commit identity from APP_AUTHOR unless the user has one, and writes the project's config file. Its closing list of
 # the owner's steps leaves out logging Codex in once the user's `codex login status` succeeds. The project's
 # .node-version must pin the Node the machine has, as one Node is on the units' PATH. It enables no timer, and its last
 # line is `project: <name>`, for triphammer add.
@@ -325,13 +326,11 @@ else
   note "the project's name and toolchain versions come from its checkout, which is not cloned yet; a real run reads them after cloning"
 fi
 
-# A project that declares "docker": true runs its checks against the rootless Docker daemon provision set up, whose
-# user then reads the run clones its Compose files bind-mount (docker_reads in bin/provision-lib.sh).
-if cloned "$repo" "$checkout" && [ "$(as_user bash -c 'source "$1/bin/config.sh" && project_get "$2" docker' \
+# A project that declares "docker": true runs its checks against a rootless Docker daemon of its own, whose user reads
+# the run clones its Compose files bind-mount, and which the machine file names (docker_daemon in bin/provision-lib.sh).
+if [ -n "$name" ] && [ "$(as_user bash -c 'source "$1/bin/config.sh" && project_get "$2" docker' \
     _ "$tri_checkout" "$checkout")" = true ]; then
-  { [ -n "$docker_user" ] && getent passwd "$docker_user" >/dev/null 2>&1; } \
-    || fail "$checkout declares \"docker\": true, and $machine_file names no rootless Docker daemon's user that exists; run triphammer update (or bin/provision) first"
-  docker_reads "$checkout"
+  docker_daemon "$name" "$checkout"
 fi
 
 # The .NET SDKs, through dotnet-install into the user's ~/.dotnet.
