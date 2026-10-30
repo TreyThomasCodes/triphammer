@@ -230,7 +230,9 @@ so it cannot hold the others back. `ticket-runner --plan` reads none of this and
 
 Each project that declares `"docker": true` has a rootless Docker daemon of its own (On a machine of its own, The
 rootless Docker daemon), so no session of one project reaches another's containers, images, volumes, networks or build
-cache; the sessions of one project share its daemon. Each tick's database sweep prunes the Compose projects its
+cache; the sessions of one project share its daemon, one at a time, and the runner sweeps it clean right before each
+session starts and right after it ends, so no session finds what an earlier one left there (Run clones and databases
+nothing uses). Each tick's database sweep prunes the Compose projects its
 `composeProjectPattern` matches whose run directory is gone, and asks only the project's own daemon, so it never
 prunes another project's containers; `triphammer doctor` still reports two projects whose patterns can match the same
 Compose project name (Doctor, Compose names).
@@ -414,11 +416,11 @@ tool (Edit and Write go through permission rules alone), and the model can ask t
 covered: for a project that declares `"docker": true`, what its rootless daemon's user can do, as a container a
 session starts through it, privileged or mounting `/` or not, acts as that user on the machine: it reads what is
 world-readable there and the project's run clones in `<checkout>/.worktrees`, which the session can read already, and
-writes what that user may (its own home, and whatever on the machine is world-writable), and it reaches the
-containers, images, volumes, networks and build cache of the project's other sessions, which share the daemon; what a
-session starts or leaves on the daemon (a container run detached or with a restart policy, an image, such as one
-re-tagged under a name a later session runs or builds from, a volume) outlives the session, a container running on
-through later sessions and reboots, and is there for the project's later sessions; a Docker daemon a session reaches
+writes what that user may (its own home, and whatever on the machine is world-writable), while the session runs; what
+a session leaves on the daemon (a container run detached or with a restart policy, an image, such as one re-tagged
+under a name a later session runs or builds from, a volume, a network, the build cache) when the runner is stopped
+during the session or its sweep after the session fails (Run clones and databases nothing uses), which lasts, a
+container running on through reboots too, until the next session's sweep; a Docker daemon a session reaches
 some other way than the sockets above (a socket the machine file does not name when the session starts, such as the
 daemon of a project `provision-project` sets up while the session runs, a Docker context, TCP), or, for a
 project that does not declare Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the
@@ -562,9 +564,22 @@ tick or a killed gate run never stops them. So:
   directory that no longer exists, in a run directory that no longer exists either, with `docker compose -p <project> down --volumes --remove-orphans`, logging `pruned database <project>
   (run directory <path> is gone)`. A project with any container whose working directory exists, or that has none, is never
   touched, running or stopped. When Docker is unavailable the tick logs `database sweep skipped: docker is
-  unavailable` and carries on, and when the machine file names no rootless daemon of the project, `database sweep
+  unavailable` and carries on (to the daemon sweep below, which then fails and starts no session), and when the machine file names no rootless daemon of the project, `database sweep
   skipped: the machine file names no rootless Docker daemon of this project (run sudo triphammer update)`.
 - A failed removal is logged (`could not remove run directory ...`, `could not prune database ...`) and the tick carries on.
+- Right before a session starts and right after it ends, when the machine file names a rootless Docker daemon of the
+  project, the runner sweeps that daemon clean, with `DOCKER_HOST` naming its socket: `docker rm -f --volumes` on
+  every container `docker ps -aq` lists, running or stopped, then `docker volume prune -af` (named volumes too),
+  `docker network prune -f`, `docker image prune -af` and `docker builder prune -af` (the build cache). A session's
+  containers are children of the daemon, not of the session, so ending the session stops none of them. Only the
+  project's sessions reach the daemon and its lock lets one run at a time, so nothing another run or project uses
+  goes. It logs `<action>: swept the project's Docker daemon before the session: removed <n> containers and pruned the
+  volumes, networks, images and build cache`, and `after the session` the second time. A sweep that fails before the
+  session logs `<action>: could not sweep the project's Docker daemon clean, so no session starts; not counted: <the
+  docker command that failed and its last line>`, starts no session and does not count the run. One that fails after
+  the session logs `<action>: could not sweep the project's Docker daemon after the session: ...` and the run goes on;
+  the next session's sweep removes what it left. A run's database is therefore gone once its session ends, even when
+  the run keeps its clone for the next one, and the clone's teardown runs on the swept daemon.
 
 `ticket-runner --prune-dry-run` prints `would remove run directory ...` and `would prune database ...` lines for what the
 sweep would remove and exits. It takes no lock, ignores the brakes, writes no state or log, and only reads from `gh`,

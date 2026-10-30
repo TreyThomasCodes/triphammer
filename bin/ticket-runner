@@ -34,7 +34,8 @@
 # a branch cannot change the skills, agents or hooks it runs under), in a clone of the project's repository of its own
 # (add_clone) on a branch from origin/main, whose commits get the agents' Co-Authored-By trailer from Triphammer's scripts/git-hooks;
 # its prompt names Triphammer
-# config's modules that are on. When it ends, unless a brake ended it, it failed or its issue is labelled `cleanup`, the runner files the cleanups the session
+# config's modules that are on. The project's own rootless Docker daemon, if the machine file names one, is swept clean
+# right before the session starts and right after it ends (sweep_daemon). When it ends, unless a brake ended it, it failed or its issue is labelled `cleanup`, the runner files the cleanups the session
 # proposed in its proposals file ($TRIPHAMMER_PROPOSALS, file_proposals) as issues labelled `cleanup`. With the demo
 # module on, the runner publishes the demos it left in its clone (bin/publish-demos), and with the codex module on, it runs bin/security-review on each open pull request
 # of the run (it comments only on escalated ones that touch Triphammer and records the heads whose review found
@@ -282,6 +283,32 @@ prune_databases() {
       say "could not prune database $why: $(tail -n 1 <<< "$out")"
     fi
   done
+}
+
+# Sweeps the project's own rootless Docker daemon clean: removes every container on it, running or not, with its
+# anonymous volumes, then every volume (-a: named ones too), every network Docker did not create, every image and the
+# build cache, so nothing a session started or left there runs on or carries over into a later session. Only this
+# project's sessions reach that daemon, and its lock (fd 9) lets one run at a time, so nothing else's is removed. It
+# runs right before each session starts and right after it ends. On success it prints what it did, on failure the
+# command that failed and docker's last line; with no rootless daemon of this project in the machine file it prints
+# nothing and asks Docker nothing.
+sweep_daemon() {
+  local ids out step count
+  [ -n "$docker_host" ] || return 0
+  local -x DOCKER_HOST="$docker_host"
+  if ! command -v docker >/dev/null 2>&1; then echo "docker is not installed"; return 1; fi
+  if ! ids="$(docker ps -aq 2>&1)"; then echo "docker ps -aq failed: $(tail -n 1 <<< "$ids")"; return 1; fi
+  # shellcheck disable=SC2086  # one container id per word
+  if [ -n "$ids" ] && ! out="$(docker rm -f --volumes $ids 2>&1)"; then
+    echo "docker rm -f --volumes failed: $(tail -n 1 <<< "$out")"
+    return 1
+  fi
+  for step in 'volume prune -af' 'network prune -f' 'image prune -af' 'builder prune -af'; do
+    # shellcheck disable=SC2086  # the subcommand and its flags, one per word
+    if ! out="$(docker $step 2>&1)"; then echo "docker $step failed: $(tail -n 1 <<< "$out")"; return 1; fi
+  done
+  count="$(wc -w <<< "$ids")"
+  echo "removed $count container$([ "$count" = 1 ] || echo s) and pruned the volumes, networks, images and build cache"
 }
 
 if [ -n "$dry_run" ]; then
@@ -910,6 +937,15 @@ file_proposals() {
   done < "$proposals"
 }
 
+# The project's own rootless Docker daemon is swept clean before the session starts (sweep_daemon), so it finds nothing
+# an earlier session or teardown left there. A sweep that fails starts no session, and the run is not counted.
+if ! why="$(sweep_daemon)"; then
+  echo $((attempts - 1)) > "$attempts_file"
+  log "$kind #$number: could not sweep the project's Docker daemon clean, so no session starts; not counted: ${why:-no reason printed}"
+  exit 1
+fi
+[ -z "$why" ] || log "$kind #$number: swept the project's Docker daemon before the session: $why"
+
 # The session's GitHub token, minted here, outside the write limit, for the App's installation on GITHUB_APP_OWNER's
 # account alone: the session reads it through TRIPHAMMER_TOKEN_FILE and never sees the App's key or any other token
 # (bin/github-app-token, bin/session-sandbox). Without one no session starts, and the run is not counted.
@@ -950,6 +986,14 @@ refresher=$!
 wait "$session" || status=$?
 session=""
 end_session
+# And swept again once the session has ended, so nothing it started there runs on: its containers are children of the
+# daemon, not of the session, so ending the session does not stop them. A failure is logged and the run goes on; the
+# next session's sweep tries again. The teardown of the run's clone (remove_run) runs later, on the swept daemon.
+if why="$(sweep_daemon)"; then
+  [ -z "$why" ] || log "$kind #$number: swept the project's Docker daemon after the session: $why"
+else
+  log "$kind #$number: could not sweep the project's Docker daemon after the session: ${why:-no reason printed}"
+fi
 
 # The run's record, runs/<stamp>-<kind>-<number>.json beside its transcript: the run, the builder the prompt named and
 # its model, the session's exit status, whether a pull request on the run's branch was opened since the run started

@@ -1,7 +1,8 @@
 // The `docker` Triphammer tests put first on PATH (see fakeDocker in fixture.mjs): `node fake-docker.mjs <dir> <docker
 // arguments>`. It appends `<COMPOSE_PROJECT_NAME>|<arguments>` to <dir>/calls, and fails every call while
 // <dir>/unavailable exists, as docker does when its daemon is down. `ps` prints <dir>/ps.json (an array of
-// [project, working_dir]) as tab-separated lines, whatever the --format asks. `compose ... down` for the project
+// [project, working_dir]) as tab-separated lines, whatever the --format asks, but `ps -aq` prints each container's id,
+// <project>-db-1; `rm` drops the containers whose ids it names from ps.json. `compose ... down` for the project
 // named by -p or COMPOSE_PROJECT_NAME fails when <dir>/fail-down lists it; otherwise it prints compose's `Removed`
 // line for each of the project's containers and drops them from ps.json. `info` prints an engine version. `compose
 // version` prints the Compose version in <dir>/compose-version (default 2.32.4), or fails as docker does without the
@@ -42,6 +43,10 @@ if (args[0] === 'info') {
   if (existsSync(join(dir, 'writes'))) {
     for (const [, path] of script.matchAll(/touch "?\/host(\/[^"\s]+)/g)) writeFileSync(path, '');
   }
+} else if (args[0] === 'ps' && args.includes('-aq')) {
+  for (const [project] of containers) console.log(`${project}-db-1`);
+} else if (args[0] === 'rm') {
+  writeFileSync(psFile, JSON.stringify(containers.filter(([project]) => !args.includes(`${project}-db-1`))));
 } else if (args[0] === 'ps') {
   for (const [project, workingDir] of containers) console.log(`${project}\t${workingDir}`);
 } else if (args[0] === 'compose' && args.includes('down')) {
