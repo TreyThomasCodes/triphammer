@@ -32,10 +32,10 @@ fail() {
 root="${TRIPHAMMER_PROVISION_ROOT:-}"
 git_base="${TRIPHAMMER_PROVISION_GIT_BASE:-https://github.com/}"
 repo_pattern='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
-machine_file="$root/etc/triphammer.conf"
 node_bin="$root/usr/local/bin"
 # shellcheck source=bin/config.sh
-source "$here/config.sh"  # machine_get
+source "$here/config.sh"  # machine_path, machine_get
+machine_file="$(machine_path)"
 
 # check_place <flag> <repo> <path>: a repository as owner/name and a checkout as a plain absolute path, or exit 2.
 check_place() {

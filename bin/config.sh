@@ -33,12 +33,18 @@
 # project whose CHECKOUT is Triphammer's own checkout, or a worktree of it, is, or when one is a run's clone of the
 # other (ticket-runner's add_clone), whose objects/info/alternates names the other's objects.
 #
-# machine_get <KEY>: prints the value of the machine file ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf gives KEY
-# (bin/provision and bin/provision-project write it, one KEY=VALUE per line; bin/provision-lib.sh), as it stands after the `=`, from the last
-# line that gives it, or nothing when the file is missing or unreadable or gives no KEY. It checks no value: each
-# caller checks its own. TRIPHAMMER_PROVISION_ROOT is for tests only, as in provision.
+# machine_path: prints the machine file's path, ${TRIPHAMMER_PROVISION_ROOT}/etc/triphammer.conf (bin/provision and
+# bin/provision-project write it, one KEY=VALUE per line; bin/provision-lib.sh). TRIPHAMMER_PROVISION_ROOT is for tests
+# only, as in provision. bin/triphammer, which root runs and which does not source this file, names it on its own.
+machine_path() {
+  printf '%s\n' "${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf"
+}
+# machine_get <KEY>: prints the value the machine file (machine_path) gives KEY, as it stands after the `=`, from the
+# last line that gives it, or nothing when the file is missing or unreadable or gives no KEY. It checks no value: each
+# caller checks its own.
 machine_get() {
-  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line value=""
+  local file line value=""
+  file="$(machine_path)"
   [ -r "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" != "$1="* ]] || value="${line#*=}"
@@ -76,8 +82,9 @@ rootless_docker_host() {
 # (machine_get TRIPHAMMER_DOCKER_SOCKET_<key> for each key it gives), and the one TRIPHAMMER_DOCKER_SOCKET names, the
 # daemon every Docker project shared before each had its own, each only when it is a plain absolute path.
 rootless_docker_sockets() {
-  local file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf" line key socket
+  local file line key socket
   local -A seen=()
+  file="$(machine_path)"
   [ -r "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     [[ "$line" =~ ^(TRIPHAMMER_DOCKER_SOCKET(_[A-Z0-9_]+)?)= ]] || continue

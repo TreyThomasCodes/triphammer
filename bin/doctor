@@ -213,7 +213,7 @@ if check_project doctor "$checkout" >/dev/null 2>&1 && [ "$(project_get "$checko
   docker_project=""
 fi
 docker_host="$(rootless_docker_host "$project")"
-machine_file="${TRIPHAMMER_PROVISION_ROOT:-}/etc/triphammer.conf"
+machine_file="$(machine_path)"
 if [ -z "$docker_project" ]; then
   :
 elif ! command -v docker >/dev/null 2>&1; then
