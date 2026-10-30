@@ -77,3 +77,12 @@ A parser that skips a command's options before judging its operands needs the li
 - Is there a test that puts a value-taking option before the operand, and does the command still get checked?
 
 Found in: a guard hook's `script` entry, which lacked `-m` (`--logging-format`), so `script -q -m advanced -c true ~/.bashrc` read `advanced` as the file and let the write through.
+
+## 12. Brakes judged from separate per-kind last events
+
+A brake that one kind of event sets and another lifts (a label and a close, a close and a reopening) must be judged from those events in order. Summarizing each kind as its last event and then combining the summaries loses which came first, so an old lift cancels a newer set.
+
+- Where a brake combines two kinds of event, is it decided in one pass over the events in order, or from each kind's last event alone?
+- Is there a test where the lifting event comes before the setting one, and does the brake still hold?
+
+Found in: a stop-agents brake that read "labelled, and not closed" from separate last events, so an owner's close before the owner's label lifted the label.

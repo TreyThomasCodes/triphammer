@@ -6,8 +6,9 @@ name: risk-tier
 # the base are identical (same patch id), so updating the branch from main does not need a new approval. While it
 # waits, the owner's review is (re)requested. A pull request the owner opened counts as approved at each commit the
 # owner pushed to it, since GitHub lets no one approve their own pull request; a commit anyone else pushed to it, such
-# as an agent's, still needs the owner, by the same rules as an approval. A hold label or the owner's latest review
-# requesting changes keeps any tier pending. The owner's login matches in any case, as GitHub matches logins
+# as an agent's, still needs the owner, by the same rules as an approval. A hold label, a hold someone other than a bot
+# added until someone other than a bot removes it, or the owner's latest review requesting changes keeps any tier
+# pending. The owner's login matches in any case, as GitHub matches logins
 # (scripts/risk-tier-workflow.test.mjs runs these checks).
 # The same job posts the required `closing-issue` status from validate-pr-contract.sh, here because this workflow
 # already runs on every event that can change it (a push, an edited description, a retarget).
@@ -175,11 +176,21 @@ jobs:
               > /dev/null || echo "Could not add escalated."
           fi
 
-          # The owner's brakes hold any tier: a hold label, or the owner's latest review requesting changes (until
-          # the owner approves or dismisses it).
+          # The owner's brakes hold any tier: a hold label, a hold that anyone but a bot added and no one but a bot
+          # removed (the agents' App acts as a bot, so its removing the owner's hold lifts nothing; the same rule as
+          # owner_brake in bin/labels.sh, with any bot standing for the App), or the owner's latest review requesting
+          # changes (until the owner approves or dismisses it). A failed read fails the status.
           labels="$(gh api --paginate "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/labels" --jq '.[].name')"
           if grep -qix hold <<< "$labels"; then
             status pending "Held: the pull request is labelled hold"
+          fi
+          events="$(gh api --paginate --slurp "repos/$REPOSITORY/issues/$PULL_REQUEST_NUMBER/events")"
+          owner_hold="$(jq -r '[.[][] | select((.event == "labeled" or .event == "unlabeled")
+              and (.label.name // "" | ascii_downcase) == "hold"
+              and (.actor.type // "") != "Bot" and (.actor.login // "" | endswith("[bot]") | not))]
+             | last | .event // ""' <<< "$events")"
+          if [ "$owner_hold" = labeled ]; then
+            status pending "Held: a bot removed the owner's hold; only someone else can lift it"
           fi
           reviews="$(gh api --paginate --slurp "repos/$REPOSITORY/pulls/$PULL_REQUEST_NUMBER/reviews")"
           latest="$(jq -r --arg owner "$OWNER" \

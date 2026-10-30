@@ -9,9 +9,11 @@ import {fakeGh, here, lines, manyLabels, toolingEnv, withUmask, writeConfig} fro
 
 // The fake gh's routes: the installation's repositories (repos.json), each repository's pull requests
 // (graphql-<owner>_<name>-.json), one pull request's head and checks (graphql-<owner>_<name>-<number>.json) and
-// stop-agents issues (issues-<owner>_<name>.json, or a failing query when that file is absent). Any other call fails.
+// stop-agents issues (issues-<owner>_<name>.json, or a failing query when that file is absent), and no issue events
+// (`events` serves some). Any other call fails.
 const routes = {
   'api /installation/repositories': {file: 'repos.json'},
+  'api repos/': {stdout: ''},
   'api graphql': {file: 'graphql-{owner}_{name}-{number}.json'},
   'issue list': {file: 'issues-{repo}.json'},
   'pr update-branch': {},
@@ -219,6 +221,84 @@ test('a pull request with more labels than one page, or with no page info, is ne
   assert.deepEqual(r.calls(), [`merge o/a#3 ${pr(3).headRefOid}`]);
   assert.match(r.log(), /o\/a#1: more labels than merge-when-ready reads, so it may be labelled hold; not merging or updating it/);
   assert.match(r.log(), /o\/a#2: more labels than merge-when-ready reads/);
+});
+
+// The owner's brakes outlive the App's lifting them: the fake gh serves `value` as the events of `path` (issue #9 of
+// o/b is `o/b/issues/9`, and the repository's issue events, newest first, `o/b/issues`), or a failed read for null.
+const events = (r, path, value) => {
+  const file = `events-${path.replaceAll('/', '_')}.json`;
+  if (value !== null) r.gh.json(file, value);
+  r.gh.respond({[`api repos/${path}/events`]: value === null ? {stderr: 'gh: HTTP 502\n', exit: 1} : {file}});
+};
+const labelEvent = (event, login, name) => ({event, actor: {login}, label: {name}});
+const stateEvent = (event, login) => ({event, actor: {login}});
+const stopAgentsLabelled = [{created_at: '2026-10-17T10:00:00Z', event: 'labeled', actor: {login: 'Example-Owner'},
+  label: {name: 'stop-agents'}, issue: {number: 9}}];
+
+test("a pull request whose hold the owner added and the App removed is neither merged nor updated; the owner's removal lifts it", t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'BEHIND', ['bug']), pr(3, 'CLEAN')]);
+  const appRemoved = [labelEvent('labeled', 'Example-Owner', 'hold'), labelEvent('unlabeled', 'agents[bot]', 'hold')];
+  events(r, 'o/a/issues/1', appRemoved);
+  events(r, 'o/a/issues/2', appRemoved);
+  events(r, 'o/a/issues/3', [labelEvent('labeled', 'agents[bot]', 'hold'), labelEvent('unlabeled', 'agents[bot]', 'hold')]);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#3 ${pr(3).headRefOid}`], "the App's own hold, removed, holds nothing");
+  assert.match(r.log(), /o\/a#1: under the owner's hold, which the App removed; not merging or updating it/);
+  assert.match(r.log(), /o\/a#2: under the owner's hold, which the App removed; not merging or updating it/);
+
+  const lifted = queueSetup(t);
+  lifted.pulls('o/a', [pr(1, 'CLEAN')]);
+  events(lifted, 'o/a/issues/1', [...appRemoved, labelEvent('labeled', 'agents[bot]', 'Hold'),
+    labelEvent('unlabeled', 'example-owner', 'Hold')]);
+  assert.equal(lifted.tick().status, 0);
+  assert.deepEqual(lifted.calls(), [`merge o/a#1 ${pr(1).headRefOid}`]);
+});
+
+test('a pull request whose events cannot be read is neither merged nor updated', t => {
+  const r = queueSetup(t);
+  r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'CLEAN')]);
+  events(r, 'o/a/issues/1', null);
+  assert.equal(r.tick().status, 0);
+  assert.deepEqual(r.calls(), [`merge o/a#2 ${pr(2).headRefOid}`]);
+  assert.match(r.log(), /o\/a#1: could not read its events, which hold the owner's hold; not merging or updating it/);
+});
+
+test("an issue the owner labelled stop-agents stops every merge after the App closed or unlabelled it; the owner's lifts it", t => {
+  const paused = /paused: issue #9 in o\/b is under the owner's stop-agents, which only the owner's unlabelling or closing lifts/;
+  const labelled = labelEvent('labeled', 'Example-Owner', 'stop-agents');
+  for (const [issueEvents, held] of [[[labelled, stateEvent('closed', 'agents[bot]')], true],
+    [[labelled, labelEvent('unlabeled', 'agents[bot]', 'Stop-Agents')], true],
+    // The owner's close lifts only a label it follows.
+    [[stateEvent('closed', 'Example-Owner'), stateEvent('reopened', 'agents[bot]'), labelled,
+      stateEvent('closed', 'agents[bot]')], true],
+    [[labelled, stateEvent('closed', 'Example-Owner')], false],
+    [[labelled, labelEvent('unlabeled', 'example-owner', 'stop-agents')], false]]) {
+    const r = queueSetup(t);
+    r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'BEHIND')]);
+    events(r, 'o/b/issues', stopAgentsLabelled);
+    events(r, 'o/b/issues/9', issueEvents);
+    assert.equal(r.tick().status, 0);
+    if (held) {
+      assert.deepEqual(r.calls(), [], JSON.stringify(issueEvents));
+      assert.match(r.log(), paused);
+    } else {
+      assert.deepEqual(r.calls(), [`merge o/a#1 ${pr(1).headRefOid}`, 'update-branch o/a#2'], JSON.stringify(issueEvents));
+    }
+  }
+});
+
+test('a failed read of the stop-agents events fails closed', t => {
+  for (const path of ['o/b/issues', 'o/b/issues/9']) {
+    const r = queueSetup(t);
+    r.pulls('o/a', [pr(1, 'CLEAN'), pr(2, 'BEHIND')]);
+    events(r, 'o/b/issues', stopAgentsLabelled);
+    events(r, 'o/b/issues/9', [labelEvent('labeled', 'Example-Owner', 'stop-agents'), stateEvent('closed', 'Example-Owner')]);
+    events(r, path, null);
+    assert.equal(r.tick().status, 1);
+    assert.deepEqual(r.calls(), []);
+    assert.match(r.log(), /paused: reading the stop-agents events of o\/b failed/);
+  }
 });
 
 test('while ticket-runner holds its lock with no current file, branches are not updated but clean pull requests still merge', async t => {

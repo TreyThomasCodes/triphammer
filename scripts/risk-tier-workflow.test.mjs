@@ -10,6 +10,7 @@ const filters = [...workflow.matchAll(/jq -r --arg owner "\$OWNER"[^']*'([^']*)'
 const [brake, approval, pushes] = filters;
 const authorCheck = workflow.match(/if (\[ "\$\{?PULL_REQUEST_AUTHOR\b[^\]]*\])/)?.[1];
 const holdCheck = workflow.match(/if (grep [^;]*\bhold <<< "\$labels");/)?.[1];
+const ownerHold = workflow.match(/owner_hold="\$\(jq -r '([^']*)'/)?.[1];
 
 const jq = (filter, input, owner) => {
   const result = spawnSync('jq', ['-r', '--arg', 'owner', owner, '--arg', 'since', '', filter],
@@ -23,6 +24,7 @@ test('the workflow has the three owner filters, the author check and the hold ch
   assert.equal(filters.length, 3);
   assert.ok(authorCheck);
   assert.ok(holdCheck);
+  assert.ok(ownerHold);
 });
 
 test('a hold label holds the pull request whatever its case', () => {
@@ -32,6 +34,19 @@ test('a hold label holds the pull request whatever its case', () => {
   assert.equal(held('HOLD\nescalated'), 0);
   assert.notEqual(held('bug\nholder\non-hold'), 0);
   assert.notEqual(held(''), 0);
+});
+
+test("a hold someone other than a bot added holds until someone other than a bot removes it", () => {
+  const held = events => jq(ownerHold, [events], 'owner-login');
+  const human = login => ({login, type: 'User'});
+  const app = {login: 'agents-app[bot]', type: 'Bot'};
+  const hold = (event, actor, name = 'hold') => ({event, actor, label: {name}});
+  assert.equal(held([hold('labeled', human('owner-login')), hold('unlabeled', app)]), 'labeled');
+  assert.equal(held([hold('labeled', human('Owner-Login'), 'Hold'), hold('unlabeled', {login: 'other[bot]'})]), 'labeled');
+  assert.equal(held([hold('labeled', human('owner-login')), hold('unlabeled', app), hold('unlabeled', human('owner-login'))]), 'unlabeled');
+  assert.equal(held([hold('labeled', app), hold('unlabeled', app)]), '');
+  assert.equal(held([hold('labeled', human('owner-login')), hold('unlabeled', app, 'holder'), {event: 'closed', actor: app}]), 'labeled');
+  assert.equal(held([hold('unlabeled', human('owner-login')), hold('labeled', app)]), 'unlabeled');
 });
 
 test("the owner's change request holds the pull request whatever the case of either login", () => {
