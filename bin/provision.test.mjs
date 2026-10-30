@@ -19,6 +19,8 @@ for (const [what, args, message] of [
   ['a checkout with ..', ['--triphammer', 'example/y', '/srv/../y'], /without \. or \.\. parts/],
   ['a project argument', [...tri, '--project', 'example/y', '/y'], /--project belongs to triphammer add/],
   ['a malformed --user', [...tri, '--user', 'Bad User'], /--user must be a user name/],
+  ['a --user too long for its daemon user', [...tri, '--user', 'a'.repeat(26)],
+    /--user a{26} is too long: the rootless Docker daemon's user, a{26}-docker, must be a user name too/],
   ['a relative --home', [...tri, '--home', 'home'], /--home must be an absolute path/],
   ['--owner-steps with another argument', ['--owner-steps', '--dry-run'], /--owner-steps takes no other argument/],
   ['--owner-steps after --triphammer', [...tri, '--owner-steps'], /--owner-steps takes no other argument/],
@@ -40,19 +42,40 @@ test('on a fresh machine it installs everything but a project, and a second run 
   const first = m.provision(...at(m, tri));
   assert.equal(first.status, 0, first.output);
 
-  const {packages, users, linger, loaded} = m.machine();
-  for (const name of ['git', 'jq', 'python3', 'shellcheck', 'curl', 'bubblewrap', 'apparmor', 'docker-ce', 'docker-compose-plugin', 'gh']) {
+  const {packages, users, linger, loaded, enabled, acls} = m.machine();
+  for (const name of ['git', 'jq', 'python3', 'shellcheck', 'curl', 'bubblewrap', 'apparmor', 'docker-ce', 'docker-compose-plugin', 'gh',
+    'docker-ce-rootless-extras', 'uidmap', 'slirp4netns', 'dbus-user-session', 'acl']) {
     assert.ok(packages.includes(name), name);
   }
-  for (const name of ['codex', 'ffmpeg', 'docker.io']) assert.ok(!packages.includes(name), name);
+  for (const name of ['codex', 'ffmpeg', 'docker.io', 'rootlesskit']) assert.ok(!packages.includes(name), name);
   // The sessions' write limit is bwrap, with its user namespaces, whatever modules the projects turn on.
   assert.match(readFileSync(join(m.sys, 'etc/apparmor.d/bwrap'), 'utf8'), /^profile bwrap \/usr\/bin\/bwrap flags=\(unconfined\) \{\n {2}userns,$/m);
   assert.deepEqual(loaded, ['bwrap']);
   assert.match(first.stdout, /^Docker Engine: from Docker's repository$/m);
   assert.match(first.stdout, /^GitHub CLI: from the GitHub CLI's repository$/m);
   assert.match(readFileSync(join(m.sys, 'etc/apt/sources.list.d/docker.sources'), 'utf8'), new RegExp(`^Suites: ${codename}$`, 'm'));
-  assert.deepEqual(users.triphammer, {home: m.home, groups: ['triphammer', 'docker']});
-  assert.deepEqual(linger, ['triphammer']);
+  assert.deepEqual(users.triphammer, {home: m.home, groups: ['triphammer']});
+  // The rootless daemon's user: a home of its own, beside the service user's, in no group of the service user's.
+  const dockerHome = join(m.root, 'home/triphammer-docker');
+  assert.deepEqual(users['triphammer-docker'], {home: dockerHome, groups: ['triphammer-docker']});
+  assert.deepEqual(linger, ['triphammer', 'triphammer-docker']);
+  for (const kind of ['uid', 'gid']) {
+    assert.equal(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), 'triphammer-docker:100000:65536\n', kind);
+  }
+  // Its socket's directory: the daemon's user's, mode 700, which the service user may only search; the unit gives the
+  // service user the socket itself.
+  const socketDir = join(m.sys, 'var/lib/triphammer-docker');
+  const socket = join(socketDir, 'docker.sock');
+  assert.equal(statSync(socketDir).mode & 0o777, 0o700);
+  assert.ok(m.calls().some(call => call.join(' ') === `chown -- triphammer-docker: ${socketDir}`), 'the socket directory is not the daemon user\'s');
+  assert.deepEqual(acls, {[socketDir]: ['user:triphammer:--x']});
+  const unit = readFileSync(join(dockerHome, '.config/systemd/user/docker.service'), 'utf8');
+  assert.match(unit, new RegExp(`^ExecStart=/usr/bin/dockerd-rootless\\.sh --host=unix://${socket}$`, 'm'));
+  assert.match(unit, new RegExp(`^ExecStartPost=/usr/bin/setfacl -m user:triphammer:rw- ${socket}$`, 'm'));
+  assert.match(unit, /^Type=notify$/m);
+  assert.match(unit, /^WantedBy=default\.target$/m);
+  assert.deepEqual(enabled, ['docker.service']);
+  assert.ok(m.calls().some(call => call.join(' ') === 'systemctl --machine=triphammer-docker@ --user enable --now docker.service'));
 
   assert.equal(git(checkout, 'remote', 'get-url', 'origin'), `file://${m.root}/origins/example/triphammer.git`);
   for (const name of scripts) assert.equal(readlinkSync(join(m.home, '.local/bin', name)), join(checkout, 'bin', name));
@@ -60,7 +83,8 @@ test('on a fresh machine it installs everything but a project, and a second run 
   for (const name of units) assert.equal(readlinkSync(join(m.home, '.config/systemd/user', name)), join(checkout, 'systemd', name));
   assert.equal(readlinkSync(join(m.home, '.config/systemd/user/triphammer-status.service')), join(checkout, 'systemd/triphammer-status.service'));
   assert.ok(m.calls().some(([command, ...args]) => command === 'systemctl' && args.join(' ') === '--machine=triphammer@ --user daemon-reload'));
-  assert.ok(!m.calls().some(([command, ...args]) => command === 'systemctl' && args.includes('enable')), 'provision enabled a unit');
+  assert.ok(!m.calls().some(([command, ...args]) => command === 'systemctl' && args.includes('enable') && args.includes('--machine=triphammer@')),
+    'provision enabled a unit of the service user\'s');
 
   assert.equal(statSync(join(m.home, '.config/github-app')).mode & 0o777, 0o700);
   assert.deepEqual(readdir(join(m.home, '.config/github-app')), []);
@@ -90,7 +114,8 @@ test('on a fresh machine it installs everything but a project, and a second run 
 
   const machineFile = join(m.sys, 'etc/triphammer.conf');
   assert.equal(readFileSync(machineFile, 'utf8').split('\n').slice(1).join('\n'),
-    `TRIPHAMMER_REPO=example/triphammer\nTRIPHAMMER_CHECKOUT=${checkout}\nTRIPHAMMER_USER=triphammer\nTRIPHAMMER_HOME=${m.home}\n`);
+    `TRIPHAMMER_REPO=example/triphammer\nTRIPHAMMER_CHECKOUT=${checkout}\nTRIPHAMMER_USER=triphammer\nTRIPHAMMER_HOME=${m.home}\n`
+    + `TRIPHAMMER_DOCKER_USER=triphammer-docker\nTRIPHAMMER_DOCKER_SOCKET=${socket}\n`);
   assert.equal(statSync(machineFile).mode & 0o777, 0o644);
   const command = join(m.sys, 'usr/local/bin/triphammer');
   assert.equal(readFileSync(command, 'utf8'), readFileSync(join(here, 'triphammer'), 'utf8'));
@@ -162,10 +187,73 @@ test('without the vendors\' repositories for the release, Docker and gh come fro
   assert.match(result.stdout, /^Docker Engine: from Ubuntu's archive \(docker\.io, docker-compose-v2\), as Docker's repository does not serve resolute$/m);
   assert.match(result.stdout, /^GitHub CLI: from Ubuntu's archive \(gh\)/m);
   const {packages} = m.machine();
-  for (const name of ['docker.io', 'docker-compose-v2', 'gh']) assert.ok(packages.includes(name), name);
+  for (const name of ['docker.io', 'docker-compose-v2', 'gh', 'rootlesskit', 'uidmap', 'slirp4netns', 'dbus-user-session', 'acl']) {
+    assert.ok(packages.includes(name), name);
+  }
   assert.ok(!packages.includes('docker-ce'));
+  assert.ok(!packages.includes('docker-ce-rootless-extras'));
+  // Ubuntu's docker.io ships the rootless daemon's script among its contrib files.
+  const unit = readFileSync(join(m.root, 'home/triphammer-docker/.config/systemd/user/docker.service'), 'utf8');
+  assert.match(unit, /^ExecStart=\/usr\/share\/docker\.io\/contrib\/dockerd-rootless\.sh --host=unix:\/\//m);
   assert.ok(!existsSync(join(m.sys, 'etc/apt/sources.list.d/github-cli.sources')), 'the failed vendor repository was left behind');
   assert.match(m.provision(...at(m, tri)).stdout, /^Nothing to change/m);
+});
+
+test('a machine provisioned before the rootless daemon: the service user leaves the docker group and the daemon is set up beside the subordinate ids already there', t => {
+  const m = machine(t, {'example/triphammer': triphammerFiles});
+  assert.equal(m.provision(...at(m, tri)).status, 0);
+  // As an earlier provision left it: the service user in the docker group, Ubuntu's useradd's subordinate ids for it,
+  // and neither the daemon's user nor its unit.
+  const state = m.machine();
+  const {'triphammer-docker': _, ...users} = state.users;
+  users.triphammer.groups.push('docker');
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify({...state, users, linger: ['triphammer'], enabled: [], acls: {}}));
+  for (const kind of ['uid', 'gid']) writeFileSync(join(m.sys, `etc/sub${kind}`), 'triphammer:100000:65536\nexample-owner:165536:65536\n');
+  rmSync(join(m.root, 'home/triphammer-docker'), {recursive: true});
+
+  const result = m.provision(...at(m, tri));
+  assert.equal(result.status, 0, result.output);
+  assert.match(result.stdout, /^\+ remove triphammer from the docker group$/m);
+  assert.match(result.stdout, /^Docker: triphammer's running processes keep the docker group until its user manager restarts \(sudo systemctl restart user@\d+\.service/m);
+  assert.ok(result.calls.some(call => call.join(' ') === 'gpasswd -d triphammer docker'));
+  const after = m.machine();
+  assert.deepEqual(after.users.triphammer.groups, ['triphammer']);
+  assert.deepEqual(after.linger, ['triphammer', 'triphammer-docker']);
+  assert.deepEqual(after.enabled, ['docker.service']);
+  // The daemon's user gets the first range past every one there.
+  for (const kind of ['uid', 'gid']) {
+    assert.equal(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'),
+      'triphammer:100000:65536\nexample-owner:165536:65536\ntriphammer-docker:231072:65536\n', kind);
+  }
+  assert.match(m.provision(...at(m, tri)).stdout, /^Nothing to change/m);
+});
+
+test('a daemon\'s user that is in the service user\'s group or the docker group leaves them, and subordinate ids useradd gave it stay', t => {
+  const m = machine(t, {'example/triphammer': triphammerFiles});
+  assert.equal(m.provision(...at(m, tri)).status, 0);
+  const state = m.machine();
+  state.users['triphammer-docker'].groups.push('triphammer', 'docker');
+  writeFileSync(join(m.state, 'machine.json'), JSON.stringify(state));
+  for (const kind of ['uid', 'gid']) writeFileSync(join(m.sys, `etc/sub${kind}`), 'triphammer-docker:300000:65536\n');
+  const result = m.provision(...at(m, tri));
+  assert.equal(result.status, 0, result.output);
+  assert.deepEqual(changingCalls(result.calls).map(call => call.join(' ')),
+    ['gpasswd -d triphammer-docker triphammer', 'gpasswd -d triphammer-docker docker']);
+  assert.deepEqual(m.machine().users['triphammer-docker'].groups, ['triphammer-docker']);
+  for (const kind of ['uid', 'gid']) assert.equal(readFileSync(join(m.sys, `etc/sub${kind}`), 'utf8'), 'triphammer-docker:300000:65536\n');
+});
+
+test('a daemon unit that is not provision\'s is rewritten, and the running daemon restarted with it', t => {
+  const m = machine(t, {'example/triphammer': triphammerFiles});
+  assert.equal(m.provision(...at(m, tri)).status, 0);
+  const path = join(m.root, 'home/triphammer-docker/.config/systemd/user/docker.service');
+  const ours = readFileSync(path, 'utf8');
+  writeFileSync(path, '[Service]\nExecStart=/usr/bin/dockerd-rootless.sh\n');
+  const result = m.provision(...at(m, tri));
+  assert.equal(result.status, 0, result.output);
+  assert.equal(readFileSync(path, 'utf8'), ours);
+  assert.deepEqual(changingCalls(result.calls).filter(([command]) => command === 'systemctl').map(call => call.join(' ')),
+    ['systemctl --machine=triphammer-docker@ --user daemon-reload', 'systemctl --machine=triphammer-docker@ --user restart docker.service']);
 });
 
 test('--dry-run on a fresh machine lists the changes and makes none', t => {
@@ -175,6 +263,8 @@ test('--dry-run on a fresh machine lists the changes and makes none', t => {
   assert.match(result.stdout, /^would: install ca-certificates curl git jq python3 openssl xz-utils shellcheck bubblewrap apparmor$/m);
   assert.match(result.stdout, /^would: load the AppArmor profile .*\/etc\/apparmor\.d\/bwrap$/m);
   assert.match(result.stdout, /^would: create the user triphammer with the home /m);
+  assert.match(result.stdout, /^would: create the user triphammer-docker with the home .*, for the rootless Docker daemon$/m);
+  assert.match(result.stdout, /^would: enable and start triphammer-docker's docker\.service, the rootless Docker daemon$/m);
   assert.match(result.stdout, /^would: clone example\/triphammer into /m);
   assert.match(result.stdout, /^would: write .*\/etc\/triphammer\.conf$/m);
   assert.match(result.stdout, /^would: add the plugin marketplace humanizer from blader\/humanizer for triphammer$/m);
@@ -205,7 +295,8 @@ function ownerSteps(t, undo = () => {}) {
   writeFileSync(join(app, 'owner'), 'sentinel-owner-login\n');
   mkdirSync(join(m.home, '.config/triphammer'), {recursive: true});
   writeFileSync(join(m.home, '.config/triphammer/project-a.conf'), 'REPO=example/project-a\n');
-  const state = {...m.machine(), enabled: ['ticket-runner@project-a.timer', 'merge-when-ready@project-a.timer', 'triphammer-status.service']};
+  const after = m.machine();
+  const state = {...after, enabled: [...after.enabled,'ticket-runner@project-a.timer', 'merge-when-ready@project-a.timer', 'triphammer-status.service']};
   setState(m, state);
   undo(m, app, state);
   const authCalls = lines(join(m.state, 'claude/auth-calls')).length;
@@ -263,7 +354,7 @@ for (const [what, undo, expected] of [
     setState(m, {...state, enabled: [...state.enabled, 'ticket-runner@project-b.timer']});
   }, () => ['  1. Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):',
     '     - project-a: its timers are on', '     - project-b: triphammer start project-b']],
-  ['the status page not enabled', (m, app, state) => setState(m, {...state, enabled: state.enabled.slice(0, 2)}),
+  ['the status page not enabled', (m, app, state) => setState(m, {...state, enabled: state.enabled.slice(0, -1)}),
     () => ['  1. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service']],
 ]) {
   test(`with ${what}, the report lists that step alone, with its fix`, t => {

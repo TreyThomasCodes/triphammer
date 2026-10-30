@@ -1054,7 +1054,7 @@ From a clone, `sudo bin/provision --triphammer <owner>/<repo> /srv/triphammer` d
 | `provision` argument | What it is |
 | --- | --- |
 | `--triphammer <owner/name> <checkout>` | Triphammer's repository and where to clone it. The units, the `~/.local/bin` links and the plugin install point at this checkout. |
-| `--user <name>` | The service user, default `triphammer`. |
+| `--user <name>` | The service user, default `triphammer`. The rootless Docker daemon's user is `<name>-docker`, so `<name>` has at most 25 characters. |
 | `--home <dir>` | The user's home when provision creates it, default `/home/<user>`. |
 | `--dry-run` | Prints each change it would make (`would: ...`) and makes none. Steps that read a checkout that is not cloned yet are listed without their details. |
 | `--no-owner-steps` | Leaves out the closing list of what is left for the owner. |
@@ -1063,15 +1063,39 @@ From a clone, `sudo bin/provision --triphammer <owner>/<repo> /srv/triphammer` d
 It installs what every project shares: git, `jq`, Python 3, curl, openssl, ShellCheck and bubblewrap from Ubuntu's
 archive, with the AppArmor profile `/etc/apparmor.d/bwrap` that lets `bwrap`, the sessions' write limit (Sessions, The
 write limit), create user namespaces (a profile there that it did not write is left alone), Docker Engine with
-Compose v2, `gh`, the service user in the `docker` group with lingering on (so its user units run without a login),
-Triphammer's checkout cloned as that user, Node at the version its `.node-version` pins (one Node for every project,
-into `/usr/local`) and Claude Code. It links the scripts, `triphammer-status` and the units as Install does, including
+Compose v2, `gh`, the service user with lingering on (so its user units run without a login) and out of the `docker`
+group, Triphammer's checkout cloned as that user, Node at the version its `.node-version` pins (one Node for every
+project, into `/usr/local`) and Claude Code. It links the scripts, `triphammer-status` and the units as Install does, including
 `demo-gallery@.service` and `triphammer-status.service`, installs the Triphammer plugin at user scope from Triphammer's
 checkout and the humanizer plugin (`humanizer@humanizer`) at user scope from the `blader/humanizer` marketplace on
 GitHub, each only when it is missing, points git's github.com credentials at `github-app-token` with `useHttpPath` on and creates
-`~/.config/github-app` (mode 700, empty). It writes the machine file `/etc/triphammer.conf` (Triphammer's repository
-and checkout, the service user and its home), and installs `bin/triphammer` as `/usr/local/bin/triphammer`, a copy root
-owns rather than a link into the checkout the service user can write. It enables no timer.
+`~/.config/github-app` (mode 700, empty). It writes the machine file `/etc/triphammer.conf`, mode 644, one `KEY=VALUE`
+per line: `TRIPHAMMER_REPO` and `TRIPHAMMER_CHECKOUT` (Triphammer's repository and checkout), `TRIPHAMMER_USER` and
+`TRIPHAMMER_HOME` (the service user and its home), and `TRIPHAMMER_DOCKER_USER` and `TRIPHAMMER_DOCKER_SOCKET` (the
+rootless Docker daemon's user and the absolute path of its socket). It installs `bin/triphammer` as
+`/usr/local/bin/triphammer`, a copy root owns rather than a link into the checkout the service user can write. It
+enables no timer of the service user's.
+
+**The rootless Docker daemon.** The sessions of a project that declares `"docker": true` use a rootless Docker daemon
+that runs as a user of its own, `<user>-docker` (`triphammer-docker` by default), with its home beside the service
+user's, holding its images and volumes, and in neither the service user's group nor `docker`. The daemon runs in a
+user namespace on that user's subordinate ids, so a container that mounts `/` or runs privileged acts as that user on
+the machine. `provision` installs what it needs (`docker-ce-rootless-extras` with Docker's packages, or `rootlesskit`
+with Ubuntu's, whose `docker.io` ships the daemon's script; `uidmap`, `slirp4netns`, `dbus-user-session` and `acl`),
+gives the user 65536 subordinate uids and gids in `/etc/subuid` and `/etc/subgid` unless it has some, turns lingering
+on, and writes and enables its user unit `docker.service`, as `dockerd-rootless-setuptool.sh install` would, with the
+socket at `/var/lib/<user>-docker/docker.sock`. That directory is the daemon user's, mode 700, and its ACL lets the
+service user search it and nothing more; the unit's `ExecStartPost` gives the service user `rw-` on the socket once
+the daemon is up. No other user but root can connect. A unit that differs from provision's is rewritten and the daemon
+restarted. Ubuntu's `apparmor` package holds the profile that lets `/usr/bin/rootlesskit` create user namespaces.
+`provision-project` lets the daemon's user read a Docker project's run clones, which its Compose files bind-mount, and
+nothing else of the service user's: read and search on `<checkout>/.worktrees` with a default ACL entry that each new
+clone there inherits, and search alone on the checkout and each directory above it that the service user owns. A clone
+made before that keeps no entry until a run makes it again. It stops when the machine file names no daemon user, as
+before `provision` set one up; `triphammer update` runs `provision` first. `provision` takes the service user out of
+the `docker` group, whose socket is the rootful daemon's and so root's; its running processes keep the group until its
+user manager restarts or the machine reboots, which `provision` says. The rootful Docker Engine stays installed and
+running for whatever else on the machine uses it.
 
 **What is left.** `provision` ends with the owner's steps that are still left, numbered, each with its fix, or with
 `Nothing left for the owner: the machine is ready.` It tells from what it can check without reading a credential's

@@ -3,12 +3,14 @@
 # messages), `here` (their directory) and `usage`, and before they set `user`, `home` and `dry_run`. Nothing here
 # changes the machine until a script calls it.
 # shellcheck disable=SC2154  # prog, here, user, home and dry_run are the sourcing script's
-# shellcheck disable=SC2034  # codename, arch, node_arch and node_bin are for the sourcing script
+# shellcheck disable=SC2034  # codename, arch, node_arch, node_bin and docker_socket are for the sourcing script
 # shellcheck disable=SC2016  # the sh -c scripts expand their own arguments, not this shell's
 #
-# The machine file, $root/etc/triphammer.conf, is how provision-project and the triphammer command find what provision
-# set up: Triphammer's repository and checkout, and the service user and its home. provision writes it as root, mode
-# 644, one KEY=VALUE per line.
+# The machine file, $root/etc/triphammer.conf, is how provision-project, the triphammer command and the service user's
+# scripts find what provision set up: Triphammer's repository and checkout (TRIPHAMMER_REPO, TRIPHAMMER_CHECKOUT), the
+# service user and its home (TRIPHAMMER_USER, TRIPHAMMER_HOME), and the rootless Docker daemon's user and the absolute
+# path of its socket (TRIPHAMMER_DOCKER_USER, TRIPHAMMER_DOCKER_SOCKET). provision writes it as root, mode 644, one
+# KEY=VALUE per line.
 #
 # Tests run the scripts with fakes of the package and account tools first on PATH, and two variables meant for them
 # only: TRIPHAMMER_PROVISION_ROOT, a directory the system paths the scripts write (/etc, /usr/local, /tmp) and read
@@ -38,15 +40,17 @@ check_place() {
     || usage_error "$1 $2: the checkout must be an absolute path without . or .. parts or a trailing /, not $3"
 }
 
-# machine_text <repo> <checkout> <user> <home>: the machine file's content.
+# machine_text <repo> <checkout> <user> <home> <docker user> <docker socket>: the machine file's content.
 machine_text() {
   printf '# Written by bin/provision: Triphammer on this machine (bin/README.md, On a machine of its own).\n'
-  printf 'TRIPHAMMER_REPO=%s\nTRIPHAMMER_CHECKOUT=%s\nTRIPHAMMER_USER=%s\nTRIPHAMMER_HOME=%s\n' "$@"
+  printf 'TRIPHAMMER_REPO=%s\nTRIPHAMMER_CHECKOUT=%s\nTRIPHAMMER_USER=%s\nTRIPHAMMER_HOME=%s\n' "$1" "$2" "$3" "$4"
+  printf 'TRIPHAMMER_DOCKER_USER=%s\nTRIPHAMMER_DOCKER_SOCKET=%s\n' "$5" "$6"
 }
-# read_machine: sets tri_repo, tri_checkout, user and home from the machine file, or exits 1 naming what is wrong.
+# read_machine: sets tri_repo, tri_checkout, user and home from the machine file, or exits 1 naming what is wrong, and
+# docker_user and docker_socket, which are empty in the file of a provision from before the rootless daemon.
 read_machine() {
   local line key value
-  tri_repo="" tri_checkout="" user="" home=""
+  tri_repo="" tri_checkout="" user="" home="" docker_user="" docker_socket=""
   [ -r "$machine_file" ] || fail "$machine_file is missing; set the machine up first (install.sh, or bin/provision)"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
@@ -56,10 +60,15 @@ read_machine() {
       TRIPHAMMER_CHECKOUT) tri_checkout="$value" ;;
       TRIPHAMMER_USER) user="$value" ;;
       TRIPHAMMER_HOME) home="$value" ;;
+      TRIPHAMMER_DOCKER_USER) docker_user="$value" ;;
+      TRIPHAMMER_DOCKER_SOCKET) docker_socket="$value" ;;
     esac
   done < "$machine_file"
   [[ "$tri_repo" =~ $repo_pattern && "$tri_checkout" == /* && "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$home" == /* ]] \
     || fail "$machine_file does not name Triphammer's repository, checkout, user and home; run bin/provision again"
+  [ -z "$docker_user$docker_socket" ] \
+    || [[ "$docker_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$docker_socket" == /* ]] \
+    || fail "$machine_file does not name the rootless Docker daemon's user and socket; run bin/provision again"
 }
 
 # check_ubuntu: run as root on Ubuntu, amd64 or arm64; sets codename, arch and node_arch.
@@ -232,6 +241,41 @@ reload_units() {
 # user_enabled <unit>: succeeds when the user's unit is enabled.
 user_enabled() {
   user_exists && systemctl --machine="$user@" --user is-enabled --quiet -- "$1" >/dev/null 2>&1
+}
+
+# as_docker <command...>: runs one of the functions above (as_user, user_file, reload_units, ...) for the rootless
+# Docker daemon's user, docker_user with its home docker_home, in place of the service user.
+as_docker() {
+  local user="$docker_user" home="$docker_home"
+  "$@"
+}
+# acl <path> <entry...>: adds each ACL entry (in getfacl's form, such as user:<name>:r-x) that <path> lacks.
+acl() {
+  local path="$1" entry missing=()
+  shift
+  for entry; do
+    getfacl -cpE -- "$path" 2>/dev/null | grep -qxF -- "$entry" || missing+=("$entry")
+  done
+  [ ${#missing[@]} -eq 0 ] && return 0
+  local IFS=,
+  change "grant ${missing[*]} on $path" setfacl -m "${missing[*]}" -- "$path" || fail "setfacl could not change $path"
+}
+# docker_reads <checkout>: lets the rootless Docker daemon's user read the run clones in <checkout>/.worktrees, which
+# a project's Compose files bind-mount, and nothing else of the service user's: read and search on .worktrees, with a
+# default entry so each clone a run makes there inherits both, and search alone (--x, which lists nothing) on the
+# checkout and each directory above it that the service user owns. It creates .worktrees as the user when it is
+# missing.
+docker_reads() {
+  local worktrees="$1/.worktrees" dir="$1" uid
+  if ! as_user test -d "$worktrees"; then
+    change "create $worktrees as $user" as_user mkdir -p -- "$worktrees" || fail "could not create $worktrees"
+  fi
+  acl "$worktrees" "user:$docker_user:r-x" "default:user:$docker_user:r-x"
+  uid="$(id -u "$user")"
+  while [ -n "$dir" ]; do
+    [ "$(stat -c %u -- "$dir" 2>/dev/null)" != "$uid" ] || acl "$dir" "user:$docker_user:--x"
+    dir="${dir%/*}"
+  done
 }
 
 # owner_steps: what is left for the owner, numbered, each with its fix, or one line saying the machine is ready. It

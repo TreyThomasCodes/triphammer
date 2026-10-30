@@ -3,12 +3,16 @@
 // fakeCommand(bin, <command>, join(<machine>, <command>), 'machine'), so the directory's last part names the command.
 // Every call appends [command, ...arguments] to <machine>/calls as a JSON line. The machine's state is
 // <machine>/machine.json: {packages, unavailable, users: {name: {home, groups, uid}}, linger, enabled, loaded,
-// downloads: {url: file}, bin}, which the calls read and change:
+// downloads: {url: file}, acls: {path: [entry]}, bin, sys}, which the calls read and change:
 // - apt-get update; apt-get install ... <packages> adds them, or fails like apt-get when one is `unavailable`;
 //   dpkg-query -W -f=... <package> prints `installed` for an installed one; dpkg --print-architecture prints amd64;
 // - useradd --home-dir <home> ... <name> creates the user (and its home), usermod -aG <group> <name> adds a group,
-//   getent passwd <name> and id -u [<name>] / id -nG <name> report them (id -u alone is root's 0; a user's uid is its
-//   `uid`, by default the caller's own, so the files the tests write are the user's);
+//   gpasswd -d <name> <group> removes one, usermod --add-subuids|--add-subgids <first>-<last> <name> appends
+//   <name>:<first>:<count> to <sys>/etc/subuid or subgid, getent passwd <name> and id -u [<name>] / id -nG <name> report
+//   them (id -u alone is root's 0; a user's uid is its `uid`, by default the caller's own, so the files the tests write
+//   are the user's);
+// - setfacl -m <entry>[,<entry>...] [--] <path> adds the entries (as getfacl writes them) to `acls[path]`, and
+//   getfacl ... <path> prints them, one per line;
 // - loginctl enable-linger <name> and loginctl show-user <name> --property=Linger --value;
 // - systemctl --machine=<name>@ --user link <path> links the unit into the user's ~/.config/systemd/user, enable
 //   [--now] <unit...> adds the units to `enabled`, is-enabled [--quiet] [--] <unit> succeeds for one in it, and any
@@ -31,7 +35,7 @@ const command = basename(dir);
 const machine = dirname(dir);
 appendFileSync(join(machine, 'calls'), `${JSON.stringify([command, ...args])}\n`);
 const file = join(machine, 'machine.json');
-const state = {packages: [], unavailable: [], users: {}, linger: [], enabled: [], loaded: [], downloads: {}, git: 'git', ...JSON.parse(readFileSync(file, 'utf8'))};
+const state = {packages: [], unavailable: [], users: {}, linger: [], enabled: [], loaded: [], downloads: {}, acls: {}, git: 'git', ...JSON.parse(readFileSync(file, 'utf8'))};
 const save = () => writeFileSync(file, JSON.stringify(state, null, 2));
 const done = (stdout = '', exit = 0, stderr = '') => {
   process.stdout.write(stdout);
@@ -63,9 +67,28 @@ switch (command) {
     done();
   }
   case 'usermod':
-    state.users[args.at(-1)].groups.push(option('-aG'));
+    for (const kind of ['uid', 'gid']) {
+      if (!args.includes(`--add-sub${kind}s`)) continue;
+      const [first, last] = option(`--add-sub${kind}s`).split('-').map(Number);
+      appendFileSync(join(state.sys, `etc/sub${kind}`), `${args.at(-1)}:${first}:${last - first + 1}\n`);
+    }
+    if (args.includes('-aG')) state.users[args.at(-1)].groups.push(option('-aG'));
     save();
     done();
+  case 'gpasswd': {
+    const user = state.users[option('-d')];
+    user.groups = user.groups.filter(group => group !== args.at(-1));
+    save();
+    done(`Removing user ${option('-d')} from group ${args.at(-1)}\n`);
+  }
+  case 'setfacl': {
+    const entries = state.acls[args.at(-1)] ??= [];
+    entries.push(...option('-m').split(',').filter(entry => !entries.includes(entry)));
+    save();
+    done();
+  }
+  case 'getfacl':
+    done((state.acls[args.at(-1)] ?? []).map(entry => `${entry}\n`).join(''));
   case 'getent': {
     const user = state.users[args[1]];
     done(user ? `${args[1]}:x:1001:1001::${user.home}:/bin/bash\n` : '', user ? 0 : 2);
