@@ -152,19 +152,22 @@ say() { if [ -n "$dry_run" ]; then printf '%s\n' "$*"; else log "$*"; fi; }
 
 # The project's data, from .triphammer/project.json in the main checkout (load_project, after the self-update): the
 # command that tears down a run directory's resources, and the compose project names the sweep may prune. Either may
-# be absent, and then its step is skipped without a word.
-teardown=() compose_pattern=""
+# be absent, and then its step is skipped without a word. docker is 1 when the project declares "docker": true, and
+# empty otherwise; it becomes the write limit's TRIPHAMMER_DOCKER, without which the limit hides the Docker sockets.
+teardown=() compose_pattern="" docker=""
 load_project() {
   check_project ticket-runner "$checkout" || exit 2
   mapfile -t teardown < <(project_get "$checkout" worktreeTeardown)
   compose_pattern="$(project_get "$checkout" composeProjectPattern)"
+  docker=""
+  [ "$(project_get "$checkout" docker)" != true ] || docker=1
 }
 
 # sandbox <run directory> <command> [argument...]: runs the command under the write limit, bin/session-sandbox, with the
-# project's cache directory, created first.
+# project's cache directory, created first, and its Docker setting.
 sandbox() {
   mkdir -p -- "$cache_dir" && chmod 700 "$shared/caches" "$cache_dir" \
-    && TRIPHAMMER_CACHE_DIR="$cache_dir" "$bin/session-sandbox" "$@"
+    && TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" "$bin/session-sandbox" "$@"
 }
 
 # Removes a run directory, <checkout>/.worktrees/issue-N or pr-N, first running the project's teardown command in it
@@ -914,8 +917,9 @@ rm -f "$brake_file"
 # file, in a temporary directory, which the hook lets a session write. TRIPHAMMER_TOKEN_FILE is the session's token
 # file, which its gh and git read through github-app-token. The session and everything it starts run under the write
 # limit, bin/session-sandbox, which lets them write the run's clone, the temporary directories, the project's cache
-# directory (TRIPHAMMER_CACHE_DIR, which the dry run above created) and little else, and read no token but that file.
-(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" TRIPHAMMER_CACHE_DIR="$cache_dir" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
+# directory (TRIPHAMMER_CACHE_DIR, which the dry run above created) and little else, and read no token but that file;
+# a project that does not declare Docker gets no Docker socket (TRIPHAMMER_DOCKER, load_project).
+(cd "$run_dir" && TRIPHAMMER_SESSION="$run_dir" TRIPHAMMER_OWNER="$owner" TRIPHAMMER_PROPOSALS="$proposals" TRIPHAMMER_TOKEN_FILE="$token_file" TRIPHAMMER_CACHE_DIR="$cache_dir" TRIPHAMMER_DOCKER="$docker" CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_FORK_SUBAGENT=0 exec setsid timeout 6h "$bin/session-sandbox" "$run_dir" claude -p "$prompt" --plugin-dir "$plugin" --agent triphammer:orchestrator --model opus --permission-mode auto --permission-prompts none \
   --output-format stream-json --verbose) > "$run" 2>&1 &
 session=$!
 # The watcher and its sleeps hold neither lock, so a watcher left behind by a runner killed outside systemd cannot keep

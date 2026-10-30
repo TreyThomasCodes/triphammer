@@ -223,7 +223,8 @@ check_project() {
        else "name must be letters, digits, dots, dashes or underscores" end),
       (if .worktreeTeardown == null or (.worktreeTeardown | strings and (.[0] | startswith("/") | not)) then empty
        else "worktreeTeardown must be a command: a list of words whose first is a path relative to the worktree" end),
-      (if .demos == null or (.demos | type == "boolean") then empty else "demos must be true or false" end),
+      (("demos", "docker") as $key
+        | if $root[$key] == null or ($root[$key] | type == "boolean") then empty else "\($key) must be true or false" end),
       (("composeProjectPattern", "securityReviewPaths", "securityReviewArea", "reviewChecklist", "uiVerificationSkill") as $key
         | if $root[$key] == null or ($root[$key] | text) then empty else "\($key) must be text" end),
       (if .reviewSkills == null or (.reviewSkills | strings) then empty else "reviewSkills must be a list of paths" end),
