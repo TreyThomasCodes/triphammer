@@ -2,12 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
 import {copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
 import {delimiter, dirname, join} from 'node:path';
 import {fakeAnswers, fakeDocker, git, gitEnv, here, listenUnix, realCommand, runClone, withoutSandboxPaths} from './fixture.mjs';
 
 // The real bwrap, which needs unprivileged user namespaces (bin/README.md, The write limit).
 const userns = spawnSync('bwrap', ['--unshare-user', '--ro-bind', '/', '/', 'true']).status === 0;
 const skip = userns ? false : 'bwrap is missing or cannot create a user namespace here';
+
+// The tests that check what the limit makes read-only need the rig outside /tmp and $TMPDIR, which the limit leaves
+// writable, so they skip when the repository itself lies there, as a reviewer's scratch copy does (the agent-guard
+// tests' sandboxInTemp does the same).
+const repository = realpathSync(join(here, '..'));
+const skipOutside = skip || (['/tmp', tmpdir()].some(dir => {
+  const real = realpathSync(dir);
+  return repository === real || repository.startsWith(`${real}/`);
+}) && 'the repository lies under /tmp or $TMPDIR, which the limit leaves writable, so the rig cannot be outside them');
 
 // A rig outside /tmp, which the limit leaves writable: in the repository, which this test may write in a session too.
 // It holds a bare origin, a main checkout cloned from it, a run's clone `.worktrees/issue-1` of that origin on ticket/1
@@ -89,7 +99,7 @@ function assertReadOnly(r, paths, extra) {
 
 const pythonWrite = path => `python3 -c "open('${path}', 'w').write('planted')"`;
 
-test('under the limit, the main checkout, Triphammer\'s checkout and the home directory are read-only', {skip}, t => {
+test('under the limit, the main checkout, Triphammer\'s checkout and the home directory are read-only', {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const targets = {
     "a tracked file of the main checkout": join(r.main, 'tracked.txt'),
@@ -115,7 +125,7 @@ test('under the limit, the main checkout, Triphammer\'s checkout and the home di
   assert.equal(git(r.main, 'status', '--porcelain', '--untracked-files=no'), '');
 });
 
-test("under the limit, Triphammer's checkout's .git is read-only, so no config or hook there reaches the next tick", {skip}, t => {
+test("under the limit, Triphammer's checkout's .git is read-only, so no config or hook there reaches the next tick", {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const config = join(r.triphammer, '.git/config');
   const before = readFileSync(config, 'utf8');
@@ -133,7 +143,7 @@ function looseObject(r) {
   return {id, path: join(r.main, '.git/objects', id.slice(0, 2), id.slice(2)), content: git(r.main, 'cat-file', '-p', id)};
 }
 
-test("under the limit, the main checkout's .git is read-only, the objects the run's clone reads through its alternate included", {skip}, t => {
+test("under the limit, the main checkout's .git is read-only, the objects the run's clone reads through its alternate included", {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const objects = join(r.main, '.git/objects');
   assert.equal(readFileSync(join(r.worktree, '.git/objects/info/alternates'), 'utf8').trim(), objects);
@@ -148,7 +158,7 @@ test("under the limit, the main checkout's .git is read-only, the objects the ru
     join(objects, 'info/alternates'), join(objects, 'planted')]);
 });
 
-test("a session cannot plant other content under a loose object's name in the main checkout's store", {skip}, t => {
+test("a session cannot plant other content under a loose object's name in the main checkout's store", {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const {id, path, content} = looseObject(r);
   writeFileSync(join(r.root, 'planted.txt'), 'planted\n');
@@ -294,7 +304,7 @@ function cacheDir(r, project) {
 const cacheVars = {XDG_CACHE_HOME: 'xdg', npm_config_cache: 'npm', NUGET_PACKAGES: 'nuget/packages',
   NUGET_HTTP_CACHE_PATH: 'nuget/http-cache', NUGET_PLUGINS_CACHE_PATH: 'nuget/plugins-cache', BUILDX_CONFIG: 'buildx'};
 
-test("under the limit, the home directory's caches, NuGet's and buildx's among them, are read-only", {skip}, t => {
+test("under the limit, the home directory's caches, NuGet's and buildx's among them, are read-only", {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const docker = join(r.home, '.docker');
   for (const dir of ['.cache', '.npm/_cacache', '.nuget/packages', '.local/share/NuGet/http-cache', '.docker/buildx',
@@ -374,7 +384,7 @@ test('a cache directory elsewhere than directly in the shared caches directory r
   }
 });
 
-test("with dotnet installed and no NuGet user config, the session gets a read-only one with NuGet's default source, and none outside", {skip}, t => {
+test("with dotnet installed and no NuGet user config, the session gets a read-only one with NuGet's default source, and none outside", {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const config = join(r.home, '.nuget/NuGet/NuGet.Config');
   rmSync(config);
@@ -399,7 +409,7 @@ test('a Codex directory without a config.toml gets an empty read-only one under 
   assert.ok(!existsSync(config), 'config.toml was created outside');
 });
 
-test('with docker installed and no Docker config directory, it gets none and no config.json can be planted', {skip}, t => {
+test('with docker installed and no Docker config directory, it gets none and no config.json can be planted', {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const bin = join(r.root, 'bin');
   mkdirSync(bin);
@@ -440,7 +450,7 @@ echo cache > '${r.home}/.templateengine/dotnetcli/9.9.9/templatecache.json'`);
     'packs/planted', 'templates/planted', 'tools/planted'].map(path => join(dotnet, path)));
 });
 
-test('with dotnet installed, the CLI home that DOTNET_CLI_HOME names gets writable state for the session', {skip}, t => {
+test('with dotnet installed, the CLI home that DOTNET_CLI_HOME names gets writable state for the session', {skip: skipOutside}, t => {
   const r = sandboxRig(t);
   const cliHome = join(r.root, 'cli-home');
   mkdirSync(cliHome);
@@ -555,7 +565,7 @@ test('a token file outside the shared tokens directory runs nothing', {skip}, t 
 // A shell command that connects to the Unix socket at `path` and prints `connected <path>`, or why it could not.
 const connect = path => `python3 -c "import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); print('connected', sys.argv[1])" '${path}'`;
 
-test("under the limit, the runtime directory's bus and agent sockets cannot be reached and their variables are gone; a rootless Docker socket there can", {skip}, async t => {
+test("under the limit, the runtime directory's bus and agent sockets cannot be reached and their variables are gone; a rootless Docker socket there can", {skip: skipOutside}, async t => {
   const r = sandboxRig(t);
   const runtime = join(r.root, 'runtime');
   mkdirSync(join(runtime, 'gnupg'), {recursive: true, mode: 0o700});
