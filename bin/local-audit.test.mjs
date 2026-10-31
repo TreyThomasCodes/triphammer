@@ -161,15 +161,16 @@ test('the session runs the reviewer on Qwen with only read-only tools', async t 
   }
 });
 
-test('the clone holds only the audited commit and its ancestors, has no remote, and is removed afterwards, on Qwen and on Codex', async t => {
+test('the clone holds only the audited commit and its ancestors, has no remote, is the prompt\'s scratch copy and is removed afterwards, on Qwen and on Codex', async t => {
   const server = await listen(t);
-  for (const [name, audit, session] of [
-    ['Qwen', r => r.audit(server.url), r => r.claude()],
-    ['Codex', r => r.codexAudit(), r => r.codex()],
+  for (const [name, audit, session, prompt] of [
+    ['Qwen', r => r.audit(server.url), r => r.claude(), seen => seen.args[1]],
+    ['Codex', r => r.codexAudit(), r => r.codex(), seen => seen.args.at(-1)],
   ]) {
     const r = auditSetup(t);
     assert.equal((await audit(r)).code, 0, name);
     const seen = session(r);
+    assert.match(prompt(seen), /Your working directory is already a throwaway clone of the commit, removed after the audit, so it is your\nscratch copy: run checks there and make no other copy\./, name);
     assert.deepEqual(seen.revs, [r.audited, r.first], name);
     assert.deepEqual(seen.log, [r.audited, r.first], name);
     assert.equal(seen.laterExists, false, name);

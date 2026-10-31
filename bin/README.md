@@ -709,7 +709,8 @@ It reads the Triphammer config on every run, and exits 2 when the model's module
   any commit past `<rev>`. The clone is removed when the script exits.
 - The session stops after `$LOCAL_AUDIT_TIMEOUT` (a `timeout` duration, default `1h`) and gets no GitHub token.
 - `<file>` gets the commit, area, model, the session's exit status and elapsed seconds, then the reviewer's result.
-- The audit prompt asks the reviewer to read for the classes of `triphammer:review-checklist` and of the audited commit's
+- The audit prompt tells the reviewer that the clone is the scratch copy its agent definition runs checks in, so it
+  makes no other. It asks the reviewer to read for the classes of `triphammer:review-checklist` and of the audited commit's
   `reviewChecklist`, then as its `reviewSkills` do, and names the commands it may run: git and the commit's `build`,
   `focused` and `suite` checks, which are also the only commands besides git the Qwen session is allowed. A commit
   without a project file gets neither; a malformed one stops the audit with exit 2.

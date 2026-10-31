@@ -237,7 +237,9 @@ prompt="Audit this area of the repository at commit $sha: $area
 Read the area together with whatever it calls and whatever calls it; a change can be correct on its own and wrong
 against an existing caller. Read first for the classes in $plugin_named/skills/review-checklist/SKILL.md${checklist:+ and
 $checklist}${skills[0]:+, then as $(listed "${skills[@]}") does}. There is no issue or diff for this review: audit the code as it is at this
-commit. You have no GitHub and no network, and you cannot edit files; you may run $(listed git "${commands[@]}").
+commit. Your working directory is already a throwaway clone of the commit, removed after the audit, so it is your
+scratch copy: run checks there and make no other copy. You have no GitHub and no network, and you cannot edit files;
+you may run $(listed git "${commands[@]}").
 
 Report only defects with a reproduction: exact inputs and the wrong result, or a test that would fail, with the file and
 line and the checklist class. If you find nothing, say so in one line."
