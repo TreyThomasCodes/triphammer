@@ -916,9 +916,11 @@ private repository its `git` clones only when git's credential helpers give gith
 The example project stands in for a project Triphammer serves: a project file, risk rules for the engine tests in
 `scripts/risk-tier.test.mjs`, and the teardown script the runner tests run. CI runs the node tests in three shards
 side by side (`TEST_SHARD=k/3 npm run test:node`). `test:node` fails a test that runs past ten minutes
-(`--test-timeout`) and ends a test file's process once its tests are done (`--test-force-exit`), so a test that hangs
-fails by name instead of holding the job. The signal tests of `triphammer` and `install.sh` wait on the script with
-`interrupt` in `fixture.mjs`, which gives the slow step ten seconds to start and the script ten seconds to end after
+(`--test-timeout`), so a test that hangs fails by name instead of holding the job. A test file's process has to end
+on its own once its tests are done, so a test leaves no process, timer or server running, or the job waits on it.
+The reporter `scripts/test-files-reported.mjs` fails the run when a test file it ran sent no summary of its own, as
+one with no tests or a report cut short does, which the runner would otherwise count as one passing test. The signal
+tests of `triphammer` and `install.sh` wait on the script with `interrupt` in `fixture.mjs`, which gives the slow step ten seconds to start and the script ten seconds to end after
 the signal; when either runs out, it records the processes under the script (pid, parent, group, session, state and
 command), kills them, and fails the test with that list.
 
