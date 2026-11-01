@@ -389,7 +389,7 @@ def split_string(words, i):
         end = value_letter(option, WRAPPER_VALUE_OPTIONS["env"][0]) if option.startswith("-") else None
         if end is None or option[end] != "S":
             return None
-        eq, attached = option[end + 1:], option[end + 1:]
+        eq = attached = option[end + 1:]
     used = 1 if eq else 2
     if used > len(words) - i:
         return None
