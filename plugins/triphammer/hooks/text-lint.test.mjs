@@ -279,6 +279,22 @@ test('a relative --body-file is read from the directory a cd in the same command
   assert.equal(bash(s, `cd sub && ${create}`), null);
 });
 
+test('a cd that may not run, or to a missing directory, leaves the file judged where bash may read it', t => {
+  const s = twoBodies(t);
+  const create = 'gh pr create -t "Add a thing" --body-file body.md';
+  for (const command of [`[ -d nope ] && cd sub; ${create}`, `false && cd sub; ${create}`,
+    `if false; then cd sub; fi; ${create}`, `f() { cd sub; }; ${create}`, `while false; do cd sub; done; ${create}`,
+    `cd nope; ${create}`, `false && cd sub && cd .; ${create}`, `{ cd sub; } & ${create}`,
+    `{ cd sub; } | cat; ${create}`]) {
+    const reason = bash(s, command);
+    for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  }
+  assert.equal(bash(s, `{ cd sub; ${create}; }`), null);
+  rmSync(join(s.cwd, 'body.md'));
+  assert.equal(bash(s, `[ -d sub ] && cd sub; ${create}`), null);
+  assert.match(bash(s, `cd nope; ${create}`) ?? '', /BODY FILE body.md does not exist/);
+});
+
 test('after a cd it cannot follow, a relative --body-file is not judged, as agent-guard does', t => {
   const s = twoBodies(t);
   const create = 'gh pr create -t "Add a thing" --body-file body.md';

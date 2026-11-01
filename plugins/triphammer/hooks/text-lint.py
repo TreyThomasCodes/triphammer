@@ -15,9 +15,14 @@
 # --no-edit` with no -m, -F, -c or -C (it keeps the message it has), post nothing new and are not checked. A
 # --body-file that does not exist is refused, so the check cannot be skipped by writing the file in the same command.
 # A relative file is read from the directory the command runs in: the hook's cwd, moved by git's -C and by each
-# `cd <path>` before it in the same shell (not one in a pipeline, in the background or in a subshell it has left). After
-# a cd it cannot follow (no path, an option, `-`, a computed path, next to `||`) or a pushd or popd, a relative file is
-# not judged, as agent-guard.py does: its text is not checked and it is not refused as missing.
+# `cd <path>` before it in the same shell (not one in a pipeline, in the background or in a subshell or `{ }` group it
+# has left). Such a cd moves it only when the cd certainly runs and its directory exists: it starts a list (at the
+# start, after `;`, a newline or `&`, or first in a subshell or `{ }` group that itself certainly runs) or follows `&&`
+# after a cd that certainly ran, and is in no if, loop, case or function body. Any other cd (after `&&` or `||` from
+# another command, inside such a body, or to a directory that does not exist yet) leaves the directories it may have
+# run from too: the file is checked in each of them, and refused as missing only when it is missing from all. After a
+# cd it cannot follow (no path, an option, `-`, a computed path, followed by `||`) or a pushd or popd, a relative file
+# is not judged, as agent-guard.py does: its text is not checked and it is not refused as missing.
 # Not covered: a command run by bash -c, eval, xargs, a script or a gh alias, git's abbreviated long options (--mess),
 # and a value given by an unquoted substitution (--body $(cat f)) or computed when it runs.
 # Text that breaks a rule is refused with every rule it breaks:
@@ -97,6 +102,11 @@ GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--c
                      "--attr-source", "--list-cmds"}
 # git commit --amend --no-edit keeps the commit's message unless one of these gives another.
 MESSAGE_SOURCES = {"-m", "--message", "-F", "--file", "-c", "-C", "--reuse-message", "--reedit-message"}
+# Separators after which a command starts a list of the shell it runs in, so nothing before it decides whether it runs.
+LIST_STARTS = {None, ";", "\n", "&", "(", "$(", "<(", "`"}
+# Reserved words that open a compound command, and those that close one; `function` opens its body.
+OPENERS = {"if", "while", "until", "for", "select", "case", "function", "{"}
+CLOSERS = {"fi", "done", "esac", "}"}
 UNKNOWN = object()  # the text of a file whose directory is not known
 MARKER = re.compile(r"\x00(\d+)\x00")  # agent-guard's mark of a heredoc body, also inside a word: "$(cat <<EOF ...)"
 
@@ -221,38 +231,70 @@ def recover_tokens(guard, text):
     return guard.tokenize(text[:max(text.rfind("\n", 0, error.start), 0)])
 
 
-def changed_directory(guard, words, directory):
-    """The directory after a cd, pushd or popd: the one `cd <path>` names when it can be read as agent-guard.py reads a
-    path, else None (unknown)."""
+def resolve(guard, word, directories):
+    """The directories a path word names from each of directories, as agent-guard.py reads a path; None when one is
+    unknown."""
+    targets = [guard.literal_path(word, directory) for directory in directories or (None,)]
+    return None if None in targets else tuple(dict.fromkeys(targets))
+
+
+def changed_directories(guard, words, directories, certain):
+    """The directories the shell may be in after a cd, pushd or popd run from directories, or None (unknown): those
+    `cd <path>` names when it can be read as agent-guard.py reads a path, joined by the ones it ran from when it may
+    not run or its directory does not exist yet."""
     args = words[1:]
     if args and args[0].value == "--":
         args = args[1:]
     if words[0].value != "cd" or len(args) != 1 or args[0].value.startswith("-"):
         return None  # pushd, popd, cd to $HOME or $OLDPWD, or with options
-    target = guard.literal_path(args[0], directory)
-    return target and os.path.normpath(target)
+    targets = resolve(guard, args[0], directories)
+    if targets is None:
+        return None
+    targets = tuple(dict.fromkeys(os.path.normpath(target) for target in targets))
+    if certain and all(os.path.isdir(target) for target in targets):
+        return targets
+    return None if directories is None else tuple(dict.fromkeys(directories + targets))
 
 
 def posting_commands(cmd, cwd):
-    """(tool, kind, verb, options, heredoc, directory) for each command in cmd that posts text, found by its words
+    """(tool, kind, verb, options, heredoc, directories) for each command in cmd that posts text, found by its words
     after any assignments and wrappers: options as read_options returns them, heredoc the first heredoc body it reads
-    (also one inside a word, as in --body "$(cat <<'EOF' ...)"), directory the absolute one its relative files are read
-    from, or None when a cd made it unknown."""
+    (also one inside a word, as in --body "$(cat <<'EOF' ...)"), directories the absolute ones its relative files may be
+    read from, or None when a cd made it unknown."""
     guard = load_guard()
     text, bodies = guard.strip_heredocs(cmd)
-    directory = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+    directories = (cwd,) if isinstance(cwd, str) and os.path.isabs(cwd) else None
     outer, before = [], None  # the directories of the shells each open subshell or substitution was entered from
+    blocks = []  # (whether it certainly runs, the directories before it, in a pipeline) for each open compound command
+    after_cd = False  # the last list element was a cd that certainly ran, so one after its && does too
     for pipeline, separator in guard.pipelines(recover_tokens(guard, text)):
+        starts = before in LIST_STARTS or before == "&&" and after_cd
+        after_cd = False
         for command in pipeline:
+            for word in command.words:  # the reserved words that open or close a compound command before its name
+                if word.value in OPENERS:  # only `{` certainly runs, when it starts its list (a function body,
+                    certain = word.value == "{" and starts and all(c for c, _, _ in blocks)  # f() {, does not)
+                    blocks.append((certain, directories, len(pipeline) > 1))
+                elif word.value in CLOSERS and blocks:
+                    _, entered, piped = blocks.pop()
+                    if piped or len(pipeline) > 1 or separator == "&":
+                        directories = entered  # it ran in a subshell: a cd inside ends with it
+                elif word.value not in ("then", "else", "elif", "do", "!"):
+                    break
             words = guard.strip_prefix(command.words)
             if not words:
                 continue
             if words[0].value in ("cd", "pushd", "popd"):
                 if len(pipeline) == 1 and separator != "&":  # a pipeline's or background job's cd runs in a subshell
-                    unsure = "||" in (before, separator)  # it may not run, or what follows runs only when it failed
-                    directory = None if unsure else changed_directory(guard, words, directory)
+                    certain = starts and all(c for c, _, _ in blocks)
+                    if separator == "||":  # what follows runs only when it failed
+                        directories = None
+                    else:
+                        after = changed_directories(guard, words, directories, certain)
+                        after_cd = certain and after is not None and all(os.path.isdir(d) for d in after)
+                        directories = after
                 continue
-            tool, args, here, i = os.path.basename(words[0].value), words[1:], directory, 0
+            tool, args, here, i = os.path.basename(words[0].value), words[1:], directories, 0
             if tool in TOOLS:
                 positional = []  # the group and the verb, around -R/--repo and other options
                 while i < len(args) and len(positional) < 2:
@@ -271,7 +313,7 @@ def posting_commands(cmd, cwd):
                 while i < len(args) and args[i].value.startswith("-"):
                     value = args[i].value
                     if value == "-C" and i + 1 < len(args):
-                        here = guard.literal_path(args[i + 1], here)
+                        here = resolve(guard, args[i + 1], here)
                     i += 2 if value in GIT_VALUE_OPTIONS else 1
                 if i >= len(args) or args[i].value != "commit":
                     continue
@@ -290,18 +332,28 @@ def posting_commands(cmd, cwd):
             yield tool, kind, verb, options, heredoc, here
         top = outer[-1][0] if outer else None
         if separator == "`" and top == "`" or separator == ")" and top not in (None, "`"):
-            directory = outer.pop()[1]  # a cd inside ends with the subshell
+            directories = outer.pop()[1]  # a cd inside ends with the subshell
         elif separator in ("(", "$(", "<(", "`"):
-            outer.append((separator, directory))
+            outer.append((separator, directories))
         before = separator
 
 
 def lint(cmd, cwd, session_id):
-    """(kind, failures) for the first command in cmd that posts text breaking a rule, or None."""
-    for found in posting_commands(cmd, cwd):
-        result = lint_command(*found, session_id)
-        if result:
-            return result
+    """(kind, failures) for the first command in cmd that posts text breaking a rule, or None. A command whose relative
+    file may be read from more than one directory is checked in each, and refused as missing only when it is missing
+    from every one."""
+    for tool, kind, verb, options, heredoc, directories in posting_commands(cmd, cwd):
+        missing = []
+        for directory in directories or (None,):
+            try:
+                result = lint_command(tool, kind, verb, options, heredoc, directory, session_id)
+            except Refused as refusal:
+                missing.append(refusal)
+                continue
+            if result:
+                return result
+        if len(missing) == len(directories or (None,)):
+            raise missing[0]
     return None
 
 
