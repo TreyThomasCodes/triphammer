@@ -5,7 +5,8 @@
 # PreToolUse on Bash: checks `gh pr create|new|edit`, `gh issue create|new|edit` (and glab's mr/issue
 # create|new|edit|update) and `git commit`. Each command of a list, pipeline, subshell or substitution is found by its
 # words, parsed by agent-guard.py's shell parsing (loaded from beside this file): after variable assignments and the
-# wrappers it strips (sudo, env, command, nohup, time and timeout, with their options), named
+# wrappers it strips (sudo, env, command, nohup, time and timeout, with their options; env's -S or --split-string
+# string is read as the words it holds), named
 # by its name or any path to it, quoted or escaped, with gh's -R/--repo and git's options (-C, -c, --no-pager...)
 # before the subcommand. The text comes from --title/-t and --body/-b (glab: --description/-d), git's -m/--message,
 # a heredoc the command reads, or a --body-file/-F file; a value may be the next word, attached (`-b'text'`, `-am msg`)

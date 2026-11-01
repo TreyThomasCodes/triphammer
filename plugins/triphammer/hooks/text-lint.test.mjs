@@ -214,7 +214,8 @@ const B = `--title "Adds x" --body "Previously — broken"`;
 test('gh pr and issue create are checked however the command is spelled', t => {
   const s = humanized(t);
   for (const command of [`gh pr new ${B}`, `gh issue new ${B}`, `gh  pr create ${B}`, `gh\tpr\tcreate ${B}`,
-    `env gh pr create ${B}`, `env -u X FOO=1 gh pr create ${B}`, `command gh pr create ${B}`, `\\gh pr create ${B}`,
+    `env gh pr create ${B}`, `env -u X FOO=1 gh pr create ${B}`, `env -S 'gh pr' create ${B}`,
+    `env --split-string='FOO=1 gh pr create' ${B}`, `command gh pr create ${B}`, `\\gh pr create ${B}`,
     `/usr/bin/gh pr create ${B}`, `time gh pr create ${B}`, `nohup gh pr create ${B}`, `sudo -u x gh pr create ${B}`,
     `gh -R a/b pr create ${B}`, `gh --repo a/b pr create ${B}`, `gh --repo=a/b pr create ${B}`,
     `gh pr -R a/b create ${B}`, `true && gh pr create ${B}`, `(gh pr create ${B})`, `gh pr create ${B} | cat`]) {

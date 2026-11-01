@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {
   guard, python, inTriphammerSession, run, decide, repo, machineHome, configuredSetup, validConf,
-  assertNoOverrideHint, assertNotLifted,
+  assertNoOverrideHint, assertNotLifted, triphammerSession,
 } from './agent-guard-fixture.mjs';
 
 function assertPersistenceDenied(reason, command) {
@@ -52,6 +52,18 @@ const persistenceRefused = [
   'mv ~/.local/bin/land-pr /tmp/land-pr',
   'timeout 5 rm ~/.local/bin/ticket-runner',
   'env FOO=1 nohup rm ~/.local/bin/ticket-runner',
+  // mv of a directory that holds a persistence directory moves it, as rm -r of it removes it.
+  'mv ~/.config/systemd ~/.config/systemd.old',
+  'mv ~/.local ~/.local.old',
+  'mv -t /tmp ~/.config',
+  // env runs the words of its -S or --split-string string.
+  "env -S 'rm -rf' ~/.local/bin",
+  "env --split-string 'rm -rf' ~/.local/bin",
+  "env --split-string='rm -rf' ~/.local/bin",
+  "env -iS'rm -rf' ~/.local/bin",
+  "env -S 'FOO=1 nohup rm' ~/.local/bin/ticket-runner",
+  // uutils env's -f reads variables from a file, its value.
+  'env -f /dev/null rm -rf ~/.local/bin',
 ];
 
 for (const command of persistenceRefused) {
@@ -112,6 +124,10 @@ test('reads of Triphammer, its read-only systemctl verbs, computed paths and pro
     'ln -s ~/.local/bin/ticket-runner /tmp/runner-link',
     'echo x > ~/.local/binder',
     'rm ~/.local/state/other/x',
+    'mv ~/projects ~/projects.old',
+    'mv ~/.local/share ~/.local/share.old',
+    "env -S 'echo hi' ~/.local/bin",
+    "env -S 'rm -rf' ~/.local/share",
     // Computed paths are left to the write limit; a Triphammer session refuses "$dir/stop" nowhere either.
     'echo x > "$dir/stop"',
     'rm "$(echo ~/.local/bin)/ticket-runner"',
@@ -119,6 +135,19 @@ test('reads of Triphammer, its read-only systemctl verbs, computed paths and pro
     assert.equal(decide(command, cwd, {env}), null, command);
   }
 });
+
+test('mv of a directory that holds a persistence directory is refused by the persistence rule, in and outside a Triphammer session',
+  t => {
+    const outside = machineHome(t);
+    delete outside.env.TRIPHAMMER_SESSION;
+    const inside = triphammerSession(t);
+    for (const {env, cwd} of [outside, ...(inside ? [{env: inside.env, cwd: inside.worktree}] : [])]) {
+      for (const command of ['mv ~/.config/systemd ~/.config/systemd.old', 'mv ~/.local ~/.local.old',
+        "env -S 'rm -rf' ~/.local/bin"]) {
+        assertPersistenceDenied(decide(command, cwd, {env}), command);
+      }
+    }
+  });
 
 // The user service manager runs the ticket runner, the merge queue and the status page.
 for (const verb of ['daemon-reexec', 'exit', 'isolate default.target', 'set-environment FOO=1',
