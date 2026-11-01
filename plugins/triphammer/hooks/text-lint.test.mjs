@@ -59,6 +59,7 @@ function humanized(t, options) {
 const TITLE = 'Agent hook for pull request text';
 const GOOD = 'Adds a hook that checks pull request text before it is posted.\n\n' +
   'It reads the title and body from the command and lists every rule the text breaks.\n\nCloses #547';
+const FOOTER = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
 const prCreate = (body, title = TITLE) => `gh pr create --title "${title}" --body-file - <<'EOF'\n${body}\nEOF`;
 const issueCreate = (body, title = 'Hook for issue text') =>
   `gh issue create --title "${title}" --body "$(cat <<'EOF'\n${body}\nEOF\n)"`;
@@ -78,8 +79,7 @@ test('a description in the repository form is allowed', t => {
 });
 
 test('a body with the Claude Code footer is refused', t => {
-  const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
-  const body = GOOD.replace('\n\nCloses', `\n\n${footer}\n\nCloses`);
+  const body = GOOD.replace('\n\nCloses', `\n\n${FOOTER}\n\nCloses`);
   assertRefused(bash(humanized(t), prCreate(body)), "FOOTER: remove the 'Generated with Claude Code' line.");
 });
 
@@ -287,8 +287,7 @@ test('a quoted <<WORD is text, not a heredoc', t => {
 
 test('an escaped quote in $\'...\' does not close it, so the words after it are read', t => {
   const s = humanized(t);
-  const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
-  const reason = bash(s, `gh pr create -t $'Add Bob\\'s thing' -b 'Adds it — now.\n\n${footer}'`);
+  const reason = bash(s, `gh pr create -t $'Add Bob\\'s thing' -b 'Adds it — now.\n\n${FOOTER}'`);
   for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
   assertRefused(bash(s, "git commit -m $'Add Bob\\'s thing' -m 'x — y'"), 'DASH');
   assert.equal(bash(s, "git commit -m $'Add Bob\\'s thing' -m 'Adds it.'"), null);
@@ -296,8 +295,7 @@ test('an escaped quote in $\'...\' does not close it, so the words after it are 
 
 test('a <<\\WORD heredoc is the text the command reads', t => {
   const s = humanized(t);
-  const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
-  const body = `Adds it — now.\n\n${footer}`;
+  const body = `Adds it — now.\n\n${FOOTER}`;
   for (const quoted of ["'EOF'", '\\EOF']) {
     const reason = bash(s, `gh pr create -t "Add a thing" -F - <<${quoted}\n${body}\nEOF`);
     for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);

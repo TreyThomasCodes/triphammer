@@ -148,17 +148,11 @@ def strip_heredocs(cmd):
     out, bodies, pending, stack, i, n = [], [], [], ["code"], 0, len(cmd)
     while i < n:
         c, top = cmd[i], stack[-1]
-        if top == "'":
+        if top == "'" or top == "$'" and c != "\\":  # inside $'...' a backslash escapes, as below
             if c == "'":
                 stack.pop()
             out.append(c)
             i += 1
-            continue
-        if top == "$'":
-            if c == "'":
-                stack.pop()
-            out.append(cmd[i:i + 2] if c == "\\" else c)
-            i += 2 if c == "\\" else 1
             continue
         if c == "\\":
             out.append(cmd[i:i + 2])
