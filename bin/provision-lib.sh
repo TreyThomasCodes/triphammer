@@ -513,7 +513,7 @@ owner_steps() {
   if [ ${#projects[@]} -eq 0 ]; then
     lines+=("  $((step += 1)). Add a project: triphammer add <owner>/<repo>")
   elif [ -n "$off" ]; then
-    lines+=("  $((step += 1)). Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):" "${projects[@]}")
+    lines+=("  $((step += 1)). Start the timers that are off:" "${projects[@]}")
   fi
 
   if ! user_enabled triphammer-status.service; then

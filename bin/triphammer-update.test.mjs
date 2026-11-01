@@ -47,13 +47,15 @@ function setUp(t) {
 // What provision's report says is left on the machine setUp leaves: neither project started, nor the status page.
 const ownerSteps = `
 Next, as the owner (provision never reads or writes a credential):
-  1. Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):
+  1. Start the timers that are off:
      - project-a: triphammer start project-a
      - project-b: triphammer start project-b
   2. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service
 `;
 const endsWithOwnerSteps = output => {
   assert.ok(output.endsWith(ownerSteps), output);
+  // A machine serves one project, so the report never offers to add another.
+  assert.doesNotMatch(output, /adds another/);
   assert.equal(output.split('Next, as the owner (provision never').length, 2, 'the report came more than once');
 };
 

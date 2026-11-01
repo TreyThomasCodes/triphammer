@@ -326,7 +326,7 @@ for (const [what, undo, expected] of [
   ['a project whose timers are off', (m, app, state) => {
     writeFileSync(join(m.home, '.config/triphammer/project-b.conf'), 'REPO=example/project-b\n');
     setState(m, {...state, enabled: [...state.enabled, 'triphammer:ticket-runner@project-b.timer']});
-  }, () => ['  1. Start the projects whose timers are off (triphammer add <owner>/<repo> adds another):',
+  }, () => ['  1. Start the timers that are off:',
     '     - project-a: its timers are on', '     - project-b: triphammer start project-b']],
   ['the status page not enabled', (m, app, state) => setState(m, {...state, enabled: state.enabled.slice(0, -1)}),
     () => ['  1. Optionally the status page: sudo systemctl --machine=triphammer@ --user enable --now triphammer-status.service']],
@@ -335,6 +335,8 @@ for (const [what, undo, expected] of [
     const {app, steps, stdout} = ownerSteps(t, undo);
     assert.match(stdout, /^Next, as the owner \(provision never reads or writes a credential\):$/m);
     assert.deepEqual(steps, expected(app));
+    // A machine serves one project, so the report never offers to add another.
+    assert.doesNotMatch(stdout, /adds another/);
   });
 }
 
