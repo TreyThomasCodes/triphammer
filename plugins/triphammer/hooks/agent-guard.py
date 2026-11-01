@@ -4,17 +4,19 @@
 # that says what to do instead. It is not a security boundary: the write limit (bin/session-sandbox) and the runner
 # hold the boundaries of the threat model in bin/security-review-brief.md, and a command written to get past this hook
 # gets past it. It reads commands in their plain forms: each command of a list, pipeline, subshell or substitution,
-# after variable assignments and the wrappers sudo, env, command, nohup, time and timeout. The plain writers are
-# redirections, tee, cp, mv, rm, ln and sed -i; a path counts when it is literal, or starts with ~, $HOME or one of
-# $XDG_CONFIG_HOME, $XDG_STATE_HOME and $TRIPHAMMER_SHARED_DIR. A path computed at run time is allowed, and so is a
-# relative one after a cd. Heredoc bodies and quoted arguments are text, not commands.
+# after variable assignments and the wrappers sudo, env, command, nohup, time and timeout, with the words of env's -S
+# or --split-string string read as its arguments. The plain writers are redirections, tee, cp, mv, rm, ln and sed -i,
+# and mv and rm -r change every file under the paths they move or remove; a path counts when it is literal, or starts
+# with ~, $HOME or one of $XDG_CONFIG_HOME, $XDG_STATE_HOME and $TRIPHAMMER_SHARED_DIR. A path computed at run time is
+# allowed, and so is a relative one after a cd. Heredoc bodies and quoted arguments are text, not commands.
 #
 # In every session:
 #   persistence  systemctl --user verbs that change the manager or a Triphammer unit (ticket-runner, merge-when-ready,
 #               triphammer-status), and writes by the plain writers or the file tools under ~/.local/bin,
 #               ~/.config/systemd/user, ~/.config/triphammer (or under $XDG_CONFIG_HOME), ~/.local/state/ticket-runner,
 #               the STATE_DIR each Triphammer config sets, and the shared directory ($TRIPHAMMER_SHARED_DIR, else
-#               ${XDG_STATE_HOME:-~/.local/state}/triphammer), as written or with symlinks resolved.
+#               ${XDG_STATE_HOME:-~/.local/state}/triphammer), as written or with symlinks resolved, or by mv or rm -r
+#               of a directory that holds one of them.
 #   shell-edit  a plain writer other than rm and ln rewriting a git-tracked file under a `shellEditRoots` path of the
 #               .triphammer/project.json of the repository the command runs in.
 #   self-kill   pkill -f or pgrep -f with a pattern not in '[p]attern' form, and kill of $$, $PPID or the PID of the
@@ -54,6 +56,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -78,7 +81,7 @@ WRAPPER_VALUE_OPTIONS = {
     "sudo": ("aCcDgpRrTtUu", {"--auth-type", "--login-class", "--close-from", "--chdir", "--group", "--host",
                                "--prompt", "--chroot", "--role", "--type", "--command-timeout", "--other-user",
                                "--user"}),
-    "env": ("aCu", {"--argv0", "--chdir", "--unset"}),
+    "env": ("aCfSu", {"--argv0", "--chdir", "--file", "--split-string", "--unset"}),
     "time": ("fo", {"--format", "--output"}),
     "timeout": ("ks", {"--kill-after", "--signal"}),
 }
@@ -347,7 +350,7 @@ def pipelines(tokens):
 
 def strip_prefix(words):
     """Drops variable assignments, reserved words and the wrappers (with their options and timeout's duration) before
-    the command name."""
+    the command name; env's -S or --split-string string is split into the words it stands for."""
     i, wrapper = 0, None
     while i < len(words):
         value = words[i].value
@@ -355,6 +358,9 @@ def strip_prefix(words):
         if wrapper is not None and value == "--":
             wrapper = None  # the end of the wrapper's options
             i += 1
+        elif wrapper == "env" and (split := split_string(words, i)):
+            used, string = split
+            words = words[:i] + string + words[i + used:]  # env reads the split words as its own arguments
         elif wrapper is not None and value.startswith("-"):
             i += 1 + takes_value(wrapper, value)
         elif wrapper == "timeout":
@@ -368,6 +374,31 @@ def strip_prefix(words):
         else:
             break
     return words[i:]
+
+
+def split_string(words, i):
+    """When words[i] is env's -S or --split-string (also in a group, `-iS`, or with its value attached): how many words
+    it and its value take, and the value split shell-style into words; else None, also for a value that does not split,
+    as with an unbalanced quote."""
+    option = words[i].value
+    if option.startswith("--"):
+        name, eq, attached = option.partition("=")
+        if name != "--split-string":
+            return None
+    else:
+        end = value_letter(option, WRAPPER_VALUE_OPTIONS["env"][0]) if option.startswith("-") else None
+        if end is None or option[end] != "S":
+            return None
+        eq = attached = option[end + 1:]
+    used = 1 if eq else 2
+    if used > len(words) - i:
+        return None
+    value = words[i + used - 1]
+    try:
+        parts = shlex.split(attached if eq else value.value)
+    except ValueError:
+        return None
+    return used, [Word(part, value.dynamic and bool(re.search(r"[$`]", part))) for part in parts]
 
 
 def takes_value(wrapper, option):
@@ -516,7 +547,8 @@ def analyze(command, cwd, findings):
 
 
 def analyze_copy(name, args, cwd, findings):
-    """cp, mv and ln: the destination (or each source's name inside it), and the sources mv removes."""
+    """cp, mv and ln: the destination (or each source's name inside it), and the sources mv removes, each with every
+    file under it, as rm -r removes them."""
     files, options = split_options(args, *COPY_OPTIONS)
     target_dir = next((value for option, value in reversed(options)
                        if option in ("-t", "--target-directory") and value is not None), None)
@@ -531,7 +563,7 @@ def analyze_copy(name, args, cwd, findings):
         return
     if name == "mv":
         for w in sources:
-            findings.write(w, cwd, removal=True)
+            findings.write(w, cwd, tree=True, removal=True)
     directory = literal_path(dest, cwd)
     if target_dir is None and not (directory and os.path.isdir(directory)):
         findings.write(dest, cwd, edit=edit)
