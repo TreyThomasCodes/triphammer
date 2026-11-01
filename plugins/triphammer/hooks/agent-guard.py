@@ -190,6 +190,10 @@ def strip_heredocs(cmd):
                 continue
             if c == "(":
                 stack.append("(")
+        elif cmd.startswith("$$", i):  # the PID, paired left to right, so the quote in $$'...' is a plain one
+            out.append("$$")
+            i += 2
+            continue
         elif cmd.startswith("$'", i):
             stack.append("$'")  # ANSI-C quoting, where a backslash escapes the next character, \' too
             out.append("$'")
@@ -269,7 +273,13 @@ def tokenize(text):
             word.value += text[i + 1:i + 2]
             i += 2
             continue
-        if c == "$" and text[i + 1:i + 2] == "'":
+        if text.startswith("$$", i):  # the PID, paired left to right, so the quote in $$'...' is a plain one
+            word = word or Word()
+            word.dynamic = True
+            word.value += "$$"
+            i += 2
+            continue
+        if text.startswith("$'", i):
             word = word or Word()
             word.quoted = True
             start, i = i + 1, i + 2

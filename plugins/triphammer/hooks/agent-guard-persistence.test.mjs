@@ -92,9 +92,13 @@ test('a line bash runs before an unbalanced quote is judged', t => {
 test('an escaped quote in $\'...\' does not close it, so the command after it is judged', t => {
   const {env, cwd} = machineHome(t);
   for (const command of ["printf $'don\\'t\\n'; rm -rf ~/.local/bin", "echo $'a\\\\'; rm -rf ~/.local/bin",
-    "cat <<EOF $'it\\'s'\nx\nEOF\nrm -rf ~/.local/bin"]) {
+    "cat <<EOF $'it\\'s'\nx\nEOF\nrm -rf ~/.local/bin",
+    // $$ is the shell's PID, so the quote after it is a plain one that \' closes; $$$' does start $'...'.
+    "echo $$'a\\'; rm -rf ~/.local/bin #'", "echo \\$'a\\'; rm -rf ~/.local/bin #'",
+    "echo $$$'a\\'; rm -rf ~/.local/bin #'; rm -rf ~/.local/bin"]) {
     assertPersistenceDenied(decide(command, cwd, {env}), command);
   }
+  assert.equal(decide("echo $$$'a\\'; rm -rf ~/.local/bin #'", cwd, {env}), null);
 });
 
 test('a <<\\WORD heredoc body is text', t => {
