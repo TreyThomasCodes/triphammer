@@ -89,6 +89,23 @@ test('a line bash runs before an unbalanced quote is judged', t => {
   assert.equal(decide(`echo "unclosed\nrm ~/.local/bin/ticket-runner`, cwd, {env}), null);
 });
 
+test('an escaped quote in $\'...\' does not close it, so the command after it is judged', t => {
+  const {env, cwd} = machineHome(t);
+  for (const command of ["printf $'don\\'t\\n'; rm -rf ~/.local/bin", "echo $'a\\\\'; rm -rf ~/.local/bin",
+    "cat <<EOF $'it\\'s'\nx\nEOF\nrm -rf ~/.local/bin"]) {
+    assertPersistenceDenied(decide(command, cwd, {env}), command);
+  }
+});
+
+test('a <<\\WORD heredoc body is text', t => {
+  const {env, cwd} = machineHome(t);
+  for (const command of ['cat <<\\EOF > /tmp/notes\nrm -rf ~/.local/bin\nEOF',
+    'cat <<-\\EOF > /tmp/notes\n\trm -rf ~/.local/bin\n\tEOF']) {
+    assert.equal(decide(command, cwd, {env}), null, command);
+  }
+  assertPersistenceDenied(decide('cat <<\\EOF\nnotes\nEOF\nrm -rf ~/.local/bin', cwd, {env}));
+});
+
 test('reads of Triphammer, its read-only systemctl verbs, computed paths and prose that mentions changes are allowed', t => {
   const {env, cwd} = machineHome(t);
   const prose = 'systemctl --user disable --now ticket-runner.timer\nln -sfn x ~/.local/bin/ticket-runner\n' +

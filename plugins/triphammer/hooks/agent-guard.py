@@ -7,7 +7,8 @@
 # after variable assignments and the wrappers sudo, env, command, nohup, time and timeout. The plain writers are
 # redirections, tee, cp, mv, rm, ln and sed -i; a path counts when it is literal, or starts with ~, $HOME or one of
 # $XDG_CONFIG_HOME, $XDG_STATE_HOME and $TRIPHAMMER_SHARED_DIR. A path computed at run time is allowed, and so is a
-# relative one after a cd. Heredoc bodies and quoted arguments are text, not commands.
+# relative one after a cd. Heredoc bodies and quoted arguments are text, not commands. Quoting is read as bash reads
+# it, $'...' with its common backslash escapes (\' included) decoded, and a heredoc's delimiter may be quoted with ', " or \.
 #
 # In every session:
 #   persistence  systemctl --user verbs that change the manager or a Triphammer unit (ticket-runner, merge-when-ready,
@@ -84,7 +85,11 @@ WRAPPER_VALUE_OPTIONS = {
 }
 # Reserved words that can stand before a command name: `if true; then sed -i ...; fi` runs sed.
 RESERVED = {"if", "then", "else", "elif", "do", "while", "until", "{", "!", "coproc"}
-HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][\w.-]*)\2")
+# `<<WORD`, `<<-WORD`, and the quoted forms `<<'WORD'`, `<<"WORD"` and `<<\WORD`.
+HEREDOC = re.compile(r"(?<!<)<<(-?)[ \t]*(?:\\|(['\"]?))([A-Za-z_][\w.-]*)(?(2)\2)")
+# The escapes of ANSI-C quoting ($'...') that tokenize decodes; any other backslash stays as written.
+ANSI_C_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "f": "\f", "v": "\v", "e": "\x1b",
+                  "E": "\x1b", "\\": "\\", "'": "'", '"': '"', "?": "?"}
 MARKER = re.compile(r"\x00(\d+)\x00$")
 # Leading variables a path may start with, expanded from the hook's own environment, which the shell shares.
 PATH_VARIABLES = ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "TRIPHAMMER_SHARED_DIR")
@@ -149,6 +154,12 @@ def strip_heredocs(cmd):
             out.append(c)
             i += 1
             continue
+        if top == "$'":
+            if c == "'":
+                stack.pop()
+            out.append(cmd[i:i + 2] if c == "\\" else c)
+            i += 2 if c == "\\" else 1
+            continue
         if c == "\\":
             out.append(cmd[i:i + 2])
             i += 2
@@ -179,6 +190,11 @@ def strip_heredocs(cmd):
                 continue
             if c == "(":
                 stack.append("(")
+        elif cmd.startswith("$'", i):
+            stack.append("$'")  # ANSI-C quoting, where a backslash escapes the next character, \' too
+            out.append("$'")
+            i += 2
+            continue
         elif c in "'\"":
             stack.append(c)
         elif c == "(":
@@ -252,6 +268,21 @@ def tokenize(text):
             word.quoted = True
             word.value += text[i + 1:i + 2]
             i += 2
+            continue
+        if c == "$" and text[i + 1:i + 2] == "'":
+            word = word or Word()
+            word.quoted = True
+            start, i = i + 1, i + 2
+            while i < n and text[i] != "'":
+                if text[i] == "\\" and i + 1 < n:
+                    word.value += ANSI_C_ESCAPES.get(text[i + 1], text[i:i + 2])
+                    i += 2
+                    continue
+                word.value += text[i]
+                i += 1
+            if i >= n:
+                raise Unbalanced(start)
+            i += 1
             continue
         if c == "'":
             end = text.find("'", i + 1)

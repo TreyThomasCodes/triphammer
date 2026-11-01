@@ -285,6 +285,26 @@ test('a quoted <<WORD is text, not a heredoc', t => {
   assert.equal(bash(s, "git commit -m 'Read <<EOF bodies' -m 'Adds it.'"), null);
 });
 
+test('an escaped quote in $\'...\' does not close it, so the words after it are read', t => {
+  const s = humanized(t);
+  const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
+  const reason = bash(s, `gh pr create -t $'Add Bob\\'s thing' -b 'Adds it — now.\n\n${footer}'`);
+  for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  assertRefused(bash(s, "git commit -m $'Add Bob\\'s thing' -m 'x — y'"), 'DASH');
+  assert.equal(bash(s, "git commit -m $'Add Bob\\'s thing' -m 'Adds it.'"), null);
+});
+
+test('a <<\\WORD heredoc is the text the command reads', t => {
+  const s = humanized(t);
+  const footer = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
+  const body = `Adds it — now.\n\n${footer}`;
+  for (const quoted of ["'EOF'", '\\EOF']) {
+    const reason = bash(s, `gh pr create -t "Add a thing" -F - <<${quoted}\n${body}\nEOF`);
+    for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  }
+  assertRefused(bash(s, 'git commit -F - <<-\\EOF\n\tAdd x\n\n\tx — y\n\tEOF'), 'DASH');
+});
+
 test('a quote that never closes does not hide the command from the check', t => {
   const s = humanized(t);
   assertRefused(bash(s, "gh pr create -t 'Adds x' -b 'x — y\n\nCloses #1"), 'DASH');
