@@ -206,13 +206,14 @@ async function dependencyUpdateProblems(path, manifest, source) {
     }
     if (entry.integrity !== release.integrity) problems.push(`${name} ${version} integrity does not match the registry`);
     const declared = release.dependencies ?? {};
-    for (const [dependency, range] of Object.entries(entryDependencies(entry))) {
+    const listed = entryDependencies(entry);
+    for (const [dependency, range] of Object.entries(listed)) {
       if (!Object.hasOwn(declared, dependency) || declared[dependency] !== range) {
         problems.push(`${name} ${version} lists ${dependency}@${range}, which the registry release does not`);
       }
     }
     for (const [dependency, range] of Object.entries(declared)) {
-      if (!Object.hasOwn(entryDependencies(entry), dependency)) {
+      if (!Object.hasOwn(listed, dependency)) {
         problems.push(`${name} ${version} drops ${dependency}@${range}, which the registry release declares`);
       }
     }
