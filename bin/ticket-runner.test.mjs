@@ -831,15 +831,16 @@ test('a daemon sweep that fails before the session starts no session, mints no t
   assert.deepEqual(r.tokenCalls(), []);
 });
 
-test('a daemon sweep that fails after the session is logged and the run still finishes', t => {
+test('a daemon sweep that fails after the session or the teardown is logged and the run still finishes', t => {
   const r = ticketSetup(t);
-  const during = join(r.root, 'during.sh');  // the daemon goes down during the session
-  writeFileSync(during, `#!/bin/sh\nprintf '%s' '${r.dockerHost}' > "$PROBE/docker/refuse"\n`, {mode: 0o755});
+  // The daemon goes down during the session.
+  const during = sessionScript(r.root, 'during.sh', `printf '%s' '${r.dockerHost}' > "$PROBE/docker/refuse"\n`);
   r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
   r.tick({DURING_SESSION: during});
   assert.equal(r.ran(), true);
   const log = r.log();
   assert.match(log, /ticket #7: could not sweep the project's Docker daemon after the session: docker info failed: Cannot connect to the Docker daemon/);
+  assert.ok(log.includes(`could not sweep the project's Docker daemon after the teardown in ${r.worktree}: docker info failed: Cannot connect`), log);
   assert.match(log, /ticket #7: run 1 finished \(exit 0\)/);
   assert.equal(existsSync(r.worktree), false, "the run's clone is still removed");
 });
@@ -1395,10 +1396,8 @@ test('a run left behind, by a run without progress or a killed tick, is removed 
 // A DURING_SESSION program that rewrites the clone's teardown, scripts/local-db.sh, to start a container on the
 // project's daemon (in the fake, to add one to docker/ps.json).
 function plantTeardown(r) {
-  writeFileSync(join(r.root, 'planted.sh'), `#!/bin/sh\nprintf '[["planted-by-teardown",""]]' > "$PROBE/docker/ps.json"\n`);
-  const during = join(r.root, 'during.sh');
-  writeFileSync(during, '#!/bin/sh\ncp "$PROBE/planted.sh" "$PWD/scripts/local-db.sh"\n', {mode: 0o755});
-  return during;
+  sessionScript(r.root, 'planted.sh', `printf '[["planted-by-teardown",""]]' > "$PROBE/docker/ps.json"\n`);
+  return sessionScript(r.root, 'during.sh', 'cp "$PROBE/planted.sh" "$PWD/scripts/local-db.sh"\n');
 }
 
 test("a run that progressed sweeps the daemon after its clone's teardown, so no container the teardown started is left", t => {
@@ -1423,16 +1422,6 @@ test("a run left behind and removed on a later tick sweeps the daemon after its 
   assert.match(log, new RegExp(`removed run directory ${r.worktree} \\(issue #7 is closed\\)\n`));
   assert.doesNotMatch(readFileSync(join(r.root, 'docker/ps.json'), 'utf8'), /planted-by-teardown/);
   assert.ok(log.includes(`swept the project's Docker daemon after the teardown in ${r.worktree}: removed 1 container and pruned`), log);
-});
-
-test('a daemon sweep that fails after a teardown is logged and the clone is still removed', t => {
-  const r = ticketSetup(t);
-  const during = join(r.root, 'during.sh');  // the daemon goes down during the session
-  writeFileSync(during, `#!/bin/sh\nprintf '%s' '${r.dockerHost}' > "$PROBE/docker/refuse"\n`, {mode: 0o755});
-  r.gh.respond({'issue view 7': {stdout: 'yes\n'}});
-  r.tick({DURING_SESSION: during});
-  assert.ok(r.log().includes(`could not sweep the project's Docker daemon after the teardown in ${r.worktree}: docker info failed: Cannot connect`), r.log());
-  assert.equal(existsSync(r.worktree), false);
 });
 
 test('a failed removal is logged and the tick carries on', t => {
