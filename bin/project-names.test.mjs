@@ -25,6 +25,8 @@ const files = [
   'status/README.md',
   'status/test-fixtures/waiting-tiers-gh.json',
   'bin/README.md',
+  'bin/demo-publish',
+  'bin/demo-publish.test.mjs',
   'bin/fake-docker.mjs',
   'bin/provision',
   'bin/provision.test.mjs',

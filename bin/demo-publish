@@ -9,7 +9,8 @@ Publishing <pr> again replaces its media once every new file is copied or conver
 nonzero with one line on stderr and leaves the earlier demo as it was. Symlinks inside the folder, and a folder
 argument that is itself a symlink, are never followed, and a file whose real path leaves the folder is never copied;
 each one is named in the output as skipped. The repository is the Triphammer config's REPO, the gallery lives in its DEMO_GALLERY_DIR and is served at its
-DEMO_URL; with the demo module off, or either setting missing, it exits 2 (bin/README.md, "Configuration").
+DEMO_URL, and the page's title and heading name the config's project; with the demo module off, or either setting
+missing, it exits 2 (bin/README.md, "Configuration").
 """
 import html, json, os, secrets, shutil, stat, subprocess, sys, tempfile
 from datetime import datetime, timezone
@@ -17,19 +18,19 @@ from pathlib import Path
 
 
 def demo_settings():
-    """The repository, the gallery directory and its URL, read by bin/config.sh, the one reader of Triphammer
+    """The repository, the gallery directory, its URL and the project's name, read by bin/config.sh, the one reader of Triphammer
     config, from the checkout this script lives in; or exit 2 with its message, which names the file and the setting,
     or the demo module when it is off."""
     bin_dir = Path(__file__).resolve().parent
     result = subprocess.run(["bash", bin_dir / "config.sh", "--print", "demo-publish", bin_dir.parent,
-                             "--module", "demo", "DEMO_GALLERY_DIR", "DEMO_URL", "--", "REPO", "DEMO_GALLERY_DIR", "DEMO_URL"],
+                             "--module", "demo", "DEMO_GALLERY_DIR", "DEMO_URL", "--", "REPO", "DEMO_GALLERY_DIR", "DEMO_URL", "PROJECT"],
                             capture_output=True)
     values = result.stdout.split(b"\0") if result.returncode == 0 else []
-    if len(values) != 4:
+    if len(values) != 5:
         sys.stderr.buffer.write(result.stderr or b"demo-publish: bin/config.sh failed\n")
         sys.exit(2)
-    repo, gallery, url = map(os.fsdecode, values[:3])
-    return repo, Path(gallery), url
+    repo, gallery, url, project = map(os.fsdecode, values[:4])
+    return repo, Path(gallery), url, project
 
 
 def pr_info(number):
@@ -208,14 +209,15 @@ def render():
             f'<span class="badge {kind}">{label}</span><time>{when} UTC</time></header>{summary}'
             f'<div class="videos">{media}</div><div class="shots">{shots}</div></article>')
     body = "".join(cards) or "<p>No demos yet.</p>"
-    page = PAGE.replace("{{cards}}", body)
+    title = f"{html.escape(PROJECT)} demos" if PROJECT else "Demos"
+    page = PAGE.replace("{{title}}", title).replace("{{cards}}", body)
     (ROOT / "index.html.tmp").write_text(page)
     os.replace(ROOT / "index.html.tmp", ROOT / "index.html")
 
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Options X-Ray Demos</title>
+<title>{{title}}</title>
 <style>
 :root { --bg:#f6f7f9; --card:#fff; --text:#1b1f24; --muted:#5b6470; --line:#dde1e6; --merged:#8250df; --waiting:#bf3989; --open:#1a7f37; --closed:#6e7781; }
 @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --card:#161b22; --text:#e6edf3; --muted:#9198a1; --line:#30363d; --merged:#a371f7; --waiting:#db61a2; --open:#3fb950; --closed:#8b949e; } }
@@ -238,7 +240,7 @@ video { width:100%; border-radius:6px; border:1px solid var(--line); margin-top:
 .shots { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:8px; margin-top:8px; }
 .shots img { width:100%; border-radius:6px; border:1px solid var(--line); display:block; }
 </style></head>
-<body><main><h1>Options X-Ray demos</h1>
+<body><main><h1>{{title}}</h1>
 <nav><button aria-pressed="true" data-filter="all">All</button><button aria-pressed="false" data-filter="waiting">Waiting on you</button><button aria-pressed="false" data-filter="merged">Merged</button></nav>
 {{cards}}
 </main>
@@ -259,7 +261,7 @@ if __name__ == "__main__":
     if not reindexing and not (len(args) == 4 and args[0].isdigit() and args[1] == "--summary" and args[2].strip()
                                and (Path(args[3]).is_symlink() or Path(args[3]).is_dir())):
         sys.exit(__doc__)
-    REPO, ROOT, URL = demo_settings()
+    REPO, ROOT, URL, PROJECT = demo_settings()
     ROOT.mkdir(parents=True, exist_ok=True)
     if reindexing:
         reindex()
