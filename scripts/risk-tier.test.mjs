@@ -501,6 +501,19 @@ test('a package wired in through an existing entry, or one nothing depends on, e
   assert.match((await judge({'package-lock.json': [baseLock, orphan]}, releases)).reasons[0], /evil is new and nothing depends on it/);
 });
 
+test('a lockfile that drops an entry, or a dependency the registry release declares, escalates', async () => {
+  const base = lockfile(oldPi, {[pi]: lockEntry(pi, '0.84.4', {dependencies: {undici: '^8.9.0'}}), undici: lockEntry('undici', '8.9.0')});
+  const releases = npmRelease(pi, '0.84.4', 60, {dependencies: {undici: '^8.9.0'}});
+  const dropped = lockfile(oldPi, {[pi]: lockEntry(pi, '0.84.4')});
+  assert.deepEqual(await judge({'package-lock.json': [base, dropped]}, releases), {tier: 'escalate', reasons: [
+    `package-lock.json: not a plain dependency update: drops node_modules/undici from the lockfile; ${pi} 0.84.4 drops undici@^8.9.0, which the registry release declares`,
+  ]});
+  const unwired = lockfile(oldPi, {[pi]: lockEntry(pi, '0.84.4'), undici: lockEntry('undici', '8.9.0')});
+  assert.match((await judge({'package-lock.json': [base, unwired]}, releases)).reasons[0], /drops undici@\^8\.9\.0, which the registry release declares/);
+  const orphanDropped = lockfile(oldPi, {[pi]: lockEntry(pi, '0.84.4', {dependencies: {undici: '^8.9.0'}}), undici: lockEntry('undici', '8.9.0'), evil: lockEntry('evil', '1.0.0')});
+  assert.deepEqual((await judge({'package-lock.json': [orphanDropped, base]}, releases)).reasons, ['package-lock.json: not a plain dependency update: drops node_modules/evil from the lockfile']);
+});
+
 test('install scripts: a package that already ran one may move versions; a new one escalates, whatever the lockfile says', async () => {
   const withEsbuild = (version, extra) => lockfile(oldPi, {
     [pi]: lockEntry(pi, '0.84.4', {dependencies: {undici: '8.9.0', esbuild: '^0.28.0'}}), undici: lockEntry('undici', '8.9.0'), esbuild: lockEntry('esbuild', version, extra),
