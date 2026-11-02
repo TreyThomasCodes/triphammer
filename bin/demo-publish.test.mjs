@@ -258,6 +258,15 @@ test('the gallery is the Triphammer config\'s DEMO_GALLERY_DIR, wherever that is
   assert.equal(existsSync(join(root, 'data')), false);
 });
 
+test("the gallery's title and heading name the Triphammer config's project", t => {
+  const root = mkdtempSync(join(tmpdir(), 'demo-publish-'));
+  t.after(() => rmSync(root, {recursive: true, force: true}));
+  const result = runIn(root, ['--reindex'], {TRIPHAMMER_PROJECT: 'example-project'});
+  assert.equal(result.status, 0, result.stderr);
+  const page = readFileSync(join(root, 'data', 'demos', 'index.html'), 'utf8');
+  assert.deepEqual(page.match(/<title>.*<\/title>|<h1>.*<\/h1>/g), ['<title>example-project demos</title>', '<h1>example-project demos</h1>']);
+});
+
 test('with the demo module off, or without its gallery or URL, it exits 2 naming the setting and writes nothing', t => {
   const root = mkdtempSync(join(tmpdir(), 'demo-publish-'));
   t.after(() => rmSync(root, {recursive: true, force: true}));
