@@ -173,6 +173,13 @@ test('a Chromium that does not start headless is reported, the newest revision c
   assert.equal(r.doctor().status, 0);
 });
 
+test('a Chromium revision\'s directory without its browser, an install cut short, is reported as not installed', t => {
+  const r = doctorSetup(t);
+  rmSync(r.browsers, {recursive: true});
+  mkdirSync(join(r.browsers, 'chromium-1243'), {recursive: true});
+  assertOneProblem(r.doctor(), /^Playwright's Chromium is not installed in .*ms-playwright\. Fix: run triphammer update, which installs it on a machine of its own; elsewhere run npx playwright install chromium/);
+});
+
 test('with or without the codex module, a bwrap that cannot create a user namespace, or none, is reported', t => {
   for (const config of [{}, {MODULES: 'codex'}]) {
     const r = doctorSetup(t, {config});
@@ -202,6 +209,29 @@ test('rollForward disable takes the pinned SDK only, and latestFeature a later f
   const feature = doctorSetup(t, {rollForward: 'latestFeature'});
   feature.answers('dotnet', {'--list-sdks': {stdout: '10.0.500 [/sdk]\n'}});
   assert.equal(feature.doctor().status, 0);
+});
+
+test('a prerelease pin provision-project installs is checked as its rollForward says, with allowPrerelease', t => {
+  const r = doctorSetup(t);
+  const pin = '10.0.100-preview.1.25120.13';
+  // pinned(<rollForward>, <allowPrerelease>, <SDKs dotnet lists>): the doctor's result for that global.json and SDKs.
+  const pinned = (rollForward, allowPrerelease, sdks) => {
+    writeFileSync(join(r.checkout, 'global.json'), JSON.stringify({sdk: {version: pin, rollForward, allowPrerelease}}));
+    git(r.checkout, 'commit', '-qam', `global.json ${rollForward} ${allowPrerelease}`, '--allow-empty');
+    git(r.checkout, 'push', '-q', 'origin', 'main');
+    r.answers('dotnet', {'--list-sdks': {stdout: sdks.map(sdk => `${sdk} [/sdk]\n`).join('')}});
+    return r.doctor();
+  };
+  const result = pinned('disable', true, ['10.0.402', pin]);
+  assert.equal(result.status, 0, result.output);
+  const problem = new RegExp(`^no \\.NET SDK matches ${pin.replaceAll('.', '\\.')} \\(rollForward disable\\)`);
+  assertOneProblem(pinned('disable', true, ['10.0.402', '10.0.100-preview.1.25119.1', '10.0.100']), problem);
+  assertOneProblem(pinned('disable', false, [pin]), problem);
+  // latestPatch: a later prerelease of the band with allowPrerelease, and the band's release (which follows its
+  // prereleases) with or without it; an earlier prerelease never.
+  assert.equal(pinned('latestPatch', true, ['10.0.100-preview.2.25150.1']).status, 0);
+  assert.equal(pinned('latestPatch', false, ['10.0.100']).status, 0);
+  assertOneProblem(pinned('latestPatch', true, ['10.0.100-preview.1.25119.1', '10.0.200']), /^no \.NET SDK matches .*\(rollForward latestPatch\)/);
 });
 
 test('a Node outside package.json\'s engines is reported', t => {
@@ -645,6 +675,19 @@ test('a user without a git commit identity is reported, name and email each, and
   assert.match(result.problems[0], /Fix: set it with git config --global user\.name, as triphammer add does from APP_AUTHOR/);
   writeFileSync(join(r.root, 'only-name'), '[user]\n\tname = someone\n');
   assertOneProblem(r.doctor({GIT_CONFIG_GLOBAL: join(r.root, 'only-name')}), /^git has no user\.email /);
+});
+
+test('a commit identity only in the checkout\'s own config is reported, as a run\'s clone does not see it, and the system config counts', t => {
+  const r = doctorSetup(t);
+  git(r.checkout, 'config', 'user.name', 'identity-name-7e2a');
+  git(r.checkout, 'config', 'user.email', 'identity-email-7e2a@example.invalid');
+  const result = r.doctor({GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null'});
+  assert.equal(result.status, 1, result.output);
+  assert.deepEqual(result.problems.map(line => line.replace(/\. Fix: .*/, '')),
+    ['git has no user.name for this user, so it may refuse to commit', 'git has no user.email for this user, so it may refuse to commit']);
+  writeFileSync(join(r.root, 'system-gitconfig'), '[user]\n\tname = identity-name-7e2a\n\temail = identity-email-7e2a@example.invalid\n');
+  const system = r.doctor({GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: join(r.root, 'system-gitconfig')});
+  assert.equal(system.status, 0, system.output);
 });
 
 test('a checkout off main, with changes, or not at origin/main is reported', t => {
