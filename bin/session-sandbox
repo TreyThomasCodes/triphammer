@@ -108,11 +108,11 @@
 # whose user bus and runtime unit directories let it start a unit or a transient unit as that user that runs until
 # the machine reboots; its socket's directory /var/lib/<user>-docker-<project>, where a socket of its own in the place
 # of the daemon's answers the project's later sessions until the daemon restarts; and whatever on the machine is
-# world-writable), and the containers, images, volumes, networks and
-# build cache of the project's other sessions, which share that daemon; what the command starts or leaves on that
-# daemon (a container run detached or with a restart policy, an image, such as one re-tagged under a name a later
-# session runs or builds from, a volume) outlives the session, a container running on through later sessions and
-# reboots, and is there for the project's later sessions; a Docker daemon reached some other way than the sockets above
+# world-writable); what the command starts or leaves on that daemon (a container run detached or with a restart
+# policy, an image, such as one re-tagged under a name a later session runs or builds from, a volume), which
+# ticket-runner's daemon sweep (sweep_daemon) removes before and after each session and after each teardown, but
+# which outlasts a session when the runner is stopped or that sweep fails, a container running on through reboots too,
+# until the next sweep; a Docker daemon reached some other way than the sockets above
 # (a socket the machine file does not name when the command starts, such as the daemon of a project set up while it
 # runs, a Docker context, TCP), a DOCKER_HOST socket whose directory is deleted and made again while the command runs,
 # or one directly in /; and abstract Unix sockets, services listening on the

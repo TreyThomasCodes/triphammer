@@ -238,8 +238,8 @@ so it cannot hold the others back. `ticket-runner --plan` reads none of this and
 Each project that declares `"docker": true` has a rootless Docker daemon of its own (On a machine of its own, The
 rootless Docker daemon), so no session of one project reaches another's containers, images, volumes, networks or build
 cache; the sessions of one project share its daemon, one at a time, and the runner sweeps it clean right before each
-session starts and right after it ends, so no session finds the containers, images, volumes, networks, build cache,
-plugins or swarm an earlier one left there (Run clones and databases nothing uses); what an earlier one wrote to the
+session starts, right after it ends and after each run clone's teardown, so no session finds the containers, images,
+volumes, networks, build cache, plugins or swarm an earlier one or a teardown left there (Run clones and databases nothing uses); what an earlier one wrote to the
 daemon user's home stays (The write limit, Not covered). Each tick's database sweep prunes the Compose projects its
 `composeProjectPattern` matches whose run directory is gone, and asks only the project's own daemon, so it never
 prunes another project's containers; `triphammer doctor` still reports two projects whose patterns can match the same
@@ -431,10 +431,10 @@ tmpfs, whose user bus and runtime unit directories let a container start a unit 
 runs until the machine reboots, the socket's directory `/var/lib/<user>-docker-<project>`, where a socket of its own
 in the place of the daemon's answers the project's later sessions until the daemon restarts, and whatever on the
 machine is world-writable); what
-a session leaves on the daemon (a container run detached or with a restart policy, an image, such as one re-tagged
-under a name a later session runs or builds from, a volume, a network, the build cache) when the runner is stopped
-during the session or its sweep after the session fails (Run clones and databases nothing uses), which lasts, a
-container running on through reboots too, until the next session's sweep; a Docker daemon a session reaches
+a session or its clone's teardown leaves on the daemon (a container run detached or with a restart policy, an image,
+such as one re-tagged under a name a later session runs or builds from, a volume, a network, the build cache) when the
+runner is stopped during the session or the teardown, or the sweep after either fails (Run clones and databases
+nothing uses), which lasts, a container running on through reboots too, until the next sweep; a Docker daemon a session reaches
 some other way than the sockets above (a socket the machine file does not name when the session starts, such as the
 daemon of a project `provision-project` sets up while the session runs, a Docker context, TCP), or, for a
 project that does not declare Docker, a `DOCKER_HOST` socket whose directory is deleted and made again during the
@@ -563,7 +563,11 @@ tick or a killed gate run never stops them. So:
   first word as an executable file. Since that is the clone's copy, which the session could edit, it runs through
   `session-sandbox <run's clone>`, under the write limit the session ran under; in a git worktree, which the limit
   refuses, it runs nothing and fails. The runner logs `tore down <clone>: <its last line of output>` when it printed anything
-  (`teardown failed in <clone>: ...` when it failed). It then deletes the directory, or removes it with `git worktree
+  (`teardown failed in <clone>: ...` when it failed). The teardown reaches the project's rootless daemon as the session
+  did, so, whatever its outcome, the runner then sweeps that daemon clean as it does after a session (below), logging
+  `swept the project's Docker daemon after the teardown in <clone>: ...`, or `could not sweep the project's Docker
+  daemon after the teardown in <clone>: ...` and going on. That sweep runs under the project's lock, as every teardown
+  does, so no session of the project is running. It then deletes the directory, or removes it with `git worktree
   remove --force` when it is a git worktree. It removes only a directory `<checkout>/.worktrees/issue-N` or `pr-N`,
   never a symlink there or one for `.worktrees` itself, so nothing outside `<checkout>/.worktrees` goes.
 - Each tick, after the self-update and before it decides anything, it removes the run directories in
@@ -599,7 +603,9 @@ tick or a killed gate run never stops them. So:
   docker command that failed and its last line, or how many containers are still on the daemon>`, starts no session and does not count the run. One that fails after
   the session logs `<action>: could not sweep the project's Docker daemon after the session: ...` and the run goes on;
   the next session's sweep removes what it left. A run's database is therefore gone once its session ends, even when
-  the run keeps its clone for the next one, and the clone's teardown runs on the swept daemon.
+  the run keeps its clone for the next one, and the clone's teardown runs on the swept daemon, which is swept again
+  after it (above). Since the database sweep runs after the run directories are removed, it finds nothing on the
+  daemon once a teardown and the sweep after it ran in that tick.
 
 `ticket-runner --prune-dry-run` prints `would remove run directory ...` and `would prune database ...` lines for what the
 sweep would remove and exits. It takes no lock, ignores the brakes, writes no state or log, and only reads from `gh`,
