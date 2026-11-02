@@ -252,6 +252,64 @@ test('a commit -F file is read from the directory git -C names', t => {
   assertRefused(bash(s, 'git -C sub commit -F message.txt'), 'DASH');
 });
 
+// A clean body in sub/ and, in the hook's cwd, one that breaks DASH, FOOTER and CLOSES.
+function twoBodies(t) {
+  const s = humanized(t);
+  mkdirSync(join(s.cwd, 'sub'));
+  writeFileSync(join(s.cwd, 'sub', 'body.md'), `${GOOD.replace('#547', '#5')}\n`);
+  writeFileSync(join(s.cwd, 'body.md'), 'Adds x — y.\n\n🤖 Generated with Claude Code\n');
+  return s;
+}
+
+test('a relative --body-file is read from the directory a cd in the same command moved to', t => {
+  const s = twoBodies(t);
+  const create = 'gh pr create -t "Add a thing" --body-file body.md';
+  for (const command of [`cd sub && ${create}`, `cd sub; ${create}`, `cd ${join(s.cwd, 'sub')} && ${create}`,
+    `cd -- sub && ${create}`, `(cd sub && ${create})`, `cd sub && ${create} | cat`]) {
+    assert.equal(bash(s, command), null, command);
+  }
+  for (const command of [`(cd sub) && ${create}`, `(cd sub; true); ${create}`, `cd sub | cat; ${create}`,
+    `cd sub & ${create}`, `echo $(cd sub) && ${create}`, `cd sub && cd .. && ${create}`]) {
+    const reason = bash(s, command);
+    for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  }
+  writeFileSync(join(s.cwd, 'sub', 'message.txt'), 'Add x\n\nPreviously — broken\n');
+  assertRefused(bash(s, 'cd sub && git commit -F message.txt'), 'DASH');
+  rmSync(join(s.cwd, 'body.md'));
+  assert.equal(bash(s, `cd sub && ${create}`), null);
+});
+
+test('a cd that may not run, or to a missing directory, leaves the file judged where bash may read it', t => {
+  const s = twoBodies(t);
+  const create = 'gh pr create -t "Add a thing" --body-file body.md';
+  for (const command of [`[ -d nope ] && cd sub; ${create}`, `false && cd sub; ${create}`,
+    `if false; then cd sub; fi; ${create}`, `f() { cd sub; }; ${create}`, `while false; do cd sub; done; ${create}`,
+    `cd nope; ${create}`, `false && cd sub && cd .; ${create}`, `{ cd sub; } & ${create}`,
+    `{ cd sub; } | cat; ${create}`]) {
+    const reason = bash(s, command);
+    for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  }
+  assert.equal(bash(s, `{ cd sub; ${create}; }`), null);
+  rmSync(join(s.cwd, 'body.md'));
+  assert.equal(bash(s, `[ -d sub ] && cd sub; ${create}`), null);
+  assert.match(bash(s, `cd nope; ${create}`) ?? '', /BODY FILE body.md does not exist/);
+});
+
+test('after a cd it cannot follow, a relative --body-file is not judged, as agent-guard does', t => {
+  const s = twoBodies(t);
+  const create = 'gh pr create -t "Add a thing" --body-file body.md';
+  for (const command of [`cd "$X" && ${create}`, `cd && ${create}`, `cd - && ${create}`, `cd -P sub && ${create}`,
+    `pushd sub && ${create}`, `popd && ${create}`, `cd sub || exit 1; ${create}`, `cd "$X" && git commit -F message.txt`,
+    `cd "$X" && gh pr create -t "Add a thing" --body-file missing.md`]) {
+    assert.equal(bash(s, command), null, command);
+  }
+  assertRefused(bash(s, `cd "$X" && gh pr create -t "Previously x" --body-file body.md`), 'FEATURE FRAMED');
+  const reason = bash(s, `cd "$X" && gh pr create -t "Add a thing" --body-file ${join(s.cwd, 'body.md')}`);
+  for (const rule of ['DASH', 'FOOTER', 'CLOSES']) assertRefused(reason, rule);
+  const unhumanized = scratch(t);
+  assert.match(bash(unhumanized, `cd "$X" && ${create}`), /HUMANIZER/);
+});
+
 test('commands that post no text are allowed', t => {
   const s = scratch(t);
   for (const command of ['gh pr create --help', 'gh pr create -h', 'gh --help pr create', 'gh pr new --help',
