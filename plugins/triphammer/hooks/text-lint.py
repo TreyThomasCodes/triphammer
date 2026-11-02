@@ -343,8 +343,8 @@ def lint(cmd, cwd, session_id):
     file may be read from more than one directory is checked in each, and refused as missing only when it is missing
     from every one."""
     for tool, kind, verb, options, heredoc, directories in posting_commands(cmd, cwd):
-        missing = []
-        for directory in directories or (None,):
+        candidates, missing = directories or (None,), []
+        for directory in candidates:
             try:
                 result = lint_command(tool, kind, verb, options, heredoc, directory, session_id)
             except Refused as refusal:
@@ -352,7 +352,7 @@ def lint(cmd, cwd, session_id):
                 continue
             if result:
                 return result
-        if len(missing) == len(directories or (None,)):
+        if len(missing) == len(candidates):
             raise missing[0]
     return None
 
