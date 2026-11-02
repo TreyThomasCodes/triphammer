@@ -134,7 +134,8 @@ const harmlessFields = new Set(['license', 'engines', 'funding', 'deprecated', '
 // least minimumReleaseAgeDays old, returns no problems. Anything else (a new direct dependency, a script, a git or file
 // source, a new install script, an alias, an unreadable file or registry) is a problem, so the change escalates.
 // The lockfile is written by the pull request, so each new or changed entry is checked against the registry's record of
-// that release (integrity, dependencies, install scripts), and a package new to the tree must be a dependency of one.
+// that release (integrity, dependencies both ways, install scripts), a package new to the tree must be a dependency of
+// one, and an entry the head drops escalates.
 // NuGet updates are not judged this way: without a NuGet lockfile, transitive packages and new build targets go unchecked.
 // manifest: whether the path is a package.json (otherwise a package-lock.json).
 // source: {base(path), head(path), release(name, version) -> registry record | undefined, now: Date}
@@ -169,6 +170,9 @@ async function dependencyUpdateProblems(path, manifest, source) {
     const trustedScripts = new Set(Object.entries(beforePackages).filter(([, entry]) => entry.hasInstallScript).map(([key]) => packageName(key)));
     const knownNames = new Set(Object.keys(beforePackages).map(packageName));
     const dependedOn = new Set(Object.values(afterPackages).flatMap(entry => Object.keys(entryDependencies(entry))));
+    for (const key of Object.keys(beforePackages)) {
+      if (key !== '' && !Object.hasOwn(afterPackages, key)) problems.push(`drops ${key} from the lockfile`);
+    }
     for (const [key, entry] of Object.entries(afterPackages)) {
       if (key === '' || isDeepStrictEqual(entry, beforePackages[key])) continue;
       const name = packageName(key);
@@ -202,9 +206,15 @@ async function dependencyUpdateProblems(path, manifest, source) {
     }
     if (entry.integrity !== release.integrity) problems.push(`${name} ${version} integrity does not match the registry`);
     const declared = release.dependencies ?? {};
-    for (const [dependency, range] of Object.entries(entryDependencies(entry))) {
+    const listed = entryDependencies(entry);
+    for (const [dependency, range] of Object.entries(listed)) {
       if (!Object.hasOwn(declared, dependency) || declared[dependency] !== range) {
         problems.push(`${name} ${version} lists ${dependency}@${range}, which the registry release does not`);
+      }
+    }
+    for (const [dependency, range] of Object.entries(declared)) {
+      if (!Object.hasOwn(listed, dependency)) {
+        problems.push(`${name} ${version} drops ${dependency}@${range}, which the registry release declares`);
       }
     }
     // npm links node_modules/.bin from the lockfile's bin field, so it must be the release's own.
