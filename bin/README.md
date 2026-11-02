@@ -831,7 +831,8 @@ listing each under a `Security review` heading in its pull request comment (the 
 that session ends with exit 0, `ticket-runner` appends the head's line to `security-followed-up` and counts the run as
 progress, whether or not it pushed; a failed, timed-out or braked session records nothing, so the head is repaired
 again under the usual three runs. A pushed fix is a new head, which gets its own review. Until the head is followed
-up, `merge-when-ready` neither merges nor updates the pull request. Only the scripts write the two records, and
+up, `merge-when-ready` neither merges nor updates the pull request; GitHub's auto-merge, once `land-pr` has armed
+it, does not read the record and is not held. Only the scripts write the two records, and
 the write limit keeps agents out of the state directory, so no comment can forge a follow-up.
 
 Nothing reads model text to decide a merge: merge-policy, `land-pr` and `merge-when-ready` never read the comment, and
