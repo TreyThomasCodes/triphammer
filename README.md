@@ -267,8 +267,9 @@ Modules are off unless a project's config lists them in `MODULES`, which `tripha
 - `qwen-audit` repeats the weekly audit with a local model behind an Anthropic Messages API server, for a second
   opinion.
 - `codex` adds Codex to the weekly audit, runs a monthly security audit and reviews the security of pull requests that
-  touch Triphammer's own code. If that review finds something, a repair session starts, and the reviewed commit doesn't
-  merge until that session's follow-up is recorded.
+  touch Triphammer's own code. If that review finds something, a repair session starts, and `merge-when-ready` neither
+  merges nor updates the reviewed commit until that session's follow-up is recorded. GitHub's auto-merge, once armed,
+  is not held by the record.
 
 `triphammer add` and `triphammer update` write the `codex` module's defaults into a project's config when they're
 missing:
